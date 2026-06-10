@@ -161,7 +161,7 @@ def _tls_context() -> ssl.SSLContext:
 async def main() -> None:
     async with JSONRPCServer({"truenas.vm.v1": protocol}, name=SERVICE,
                              tcp_config=TCPConfig(host=HOST, port=PORT,
-                                                  ssl=_tls_context())) as server:
+                                                  ssl=_tls_context())):
         print(f"{SERVICE}: PAM auth + privilege authz + syslog audit on {HOST}:{PORT}\n"
               f"  scram_service={SCRAM_SERVICE}  audit->{AUDIT_SOCKET}  (Ctrl-C to stop)")
         await asyncio.Event().wait()                  # the server drains the audit queue itself

@@ -1,7 +1,6 @@
 """End-to-end tests for truenas_pyjsonrpc_server, driven by a raw asyncio socket
 client over AF_UNIX (and TCP for the basics)."""
 import asyncio
-import contextlib
 import os
 import ssl
 import struct

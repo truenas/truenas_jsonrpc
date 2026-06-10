@@ -29,7 +29,9 @@ def test_accepts_is_required():
 
 
 def test_full_construction():
-    h = lambda request, session_state: request
+    def h(request, session_state):
+        return request
+
     m = JSONRPCMethod("m", accepts=Args, returns=Args, handler=h)
     assert m.accepts is Args and m.returns is Args and m.handler is h
 
@@ -56,7 +58,10 @@ def test_handler_must_be_callable():
 
 def test_handler_settable_after_construction():
     m = JSONRPCMethod("m", accepts=Args)
-    fn = lambda request, session_state: request
+
+    def fn(request, session_state):
+        return request
+
     m.handler = fn
     assert m.handler is fn
     m.handler = None

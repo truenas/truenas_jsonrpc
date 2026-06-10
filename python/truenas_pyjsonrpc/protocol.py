@@ -59,7 +59,7 @@ from .types import (
 )
 from .errors import JsonRpcError
 from .method import JSONRPCFdPassMethod, JSONRPCFdTransferMethod, JSONRPCMethod
-from .transfer import FileTransfer, Transfer, TransferDirection
+from .transfer import FileTransfer, Transfer
 
 _VERSION = "2.0"
 _EMPTY = Raw(b"{}")

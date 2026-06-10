@@ -21,7 +21,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
-from .scram import SCRAM_AVAILABLE
 from .stack import Authenticated, AuthStack, Reject, ScramChallenge
 
 try:

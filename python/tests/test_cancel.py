@@ -4,7 +4,6 @@ import threading
 import uuid
 
 import msgspec
-import pytest
 
 from truenas_pyjsonrpc import (
     AuthorizationResponse,

@@ -76,7 +76,7 @@ def _tls_context() -> ssl.SSLContext:
 async def main() -> None:
     async with JSONRPCServer(
             {"truenas.example.v1": protocol}, name="truenas-scram-demo",
-            tcp_config=TCPConfig(host=HOST, port=PORT, ssl=_tls_context())) as server:
+            tcp_config=TCPConfig(host=HOST, port=PORT, ssl=_tls_context())):
         print(f"SCRAM-only JSON-RPC over TLS on {HOST}:{PORT} "
               f"(service={SCRAM_SERVICE}, Ctrl-C to stop)")
         await asyncio.Event().wait()                  # run until interrupted

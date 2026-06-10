@@ -22,7 +22,6 @@ Override with ``protocol_name=`` / ``--protocol-name`` if they differ.
 from __future__ import annotations
 
 import re
-from typing import Any
 
 import msgspec
 
