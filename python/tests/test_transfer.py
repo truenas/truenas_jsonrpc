@@ -310,3 +310,18 @@ def test_ktls_transfer_encrypted():
         c.close()
     finally:
         srv.stop()
+
+
+def test_confirm_ktls_engaged_rejects_non_ktls_socket():
+    """The kTLS guard must fail closed: a plain socket has no kernel-TLS crypto installed, so
+    confirm_ktls_engaged raises rather than letting a caller detach it and put plaintext on the
+    wire. This is the silent-fallback case OP_ENABLE_KTLS would otherwise allow."""
+    import socket
+
+    from truenas_pyjsonrpc_server._ktls import confirm_ktls_engaged
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        with pytest.raises(OSError, match="kTLS did not engage"):
+            confirm_ktls_engaged(s)
+    finally:
+        s.close()

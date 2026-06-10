@@ -59,6 +59,25 @@ class ClientError(Exception):
     :class:`~truenas_pyjsonrpc.JsonRpcError`)."""
 
 
+# Linux kTLS confirmation probe — see truenas_pyjsonrpc_server._ktls.confirm_ktls_engaged.
+# OP_ENABLE_KTLS is best-effort and ``ssl`` exposes no status query, so confirm kTLS attached
+# by asking the kernel. SOL_TLS=282 (linux/socket.h), TLS_TX=1 / TLS_RX=2 (uapi/linux/tls.h);
+# a 4-byte buffer is sizeof(struct tls_crypto_info).
+_SOL_TLS, _TLS_TX, _TLS_RX, _TLS_CRYPTO_INFO_SIZE = 282, 1, 2, 4
+
+
+def _confirm_ktls_engaged(sock: socket.socket) -> None:
+    """Raise ``OSError`` unless kernel TLS crypto is installed for both TX and RX on ``sock``;
+    a detached fd whose kTLS didn't engage would leak plaintext (TX) / read ciphertext (RX)."""
+    for direction, label in ((_TLS_TX, "TX"), (_TLS_RX, "RX")):
+        try:
+            sock.getsockopt(_SOL_TLS, direction, _TLS_CRYPTO_INFO_SIZE)
+        except OSError as e:
+            raise OSError(
+                f"kTLS did not engage for {label}; refusing to fall back to userspace TLS "
+                "(is the kernel 'tls' module loaded and OpenSSL built with kTLS?)") from e
+
+
 def _ktls_connect(ctx: ssl.SSLContext, host: str, port: int,
                   server_hostname: str | None) -> tuple[int, int]:
     """Blocking connect + TLS handshake with kTLS; returns ``(plaintext_fd, family)``
@@ -72,6 +91,7 @@ def _ktls_connect(ctx: ssl.SSLContext, host: str, port: int,
         name = (cipher[0] if cipher else "") or ""
         if "GCM" not in name and "CHACHA20" not in name:
             raise OSError(f"kTLS requires an AES-GCM/ChaCha20 cipher; got {name!r}")
+        _confirm_ktls_engaged(ss)     # positively confirm kTLS attached, both directions
     except BaseException:
         ss.close()
         raise
@@ -386,9 +406,13 @@ class BaseClient:
                 reader, writer = await asyncio.open_connection(
                     sock=plain, limit=_MAX_FRAME)
             else:
+                # `server_hostname` is only valid with TLS; coalesce a falsy value (e.g.
+                # an explicit "") to the connect host so it can't silently disable
+                # certificate hostname verification (mirrors the kTLS path above).
+                sni = (tcfg.server_hostname or tcfg.host) if ctx is not None else None
                 reader, writer = await asyncio.open_connection(
                     tcfg.host, tcfg.port, limit=_MAX_FRAME, ssl=ctx,
-                    server_hostname=tcfg.server_hostname)
+                    server_hostname=sni)
             self._channel = StreamClientChannel(reader, writer, _MAX_FRAME)
         else:
             assert self._unix_config is not None
@@ -414,7 +438,7 @@ class BaseClient:
             "ping_timeout": cfg.ping_timeout, "compression": cfg.compression}
         if cfg.ssl is not None:
             kwargs["ssl"] = cfg.ssl
-            if cfg.server_hostname is not None:
+            if cfg.server_hostname:        # falsy (e.g. "") -> let the library use the URI host
                 kwargs["server_hostname"] = cfg.server_hostname
         kwargs.update(cfg.extra_options or {})
         ws = await ws_connect(uri, **kwargs)

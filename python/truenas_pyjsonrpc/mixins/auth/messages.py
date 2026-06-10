@@ -24,11 +24,12 @@ from truenas_pyjsonrpc import SECRET
 class Scram(Struct, tag_field="mechanism", tag="SCRAM"):
     """A SCRAM (RFC 5802) message — the client-first (``CLIENT_FIRST_MESSAGE``, to
     ``$/sessionSetup``) or client-final (``CLIENT_FINAL_MESSAGE``, to
-    ``$/sessionSetupContinue``). ``rfc_str`` is the raw SCRAM message; **no secret travels
-    on the wire** (the proof is a one-time, nonce-bound challenge response), so SCRAM is
-    safe even over an unencrypted channel."""
+    ``$/sessionSetupContinue``). ``rfc_str`` is the raw SCRAM message; **no replayable
+    secret travels on the wire** (the proof is a one-time, nonce-bound challenge response),
+    so SCRAM is safe even over an unencrypted channel. The field is nonetheless
+    ``SECRET``-marked so the one-time client proof isn't retained in the audit trail."""
     scram_type: Literal["CLIENT_FIRST_MESSAGE", "CLIENT_FINAL_MESSAGE"]
-    rfc_str: str
+    rfc_str: Annotated[str, SECRET]
 
 
 class Gssapi(Struct, tag_field="mechanism", tag="GSSAPI"):
@@ -96,9 +97,10 @@ class ScramResponse(Struct, tag_field="response_type", tag="SCRAM_RESPONSE"):
     check). On the final message, ``otp_required=True`` means the SCRAM proof was accepted
     but a second factor is still needed — the session stays ``INIT`` and the client
     continues with an ``OTP_TOKEN``; otherwise the session is ``ESTABLISHED``. ``rfc_str``
-    is the raw SCRAM message."""
+    is the raw SCRAM message (``SECRET``-marked so the server signature isn't retained in
+    the audit trail)."""
     scram_type: Literal["SERVER_FIRST_RESPONSE", "SERVER_FINAL_RESPONSE"]
-    rfc_str: str
+    rfc_str: Annotated[str, SECRET]
     user_info: dict[str, Any] | None = None
     otp_required: bool = False
 

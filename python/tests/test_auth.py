@@ -363,6 +363,27 @@ def test_secrets_redacted_in_audit():
     assert mech["otp_token"] == REDACTED          # secret, redacted (nested in the union)
 
 
+def test_scram_transcript_redacted_in_audit():
+    # rfc_str carries the SCRAM client proof (p=) / server signature (v=); it is SECRET-marked
+    # so the audit trail never retains the auth transcript. Drive the redaction the same way
+    # the audit pipeline does (compile_plan on accepts/returns) so this runs without the
+    # optional truenas_pyscram extension and guards the annotation against regressions.
+    from truenas_pyjsonrpc.mixins.auth.messages import (
+        AuthResult, ContinueArgs, Scram, ScramResponse, SetupArgs)
+    from truenas_pyjsonrpc.redaction import compile_plan, redact
+
+    first = SetupArgs(mechanism=Scram(
+        scram_type="CLIENT_FIRST_MESSAGE", rfc_str="n,,n=scott,r=clientnonce"))
+    final = ContinueArgs(mechanism=Scram(
+        scram_type="CLIENT_FINAL_MESSAGE", rfc_str="c=biws,r=nonce,p=Q2xpZW50UHJvb2Y="))
+    result = AuthResult(response=ScramResponse(
+        scram_type="SERVER_FINAL_RESPONSE", rfc_str="v=U2VydmVyU2ln"))
+
+    assert redact(first, compile_plan(SetupArgs))["mechanism"]["rfc_str"] == REDACTED
+    assert redact(final, compile_plan(ContinueArgs))["mechanism"]["rfc_str"] == REDACTED
+    assert redact(result, compile_plan(AuthResult))["response"]["rfc_str"] == REDACTED
+
+
 # --- end-to-end over a real AF_UNIX connection -------------------------------
 def test_e2e_peercred_over_unix():
     path = _tmp_sock()
