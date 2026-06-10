@@ -26,11 +26,12 @@ from .stack import Authenticated, AuthStack, Reject, ScramChallenge
 
 try:
     import truenas_pypam
-    from truenas_authenticator import UserPamAuthenticator  # type: ignore[import-untyped]
+    from truenas_authenticator import UserPamAuthenticator
     PAM_AVAILABLE = True
 except ImportError:                              # optional dep — see module docstring
     truenas_pypam = None                         # type: ignore[assignment]
-    UserPamAuthenticator = None
+    # the fallback rebinds the (generic) class name to None for the not-installed case
+    UserPamAuthenticator = None                  # type: ignore[assignment,misc]
     PAM_AVAILABLE = False
 
 try:
