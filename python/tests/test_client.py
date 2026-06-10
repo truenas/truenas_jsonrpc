@@ -133,7 +133,11 @@ def test_multithreaded_calls_correlate():
         def worker(n):
             for i in range(20):
                 tag = f"{n}-{i}"
-                r = c.call("echo", {"msg": tag})
+                try:
+                    r = c.call("echo", {"msg": tag})
+                except Exception as e:               # a raised call (timeout / mis-routed future)
+                    errors.append((tag, e))          # must surface, not die silently in the thread
+                    return
                 if r != {"msg": tag}:
                     errors.append((tag, r))
 

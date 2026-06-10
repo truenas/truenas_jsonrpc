@@ -97,14 +97,19 @@ def test_accepts_validator_returning_none_keeps_params():
 
 
 def test_accepts_validator_error_on_notification_is_swallowed():
+    called = []
+
     def validator(params):
         raise ValueError("bad")
 
+    def handler(request, session_state, request_state):
+        called.append(1)
+        return None
+
     p = JSONRPCProtocol([JSONRPCMethod(
-        "m", accepts=Args,
-        handler=lambda request, session_state, request_state: None,
-        accepts_validator=validator)])
+        "m", accepts=Args, handler=handler, accepts_validator=validator)])
     assert p.dispatch(req("m", {"name": "x"})) is None   # no id -> no reply
+    assert called == []                                  # validator error skipped the handler
 
 
 # --- returns_validator --------------------------------------------------------

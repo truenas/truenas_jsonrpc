@@ -313,8 +313,16 @@ def test_real_stream_socket_emit(tmp_path):
 def test_dev_log_smoke():
     h = SyslogAuditHandler(service="pytest_audit", address="/dev/log",
                            socktype=socket.SOCK_DGRAM)
-    try:                                                          # just assert it doesn't raise
-        h(request=JSONRPCRequest(method="m", id="1", params=None), response={"result": None},
-          session_state=_ss({"username": "x"}), audit_message=None)
+    request = JSONRPCRequest(method="m", id="1", params=None)
+    session_state = _ss({"username": "x"})
+    try:
+        # __call__ swallows every exception (auditing must never break drain), so calling it
+        # can't fail the test on its own — assert the record it *would* emit is well-formed,
+        # then exercise the real /dev/log write (fire-and-forget DGRAM, nothing to read back).
+        rec = parse(h._formatter.format(request, {"result": None}, session_state))
+        assert rec["svc"] == "pytest_audit" and rec["user"] == "x"
+        assert rec["event"] == "METHOD_CALL" and rec["success"] is True
+        h(request=request, response={"result": None},
+          session_state=session_state, audit_message=None)
     finally:
         h.close()
