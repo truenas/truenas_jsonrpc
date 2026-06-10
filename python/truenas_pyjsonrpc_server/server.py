@@ -40,6 +40,13 @@ class JSONRPCServer:
     :class:`~truenas_pyjsonrpc_server.WebSocketConfig` (``websocket_config``); several
     may be combined.
 
+    **A network-facing transport (TCP or WebSocket) requires authentication:** every
+    protocol it exposes must configure ``$/sessionSetup`` via
+    :meth:`~truenas_pyjsonrpc.JSONRPCProtocol.add_session_setup`, or construction raises
+    ``ValueError``. Without it the dispatch gate is open and unauthenticated remote
+    clients could call any method. AF_UNIX is exempt — it relies on local
+    peer-credential / filesystem trust and may serve an unauthenticated protocol.
+
     TLS is configured per transport (the ``ssl`` field of ``TCPConfig`` /
     ``WebSocketConfig``); the negotiated cipher and, for mutual TLS, the client
     certificate are stamped onto the connection's
@@ -61,6 +68,22 @@ class JSONRPCServer:
             raise ValueError("configure at least one transport: "
                              "unix_config, tcp_config, and/or websocket_config")
         self._protocols: dict[str, JSONRPCProtocol] = dict(protocols)
+        # A network-facing transport (TCP/WebSocket) must authenticate: every
+        # protocol it exposes needs $/sessionSetup, or unauthenticated remote clients
+        # could call its methods (the dispatch gate is open with no setup configured).
+        # AF_UNIX is exempt — it relies on local peer-credential / filesystem trust.
+        network = [n for n, c in (("tcp_config", tcp_config),
+                                  ("websocket_config", websocket_config)) if c]
+        if network:
+            unauthenticated = sorted(n for n, p in self._protocols.items()
+                                     if not p.has_session_setup)
+            if unauthenticated:
+                raise ValueError(
+                    f"{' and '.join(network)} expose protocol(s) "
+                    f"{', '.join(unauthenticated)} with no authentication: call "
+                    "add_session_setup(...) to configure $/sessionSetup. A network "
+                    "transport may not surface an unauthenticated protocol (use "
+                    "unix_config for local, peer-credential-trusted access).")
         self._name = name
         self._unix_config = unix_config
         self._tcp_config = tcp_config

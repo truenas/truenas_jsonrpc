@@ -26,6 +26,10 @@ class TransferTarget:
     transport: asyncio.Transport
     fileno: int
 
+    def __post_init__(self) -> None:
+        if self.fileno < 0:
+            raise ValueError("transfer target socket is closed (fileno < 0)")
+
 
 class ClientChannel(abc.ABC):
     """One JSON-RPC message in, one out — framing and socket details hidden."""

@@ -72,6 +72,14 @@ def _login(request, session_state):
     return SessionLifecycle.ESTABLISHED, LoginResult(user="root")
 
 
+def _auth_setup() -> JSONRPCMethod:
+    """A minimal ``$/sessionSetup`` (token ``"ok"`` -> ESTABLISHED). A network transport
+    requires authentication, so test protocols served over TCP/WS add this; their methods
+    are marked ``pre_auth`` so the (unauthenticated) tests still drive them."""
+    return JSONRPCMethod("$/sessionSetup", accepts=Creds, returns=LoginResult,
+                         handler=_login)
+
+
 def _build() -> JSONRPCProtocol:
     p = JSONRPCProtocol([
         JSONRPCMethod("echo", accepts=EchoArgs, returns=Result, handler=_echo),
@@ -311,11 +319,16 @@ def _whoami(request, session_state, request_state) -> PeerProbe:
 
 
 def _build_peer_probe() -> JSONRPCProtocol:
-    # No session setup -> no gate, so whoami runs right after $/negotiate and can
-    # report the Peer the server stamped onto the session.
-    return JSONRPCProtocol([
-        JSONRPCMethod("whoami", accepts=NoArgs, returns=PeerProbe, handler=_whoami),
+    # whoami is pre_auth so it runs right after $/negotiate (before the session is
+    # ESTABLISHED) and reports the Peer the server stamped onto the session. A session
+    # setup is configured because a network transport requires authentication; whoami
+    # bypasses the gate so it reads the seeded Peer, not the post-login identity.
+    p = JSONRPCProtocol([
+        JSONRPCMethod("whoami", accepts=NoArgs, returns=PeerProbe, handler=_whoami,
+                      pre_auth=True),
     ], name="v1")
+    p.add_session_setup(_auth_setup())
+    return p
 
 
 def _self_signed(directory: str) -> tuple[str, str]:
@@ -412,3 +425,19 @@ def test_tcp_plaintext_peer_is_not_tls():
 def test_requires_a_transport():
     with pytest.raises(ValueError, match="at least one transport"):
         JSONRPCServer({"v1": _build_peer_probe()}, name="test")
+
+
+def test_network_transport_requires_authentication():
+    # A protocol with no $/sessionSetup would dispatch to unauthenticated remote
+    # clients, so a TCP/WebSocket server must refuse to surface it.
+    bare = JSONRPCProtocol(
+        [JSONRPCMethod("whoami", accepts=NoArgs, returns=PeerProbe, handler=_whoami)],
+        name="v1")
+    with pytest.raises(ValueError, match="no authentication"):
+        JSONRPCServer({"v1": bare}, name="test",
+                      tcp_config=TCPConfig(host="127.0.0.1", port=0))
+    # AF_UNIX is exempt (local peer-credential / filesystem trust).
+    JSONRPCServer({"v1": bare}, name="test", unix_config=UnixConfig(path=_tmp_sock()))
+    # A protocol that configures authentication may be served over the network.
+    JSONRPCServer({"v1": _build_peer_probe()}, name="test",
+                  tcp_config=TCPConfig(host="127.0.0.1", port=0))

@@ -25,7 +25,7 @@ from truenas_pyjsonrpc_server import JSONRPCServer
 from truenas_pyjsonrpc_server import TCPConfig as SrvTCPConfig
 from truenas_pyjsonrpc_server import UnixConfig as SrvUnixConfig
 from test_client import _ServerThread
-from test_server import _self_signed
+from test_server import _auth_setup, _self_signed
 
 _HEADER = struct.Struct(">I")
 SIZE = 256 * 1024                                   # exercises multi-syscall sendfile/recv
@@ -87,16 +87,23 @@ def _echo(request, session_state, request_state):
 
 
 def _build() -> JSONRPCProtocol:
-    return JSONRPCProtocol([
-        JSONRPCMethod("echo", accepts=EchoArgs, returns=EchoResult, handler=_echo),
+    # pre_auth lets the (unauthenticated) tests drive these directly; the session setup
+    # is required so the protocol may be served over a network transport.
+    p = JSONRPCProtocol([
+        JSONRPCMethod("echo", accepts=EchoArgs, returns=EchoResult, handler=_echo,
+                      pre_auth=True),
         JSONRPCFdTransferMethod("file.download", accepts=DownloadArgs,
                                 returns=DownloadResult,
                                 direction=TransferDirection.DOWNLOAD,
-                                negotiate=_dl_negotiate, transfer=_dl_transfer),
+                                negotiate=_dl_negotiate, transfer=_dl_transfer,
+                                pre_auth=True),
         JSONRPCFdTransferMethod("file.upload", accepts=UploadArgs, returns=UploadResult,
                                 direction=TransferDirection.UPLOAD,
-                                negotiate=_ul_negotiate, transfer=_ul_transfer),
+                                negotiate=_ul_negotiate, transfer=_ul_transfer,
+                                pre_auth=True),
     ], name="v1")
+    p.add_session_setup(_auth_setup())
+    return p
 
 
 # --- wire helpers ------------------------------------------------------------

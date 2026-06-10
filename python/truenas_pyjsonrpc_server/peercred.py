@@ -9,7 +9,7 @@ from __future__ import annotations
 import socket
 import struct
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 
 @dataclass(slots=True, frozen=True)
@@ -24,7 +24,7 @@ class Peer:
     ``$/sessionSetup`` handler can authenticate by client cert. They are read from
     the asyncio *transport* (not the socket: asyncio does TLS in userspace via memory
     BIOs, so the OS socket carries no SSL state)."""
-    transport: str
+    transport: Literal["unix", "tcp"]
     uid: int | None = None
     gid: int | None = None
     pid: int | None = None

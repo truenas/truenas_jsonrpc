@@ -87,7 +87,7 @@ class _Pending:
     progress message correlates to (``None`` for a plain notification) — used to
     purge a completed request's pending messages; ``session`` is the routing target
     (the :class:`SessionState`) the drain thread delivers to."""
-    session: Any
+    session: SessionState
     request_id: str | None
     data: bytes
 
@@ -101,11 +101,11 @@ class Subscription:
     Passed to the ``authorization_handler`` as ``target=`` when a ``$/cancelRequest``
     targets a subscription (the session-scoped-cancel analog of a ``RequestState``)."""
     id: str
-    session_state: Any
+    session_state: SessionState
     params: Any
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True, frozen=True, kw_only=True)
 class _AuditJob:
     """A queued audit job (raw — redaction + message assembly are deferred to
     :meth:`poll_audit`). ``method`` supplies the redaction plans and the static
@@ -114,7 +114,7 @@ class _AuditJob:
     handler: Callable[..., Any]
     request: JSONRPCRequest
     response: dict[str, Any]
-    session_state: Any
+    session_state: SessionState
     method: "JSONRPCMethod | None"
     detail: str | None
 
@@ -380,6 +380,13 @@ class JSONRPCProtocol:
         self._session_setup = setup
         self._session_setup_continue = continue_
 
+    @property
+    def has_session_setup(self) -> bool:
+        """Whether :meth:`add_session_setup` has configured ``$/sessionSetup``
+        authentication. A network-facing server (TCP/WebSocket) requires this; an
+        AF_UNIX server may run unauthenticated (local peer-credential trust)."""
+        return self._session_setup is not None
+
     def register_authorization_handler(
             self, handler: Callable[..., Any] | None) -> None:
         """Register (or clear with ``None``) the authorization handler.
@@ -482,7 +489,8 @@ class JSONRPCProtocol:
         :class:`RequestState`."""
         if self._use_audit_queue:
             self._audit_queue.put(_AuditJob(
-                handler, request, response, session_state, method, detail))
+                handler=handler, request=request, response=response,
+                session_state=session_state, method=method, detail=detail))
         else:
             self._audit_record(handler, request, response, session_state,
                                method, detail).run()

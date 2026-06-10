@@ -23,7 +23,7 @@ from truenas_pyjsonrpc_client import BaseClient, ClientError, TCPConfig, UnixCon
 from truenas_pyjsonrpc_server import TCPConfig as SrvTCPConfig
 from truenas_pyjsonrpc_server import UnixConfig as SrvUnixConfig
 from test_client import _ServerThread
-from test_server import _tmp_sock
+from test_server import _auth_setup, _tmp_sock
 
 
 def _content(i: int) -> bytes:
@@ -154,15 +154,22 @@ def _put_transfer(ft) -> PutResult:              # UPLOAD: server receives + rea
 
 
 def _build() -> JSONRPCProtocol:
-    return JSONRPCProtocol([
-        JSONRPCMethod("echo", accepts=EchoArgs, returns=EchoResult, handler=_echo),
+    # pre_auth lets the (unauthenticated) tests drive these directly; the session setup
+    # is required so the protocol may be served over a network transport.
+    p = JSONRPCProtocol([
+        JSONRPCMethod("echo", accepts=EchoArgs, returns=EchoResult, handler=_echo,
+                      pre_auth=True),
         JSONRPCFdPassMethod("fs.get_fds", accepts=GetArgs, returns=GetResult,
                             direction=TransferDirection.DOWNLOAD,
-                            negotiate=_get_negotiate, transfer=_get_transfer),
+                            negotiate=_get_negotiate, transfer=_get_transfer,
+                            pre_auth=True),
         JSONRPCFdPassMethod("fs.put_fds", accepts=PutArgs, returns=PutResult,
                             direction=TransferDirection.UPLOAD,
-                            negotiate=_put_negotiate, transfer=_put_transfer),
+                            negotiate=_put_negotiate, transfer=_put_transfer,
+                            pre_auth=True),
     ], name="v1")
+    p.add_session_setup(_auth_setup())
+    return p
 
 
 def test_recv_fds_download_roundtrip():

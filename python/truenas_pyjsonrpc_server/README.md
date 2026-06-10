@@ -210,7 +210,14 @@ enforcement remain the application's, by design.)
 Authentication is configured **on the protocol** with `add_session_setup(...)` and
 runs as the `$/sessionSetup` (+ optional `$/sessionSetupContinue`) control requests.
 Once configured, the protocol **gates** every non-`pre_auth` method: a call before the
-session is `ESTABLISHED` is rejected with `SESSION_NOT_ESTABLISHED` (-32002).
+session is `ESTABLISHED` is rejected with `SESSION_NOT_ESTABLISHED` (-32002). With **no**
+session setup configured the gate is open — every method is callable unauthenticated.
+
+> **Network transports require it.** Because the gate is open without session setup, a
+> `JSONRPCServer` configured with `tcp_config` or `websocket_config` **must** expose only
+> protocols that have `add_session_setup(...)`, or the constructor raises `ValueError`.
+> AF_UNIX is exempt: it relies on local peer-credential / filesystem trust and may serve
+> an unauthenticated protocol.
 
 > **Don't want to hand-roll this?** The opt-in
 > [`truenas_pyjsonrpc.mixins.auth`](../truenas_pyjsonrpc/mixins/auth) layer productizes exactly
