@@ -1,4 +1,4 @@
-"""``truenas_pyjsonrpc.mixins.auth`` — a reusable, channel-aware, middlewared-style
+"""``truenas_pyjsonrpc.mixins.auth`` — a reusable, channel-aware
 authentication layer for :mod:`truenas_pyjsonrpc`.
 
 Subclass :class:`AuthStack`, override the credential verifiers you support (each returns

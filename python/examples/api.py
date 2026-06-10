@@ -1,7 +1,6 @@
 """Example consumer ``api/`` module: request and response msgspec Structs.
 
-A real consumer would split these across per-namespace files (pool.py, user.py,
-…) the way middlewared's ``api/`` dir is organized.
+A real consumer would split these across per-namespace files (pool.py, user.py, …).
 """
 import msgspec
 

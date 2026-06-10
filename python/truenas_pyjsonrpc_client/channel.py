@@ -13,12 +13,14 @@ import abc
 import asyncio
 import contextlib
 import struct
-from typing import NamedTuple, cast
+from dataclasses import dataclass
+from typing import cast
 
 _HEADER = struct.Struct(">I")           # 4-byte big-endian length prefix (see server framing)
 
 
-class TransferTarget(NamedTuple):
+@dataclass(slots=True, frozen=True)
+class TransferTarget:
     """Handles a raw-fd transfer needs: the bidirectional transport (to pause / resume
     reading around the raw stream) and the plaintext socket fd."""
     transport: asyncio.Transport

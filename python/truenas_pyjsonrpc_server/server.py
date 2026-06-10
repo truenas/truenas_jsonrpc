@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import os
 import socket
@@ -198,7 +199,8 @@ class JSONRPCServer:
         # TLS state lives on the transport, not the socket (asyncio wraps SSL in
         # userspace); the handshake is complete by the time this callback runs.
         if peer is not None and writer.get_extra_info("ssl_object") is not None:
-            peer = peer._replace(
+            peer = dataclasses.replace(
+                peer,
                 tls=True,
                 peercert=writer.get_extra_info("peercert"),
                 cipher=writer.get_extra_info("cipher"))
@@ -226,7 +228,8 @@ class JSONRPCServer:
         peer = peer_from_socket(transport.get_extra_info("socket"))
         # wss:// is userspace memory-BIO TLS, so TLS state is on the transport.
         if peer is not None and transport.get_extra_info("ssl_object") is not None:
-            peer = peer._replace(
+            peer = dataclasses.replace(
+                peer,
                 tls=True,
                 peercert=transport.get_extra_info("peercert"),
                 cipher=transport.get_extra_info("cipher"))

@@ -113,10 +113,10 @@ class JSONRPCMethod:
         self.doc = doc if doc is not None else (handler.__doc__ if handler else None)
         self.pre_auth = pre_auth
         # ``audit`` gates whether a call is audited at all; ``audit_message`` is the
-        # static per-method audit description (the middleware ``audit='...'`` analog
-        # — a plain string, never interpolated, so a secret param can't leak into
-        # it). A handler may append runtime detail via ``request_state.set_audit``;
-        # the two are joined into the single message handed to the audit handler.
+        # static per-method audit description (a plain string, never interpolated, so
+        # a secret param can't leak into it). A handler may append runtime detail via
+        # ``request_state.set_audit``; the two are joined into the single message
+        # handed to the audit handler.
         self.audit = audit
         self.audit_message = audit_message
         # ``cancellable`` opts the method into $/cancelRequest: a per-request

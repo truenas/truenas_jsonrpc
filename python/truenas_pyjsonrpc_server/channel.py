@@ -12,13 +12,15 @@ from __future__ import annotations
 import abc
 import asyncio
 import contextlib
-from typing import NamedTuple, cast
+from dataclasses import dataclass
+from typing import cast
 
 from .framing import frame, read_message
 from .peercred import Peer
 
 
-class TransferTarget(NamedTuple):
+@dataclass(slots=True, frozen=True)
+class TransferTarget:
     """The handles a raw-fd transfer needs: the bidirectional transport (to pause /
     resume reading around the raw stream) and the plaintext socket fd."""
     transport: asyncio.Transport

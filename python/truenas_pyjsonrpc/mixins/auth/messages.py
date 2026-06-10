@@ -1,4 +1,4 @@
-"""The auth wire schema — middlewared-style tagged unions, mirroring
+"""The auth wire schema — tagged unions mirroring
 ``auth.login_ex`` / ``auth.login_ex_continue``.
 
 Request **mechanisms** (discriminated on ``"mechanism"``) go to ``$/sessionSetup`` /

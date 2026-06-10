@@ -1,5 +1,5 @@
 """``truenas_pyjsonrpc.mixins`` — batteries-included protocol mixins (and the stacks they
-wrap) for a full TrueNAS service: PAM/SCRAM **authentication** and middleware-style syslog
+wrap) for a full TrueNAS service: PAM/SCRAM **authentication** and structured syslog
 **auditing**.
 
 This is an **opt-in** layer — importing :mod:`truenas_pyjsonrpc` does not import it, so the

@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import socket
 import struct
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from typing import Any
 
 
-class Peer(NamedTuple):
+@dataclass(slots=True, frozen=True)
+class Peer:
     """Identity of the connecting peer. ``transport`` is ``"unix"`` or ``"tcp"``;
     ``uid``/``gid``/``pid`` are set for AF_UNIX (Linux), ``address`` for TCP.
 

@@ -1,4 +1,4 @@
-"""``AuthStack`` — a channel-aware, middlewared-style authentication stack that plugs
+"""``AuthStack`` — a channel-aware authentication stack that plugs
 into ``JSONRPCProtocol.add_session_setup``.
 
 Subclass it, override the verifiers you support (each returns :class:`Authenticated`,

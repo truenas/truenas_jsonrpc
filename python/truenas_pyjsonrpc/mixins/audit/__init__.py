@@ -1,4 +1,4 @@
-"""``truenas_pyjsonrpc.mixins.audit`` — structured, middleware-style syslog auditing for
+"""``truenas_pyjsonrpc.mixins.audit`` — structured syslog auditing for
 :mod:`truenas_pyjsonrpc`.
 
 Mix :class:`TrueNASAuditMixin` (or :class:`AuditMixin`) into your protocol, or pass a

@@ -43,7 +43,8 @@ import threading
 import uuid
 from collections import deque
 from collections.abc import Callable, Iterable
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from typing import Any
 
 import msgspec
 from msgspec import UNSET, Raw
@@ -80,7 +81,8 @@ class _CancelParams(msgspec.Struct):
     target_id: str
 
 
-class _Pending(NamedTuple):
+@dataclass(slots=True, frozen=True)
+class _Pending:
     """An outbound message waiting to be drained. ``request_id`` is the request a
     progress message correlates to (``None`` for a plain notification) — used to
     purge a completed request's pending messages; ``session`` is the routing target
@@ -90,7 +92,8 @@ class _Pending(NamedTuple):
     data: bytes
 
 
-class Subscription(NamedTuple):
+@dataclass(slots=True, frozen=True)
+class Subscription:
     """A registered subscription to a SERVER_CLIENT topic: its ``id`` (the sub id),
     the ``session_state`` captured at subscribe time (the routing + ownership target),
     and the decoded subscribe-request ``params``.
@@ -102,7 +105,8 @@ class Subscription(NamedTuple):
     params: Any
 
 
-class _AuditJob(NamedTuple):
+@dataclass(slots=True, frozen=True)
+class _AuditJob:
     """A queued audit job (raw — redaction + message assembly are deferred to
     :meth:`poll_audit`). ``method`` supplies the redaction plans and the static
     ``audit_message``; ``detail`` is the runtime detail captured from the request's
@@ -237,8 +241,8 @@ class RequestState:
         return self._cancel_event.wait(timeout)
 
     def set_audit(self, message: str) -> None:
-        """Set this request's runtime audit detail (the middleware ``audit_callback``
-        analog). **Single-valued — last call wins**: repeated calls replace, they do
+        """Set this request's runtime audit detail. **Single-valued — last call wins**:
+        repeated calls replace, they do
         not accumulate, so a dispatched call emits **exactly one** audit message. The
         detail is joined to the method's static ``audit_message`` (``base detail``)
         for the audit handler. Not redacted — keep secrets out of it (put them in
@@ -466,7 +470,8 @@ class JSONRPCProtocol:
             job = self._audit_queue.get(block=block, timeout=timeout)
         except queue.Empty:
             return None
-        return self._audit_record(*job)
+        return self._audit_record(job.handler, job.request, job.response,
+                                  job.session_state, job.method, job.detail)
 
     def _audit(self, handler: Callable[..., Any], request: JSONRPCRequest,
                response: dict[str, Any], session_state: Any,
