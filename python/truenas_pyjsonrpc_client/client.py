@@ -23,6 +23,7 @@ Connect flow: ``connect()`` (`$/negotiate`) -> ``setup(...)`` (`$/sessionSetup`,
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import functools
 import logging
@@ -200,6 +201,22 @@ class BaseClient:
         """Continue multi-step setup via ``$/sessionSetupContinue``."""
         return self.call("$/sessionSetupContinue", params)
 
+    def _settle(self, cf: concurrent.futures.Future[Any],
+                timeout: float | None) -> Any:
+        """Block on the loop coroutine ``cf`` up to ``timeout`` and return its result. On a
+        *wait* timeout, cancel it — cancellation propagates to the asyncio task, so the
+        coroutine's cleanup ``finally`` runs and releases its per-request state (pending
+        future, progress callback) instead of leaking it — then raise :class:`ClientError`.
+        ``asyncio.run_coroutine_threadsafe`` does *not* cancel the coroutine when
+        ``Future.result(timeout)`` times out, so without this the entry leaks."""
+        try:
+            return cf.result(timeout)
+        except TimeoutError:
+            if cf.done():            # the coroutine itself raised TimeoutError -> surface it
+                raise
+            cf.cancel()              # -> task.cancel() on the loop; its finally cleans up
+            raise ClientError("operation timed out") from None
+
     def call(self, method: str, params: Any = None,
              timeout: Any = _DEFAULT_TIMEOUT, *,
              progress: Callable[[Any], None] | None = None) -> Any:
@@ -218,7 +235,7 @@ class BaseClient:
         t = self._call_timeout if timeout is _DEFAULT_TIMEOUT else timeout
         cf = asyncio.run_coroutine_threadsafe(
             self._invoke(method, params, progress), self._loop)
-        return cf.result(t)
+        return self._settle(cf, t)
 
     def transfer(self, method: str, params: Any = None, *,
                  callback: Callable[[FileTransfer], object],
@@ -235,9 +252,9 @@ class BaseClient:
             raise ClientError("a raw-fd transfer is already in progress")
         self._in_transfer = True
         try:
-            rid, direction, fd, final, result = asyncio.run_coroutine_threadsafe(
-                self._transfer_prep(method, params), self._loop).result(
-                    self._connect_timeout)
+            prep = asyncio.run_coroutine_threadsafe(
+                self._transfer_prep(method, params), self._loop)
+            rid, direction, fd, final, result = self._settle(prep, self._connect_timeout)
             try:
                 callback(_FileTransfer(direction, params, fd, result))   # blocking, caller thread
             except BaseException:
@@ -249,8 +266,9 @@ class BaseClient:
                     asyncio.run_coroutine_threadsafe(
                         self._teardown(), self._loop).result(5)
                 raise
-            return asyncio.run_coroutine_threadsafe(
-                self._transfer_finish(rid, fd, final), self._loop).result(timeout)
+            finish = asyncio.run_coroutine_threadsafe(
+                self._transfer_finish(rid, fd, final), self._loop)
+            return self._settle(finish, timeout)
         finally:
             self._in_transfer = False
 
@@ -305,7 +323,7 @@ class BaseClient:
             raise ClientError("client is closed")
         cf = asyncio.run_coroutine_threadsafe(
             self._do_subscribe(topic, params, callback), self._loop)
-        return str(cf.result(self._call_timeout))
+        return str(self._settle(cf, self._call_timeout))
 
     def unsubscribe(self, sub_id: str) -> None:
         """Cancel a subscription: send ``$/cancelRequest`` so the **server** drops it
@@ -362,7 +380,7 @@ class BaseClient:
             cb = callback
         cf = asyncio.run_coroutine_threadsafe(
             self._do_subscribe(topic, msgspec.to_builtins(request), cb), self._loop)
-        return str(cf.result(self._call_timeout))
+        return str(self._settle(cf, self._call_timeout))
 
     def close(self) -> None:
         """Best-effort ``$/sessionClose``, then tear down the connection + loop."""
@@ -513,6 +531,7 @@ class BaseClient:
         msg: dict[str, Any] = {"jsonrpc": _VERSION, "method": method, "id": rid}
         if params is not None:
             msg["params"] = params
+        ok = False
         try:
             await self._channel.send(_ENC.encode(msg))
             # The server either sends $/transferReady, or rejects with an error
@@ -520,21 +539,28 @@ class BaseClient:
             await asyncio.wait({ready_fut, final_fut},
                                return_when=asyncio.FIRST_COMPLETED)
             if final_fut.done():
-                self._pending.pop(rid, None)
                 await final_fut          # raises the server's error
                 raise ClientError("transfer rejected before $/transferReady")
             ready = ready_fut.result()
+            direction = TransferDirection(ready["direction"])
+            target.transport.pause_reading()  # consumer parks its reader before raw bytes
+            if direction is TransferDirection.DOWNLOAD:   # client consumes -> paused, now go
+                await self._channel.send(_ENC.encode(
+                    {"jsonrpc": _VERSION, "method": _TRANSFER_GO_METHOD,
+                     "params": {"id": rid}}))
+            fd = target.fileno
+            os.set_blocking(fd, True)
+            ok = True
+            return rid, direction, fd, final_fut, ready.get("result")
         finally:
             self._transfer_ready.pop(rid, None)
-        direction = TransferDirection(ready["direction"])
-        target.transport.pause_reading()  # consumer parks its reader before raw bytes flow
-        if direction is TransferDirection.DOWNLOAD:   # client consumes -> paused, now go
-            await self._channel.send(_ENC.encode(
-                {"jsonrpc": _VERSION, "method": _TRANSFER_GO_METHOD,
-                 "params": {"id": rid}}))
-        fd = target.fileno
-        os.set_blocking(fd, True)
-        return rid, direction, fd, final_fut, ready.get("result")
+            if not ok:
+                # Failed/cancelled/timed out before the fd reached the caller: drop the
+                # pending final-response slot and un-pause the reader (a no-op if we never
+                # paused) so a partial setup can't leak the entry or wedge the connection.
+                self._pending.pop(rid, None)
+                with contextlib.suppress(Exception):
+                    target.transport.resume_reading()
 
     async def _transfer_finish(self, rid: str, fd: int,
                                final_fut: asyncio.Future[Any]) -> Any:

@@ -6,6 +6,7 @@ import queue
 import ssl
 import tempfile
 import threading
+import time
 import uuid
 
 import pytest
@@ -63,6 +64,27 @@ def test_round_trip_unix():
         c.close()
         with pytest.raises(ClientError):                 # closed -> no more calls
             c.call("echo", {"msg": "x"})
+    finally:
+        srv.stop()
+
+
+def test_call_timeout_cancels_coroutine_and_cleans_up_pending():
+    # run_coroutine_threadsafe().result(timeout) does NOT cancel the coroutine on a wait
+    # timeout, so without _settle's cf.cancel() the per-request entry leaks in _pending.
+    path = _tmp_sock()
+    srv = _ServerThread(_build(), unix_config=SrvUnixConfig(path=path)).start()
+    try:
+        c = BaseClient("v1", unix_config=UnixConfig(path=path))
+        c.connect()
+        c.setup({"token": "ok"})
+        with pytest.raises(ClientError):                 # 'slow' blocks ~2s; we time out at 0.2s
+            c.call("slow", timeout=0.2)
+        # cancellation is async (scheduled on the loop); _invoke's finally pops the entry.
+        deadline = time.monotonic() + 2
+        while c._pending and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert c._pending == {}                          # cancelled coroutine cleaned up
+        c.close()
     finally:
         srv.stop()
 

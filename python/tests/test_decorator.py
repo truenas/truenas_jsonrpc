@@ -56,6 +56,16 @@ def test_builds_method_and_registers():
     assert "pool.create" in p.methods
 
 
+def test_roles_are_forwarded():
+    # roles= must reach the built method (else decorator-declared methods are always
+    # roles=(), silently bypassing an authorization handler's role checks).
+    @jrpc_method(name="vm.delete", accepts=Args, returns=Result, roles=["VM_DELETE"])
+    def vm_delete(request, session_state, request_state):
+        return Result(id=1, name=request.name)
+
+    assert list(vm_delete.method.roles) == ["VM_DELETE"]
+
+
 def test_function_stays_callable():
     @jrpc_method(accepts=Args)
     def h(request, session_state, request_state):

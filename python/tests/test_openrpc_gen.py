@@ -243,6 +243,28 @@ def test_struct_name_collision_raises():
         generate_openrpc(p)
 
 
+def _outer_with_dup():
+    class Dup(msgspec.Struct):       # distinct from _dup_a's Dup; only reachable via Outer
+        b: int
+
+    class Outer(msgspec.Struct):
+        d: Dup
+    return Outer
+
+
+def test_nested_name_collision_generates_without_keyerror():
+    # A *nested* Struct sharing a top-level Struct's name slips past _collect_types (which
+    # only sees top-level types), so msgspec qualifies the colliding schema keys. Keying off
+    # the refs schema_components returns (not bare __name__) must still resolve them.
+    p = JSONRPCProtocol([
+        JSONRPCMethod("m1", accepts=_dup_a(), handler=_ping),       # top-level Dup{a}
+        JSONRPCMethod("m2", accepts=_outer_with_dup(), handler=_ping),
+    ], name="v1", version="1.0.0")
+    doc = generate_openrpc(p)                        # raised KeyError('Dup') before the fix
+    assert {m["name"] for m in doc["methods"]} == {"m1", "m2"}
+    assert [pd["name"] for pd in _method(doc, "m1")["params"]] == ["a"]
+
+
 # --- 13. the whole document round-trips --------------------------------------
 def test_document_round_trips():
     doc = generate_openrpc(_build_transfer())

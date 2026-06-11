@@ -32,6 +32,7 @@ def jrpc_method(*, name: str | None = None,
                 audit: bool = False,
                 audit_message: str | None = None,
                 cancellable: bool = False,
+                roles: Iterable[str] = (),
                 protocols: Iterable[JSONRPCProtocol] = (),
                 accepts_validator: Callable[[Any], Any] | None = None,
                 returns_validator: Callable[[Any], Any] | None = None
@@ -56,6 +57,7 @@ def jrpc_method(*, name: str | None = None,
             notifies=notifies, handler=handler,
             doc=doc if doc is not None else func.__doc__, pre_auth=pre_auth,
             audit=audit, audit_message=audit_message, cancellable=cancellable,
+            roles=roles,
             accepts_validator=accepts_validator,
             returns_validator=returns_validator)
         for proto in protocols:

@@ -42,6 +42,9 @@ def test_pyname_and_class_name():
     assert _pyname("events") == "events"
     assert _pyname("$/weird-name") == "__weird_name"
     assert _pyname("2fast") == "_2fast"
+    assert _pyname("class") == "class_"        # keyword -> suffixed so `def` isn't a SyntaxError
+    assert _pyname("import") == "import_"
+    assert _pyname("match") == "match"         # soft keyword: valid as a method name, left as-is
     assert _class_name_for("v1") == "V1Client"
     assert _class_name_for("directoryservices.v1") == "DirectoryservicesV1Client"
 
@@ -77,6 +80,36 @@ def test_generate_rejects_main_module_structs():
     proto = JSONRPCProtocol([
         JSONRPCMethod("x", accepts=Local, returns=Result)], name="v1", version="1.0.0")
     with pytest.raises(ValueError, match="__main__"):
+        generate(proto)
+
+
+def test_generate_keyword_method_name_is_valid_python():
+    # A method named after a Python keyword must not emit `def class(...)` (a SyntaxError).
+    proto = JSONRPCProtocol(
+        [JSONRPCMethod("class", accepts=EchoArgs, returns=Result)],
+        name="v1", version="1.0.0")
+    src = generate(proto)
+    assert "def class_(self" in src
+    compile(src, "<generated>", "exec")         # would raise SyntaxError before the fix
+
+
+def test_generate_rejects_identifier_collision():
+    # Two wire names mapping to the same Python identifier would silently shadow each other.
+    proto = JSONRPCProtocol([
+        JSONRPCMethod("pool.create", accepts=EchoArgs, returns=Result),
+        JSONRPCMethod("pool_create", accepts=EchoArgs, returns=Result),
+    ], name="v1", version="1.0.0")
+    with pytest.raises(ValueError, match="collision"):
+        generate(proto)
+
+
+def test_generate_rejects_baseclient_member_collision():
+    # A method whose identifier collides with an inherited BaseClient method (e.g. `connect`)
+    # would override it with the wrong signature and break the client at runtime.
+    proto = JSONRPCProtocol(
+        [JSONRPCMethod("connect", accepts=EchoArgs, returns=Result)],
+        name="v1", version="1.0.0")
+    with pytest.raises(ValueError, match="collision"):
         generate(proto)
 
 

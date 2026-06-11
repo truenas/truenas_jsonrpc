@@ -292,10 +292,18 @@ class JSONRPCServer:
                 conn.close()
             return                                       # handshake / kTLS failure
         plain = _ktls.plain_socket(fd, family)
-        reader = asyncio.StreamReader(limit=self._limit, loop=self._loop)
-        protocol = asyncio.StreamReaderProtocol(reader, loop=self._loop)
-        transport, _ = await self._loop.connect_accepted_socket(
-            lambda: protocol, plain)
+        try:
+            reader = asyncio.StreamReader(limit=self._limit, loop=self._loop)
+            protocol = asyncio.StreamReaderProtocol(reader, loop=self._loop)
+            transport, _ = await self._loop.connect_accepted_socket(
+                lambda: protocol, plain)
+        except BaseException:
+            # `plain` owns the detached plaintext fd; if adopting it fails (e.g. the loop
+            # is shutting down -> CancelledError), close it here, else the fd leaks. On
+            # success the transport owns it (closed via the channel on connection teardown).
+            with contextlib.suppress(Exception):
+                plain.close()
+            raise
         writer = asyncio.StreamWriter(transport, protocol, reader, self._loop)
         peer = Peer("tcp", address=addr, tls=True, peercert=peercert, cipher=cipher)
         channel = StreamChannel(reader, writer, peer, self._limit)
@@ -316,7 +324,11 @@ class JSONRPCServer:
             session, data = out
             conn = self._conn_for(session.session_uuid)
             if conn is not None and self._loop is not None:
-                self._loop.call_soon_threadsafe(conn.enqueue_outbound, data)
+                try:
+                    self._loop.call_soon_threadsafe(conn.enqueue_outbound, data)
+                except RuntimeError:
+                    break                # loop closed (shutdown raced the 0.5s poll) -> stop
+
 
     def _audit_drain(self, proto: JSONRPCProtocol) -> None:
         while not self._stop.is_set():

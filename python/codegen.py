@@ -21,6 +21,7 @@ Override with ``protocol_name=`` / ``--protocol-name`` if they differ.
 """
 from __future__ import annotations
 
+import keyword
 import re
 
 import msgspec
@@ -36,10 +37,14 @@ _StructType = type[msgspec.Struct]
 
 def _pyname(name: str) -> str:
     """Turn a wire method name into a valid Python identifier (``pool.create`` ->
-    ``pool_create``)."""
+    ``pool_create``), suffixing ``_`` to dodge a Python keyword (``import`` ->
+    ``import_``) so the generated ``def`` is never a syntax error. (Soft keywords like
+    ``match``/``type`` are valid method names and left as-is.)"""
     out = re.sub(r"\W", "_", name)
     if out and out[0].isdigit():
         out = "_" + out
+    if keyword.iskeyword(out):
+        out += "_"
     return out
 
 
@@ -64,7 +69,7 @@ def generate(protocol: JSONRPCProtocol, *, class_name: str | None = None,
     protocol's own ``name``). ``class_name`` defaults to one derived from it.
     """
     if protocol_name is None:
-        protocol_name = getattr(protocol, "_name", None)
+        protocol_name = protocol.name
     if not protocol_name:
         raise ValueError(
             "no protocol name to negotiate: build the JSONRPCProtocol with "
@@ -92,10 +97,29 @@ def generate(protocol: JSONRPCProtocol, *, class_name: str | None = None,
     methods_src: list[str] = []
     topics: dict[str, str] = {}         # wire topic name -> notifies type name
     needs_file_transfer = False         # generated code references FileTransfer?
+    # Reserved: identifiers this generated class defines or inherits from BaseClient. A wire
+    # method whose Python identifier hits one of these (or another method's) would silently
+    # shadow it — and override an inherited member with the wrong signature — so reject it.
+    emitted: set[str] = {
+        "__init__", "TOPICS", "name", "connect", "setup", "setup_continue", "call",
+        "transfer", "send_fds", "recv_fds", "subscribe", "unsubscribe", "close",
+    }
+
+    def claim(ident: str, wire: str) -> None:
+        if ident in emitted:
+            raise ValueError(
+                f"method name collision: {wire!r} maps to the Python identifier "
+                f"{ident!r}, already used by another method or a BaseClient member; "
+                "rename the method (or hand-write the client over BaseClient)")
+        emitted.add(ident)
+
     for name, m in sorted(protocol.methods.items()):
         if name.startswith("$/") or name.startswith("rpc."):
             continue                    # control methods are handled by BaseClient
         py = _pyname(name)
+        # SERVER_CLIENT topics are emitted as subscribe_<py>; everything else as <py>.
+        claim(f"subscribe_{py}" if m.direction is MessageDirection.SERVER_CLIENT else py,
+              name)
         accepts = ref(m.accepts)
         if isinstance(m, JSONRPCFdTransferMethod):
             assert m.returns is not None        # transfer methods require returns
@@ -197,6 +221,28 @@ def _render(class_name: str, protocol_name: str, imports: dict[str, str],
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def _write_output(path: str, text: str) -> None:
+    """Write ``text`` to ``path`` atomically as UTF-8: a temp file in the same directory,
+    then ``os.replace`` over the target. UTF-8 keeps the ``—`` in the header from raising
+    ``UnicodeEncodeError`` under a non-UTF-8 locale (e.g. ``LC_ALL=C`` in CI), and the
+    atomic rename means a failed/interrupted write can't truncate a previously-good
+    committed artifact."""
+    import contextlib
+    import os
+    import tempfile
+
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".codegen-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     import argparse
     import importlib
@@ -225,8 +271,7 @@ def main(argv: list[str] | None = None) -> int:
     source = generate(protocol, class_name=ns.class_name,
                       protocol_name=ns.protocol_name)
     if ns.out:
-        with open(ns.out, "w") as f:
-            f.write(source)
+        _write_output(ns.out, source)
     else:
         print(source, end="")
     return 0

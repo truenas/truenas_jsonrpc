@@ -125,10 +125,11 @@ class FileShare:
     def get_negotiate(self, request: GetArgs, session_state):
         try:
             fd = os.open(self._path(request.name), os.O_RDONLY)   # WARNING: follows symlinks
-        except FileNotFoundError:
-            raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "No such file", request.name)
+        except FileNotFoundError as e:
+            raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "No such file",
+                               request.name) from e
         except OSError as e:
-            raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "Open failed", str(e))
+            raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "Open failed", str(e)) from e
         size = os.fstat(fd).st_size
         self._stash(session_state.session_uuid, fd)
         return {"name": request.name, "size": size}   # -> client as $/transferReady result
@@ -147,7 +148,7 @@ class FileShare:
             fd = os.open(self._path(request.name),     # WARNING: follows symlinks, no O_EXCL
                          os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o644)
         except OSError as e:
-            raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "Open failed", str(e))
+            raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "Open failed", str(e)) from e
         self._stash(session_state.session_uuid, fd)
         return True                                    # ready to receive
 

@@ -91,10 +91,15 @@ def _content_descriptor(name: str, schema: dict[str, Any], *,
     return {"name": name, "required": required, "schema": schema}
 
 
-def _method_object(name: str, m: JSONRPCMethod,
-                   schemas: dict[str, Any]) -> dict[str, Any]:
-    """Build the OpenRPC Method Object for the wire method ``name``."""
-    accepts_schema = schemas[m.accepts.__name__]
+def _method_object(name: str, m: JSONRPCMethod, schemas: dict[str, Any],
+                   type_ref: dict[_StructType, dict[str, Any]]) -> dict[str, Any]:
+    """Build the OpenRPC Method Object for the wire method ``name``. ``type_ref`` maps each
+    top-level Struct to the ``{"$ref": ...}`` ``schema_components`` assigned it; we use that
+    instead of recomputing ``__name__`` because msgspec qualifies a colliding schema key
+    (e.g. a nested Struct that shares a top-level Struct's name), which ``__name__`` can't
+    see — recomputing it would dangle the ref / ``KeyError`` the lookup below."""
+    accepts_key = type_ref[m.accepts]["$ref"].rsplit("/", 1)[-1]
+    accepts_schema = schemas[accepts_key]
     required = set(accepts_schema.get("required", ()))
     params = [_content_descriptor(prop, schema, required=prop in required)
               for prop, schema in accepts_schema.get("properties", {}).items()]
@@ -111,14 +116,12 @@ def _method_object(name: str, m: JSONRPCMethod,
     # A method with no `returns` is notification-only — omit `result` (correct for void
     # methods and SERVER_CLIENT pub/sub topics).
     if m.returns is not None:
-        rname = m.returns.__name__
-        obj["result"] = {"name": rname,
-                         "schema": {"$ref": _SCHEMAS_REF.format(name=rname)}}
+        obj["result"] = {"name": m.returns.__name__, "schema": type_ref[m.returns]}
 
     # Extensions (x-*): spec-valid, ignored by generic tooling.
     obj["x-direction"] = m.direction.value
     if m.direction is MessageDirection.SERVER_CLIENT and m.notifies is not None:
-        obj["x-notifies"] = {"$ref": _SCHEMAS_REF.format(name=m.notifies.__name__)}
+        obj["x-notifies"] = type_ref[m.notifies]
     if isinstance(m, JSONRPCFdTransferMethod):
         obj["x-transfer-direction"] = m.transfer_direction.value
         if isinstance(m, JSONRPCFdPassMethod):
@@ -152,13 +155,17 @@ def generate_openrpc(protocol: JSONRPCProtocol, *,
 
     types = _collect_types(public)
     schemas: dict[str, Any] = {}
+    type_ref: dict[_StructType, dict[str, Any]] = {}
     if types:
         # schema_components pulls in nested Structs automatically and cross-references
-        # them with the ref template — a 1:1 fit for OpenRPC components.schemas.
-        _, schemas = msgspec.json.schema_components(
+        # them with the ref template — a 1:1 fit for OpenRPC components.schemas. It returns
+        # one {"$ref": ...} per input type; we key off those (not __name__) so a schema-key
+        # collision msgspec resolves by qualifying the name doesn't dangle our refs.
+        refs, schemas = msgspec.json.schema_components(
             tuple(types), ref_template=_SCHEMAS_REF)
+        type_ref = dict(zip(types, refs))
 
-    methods = [_method_object(name, m, schemas) for name, m in public.items()]
+    methods = [_method_object(name, m, schemas, type_ref) for name, m in public.items()]
 
     components: dict[str, Any] = {"schemas": schemas}
     if include_errors:
@@ -171,6 +178,25 @@ def generate_openrpc(protocol: JSONRPCProtocol, *,
         "methods": methods,
         "components": components,
     }
+
+
+def _write_output(path: str, text: str) -> None:
+    """Write ``text`` to ``path`` atomically as UTF-8 (temp file + ``os.replace``), so a
+    failed/interrupted write can't truncate a previously-good committed artifact."""
+    import contextlib
+    import os
+    import tempfile
+
+    directory = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".openrpc-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -207,8 +233,7 @@ def main(argv: list[str] | None = None) -> int:
                            include_errors=not ns.no_errors)
     text = json.dumps(doc, indent=2)
     if ns.out:
-        with open(ns.out, "w") as f:
-            f.write(text + "\n")
+        _write_output(ns.out, text + "\n")
     else:
         print(text)
     return 0

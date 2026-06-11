@@ -8,9 +8,12 @@ import pytest
 from truenas_pyjsonrpc import (
     AuthorizationResponse,
     JSONRPCError,
+    JSONRPCFdTransferMethod,
     JSONRPCMethod,
     JSONRPCProtocol,
     JSONRPCRequest,
+    JsonRpcError,
+    TransferDirection,
 )
 
 
@@ -158,6 +161,53 @@ def test_denied_default_message_omits_none_data():
     assert r["error"]["code"] == JSONRPCError.NOT_AUTHORIZED
     assert r["error"]["message"] == "Not authorized"
     assert "data" not in r["error"]
+
+
+# --- a transfer method is audited on denial / negotiate failure (like a normal method) ---
+def _xfer_methods(negotiate=None):
+    def _negotiate(request, session_state):
+        return negotiate(request, session_state) if negotiate else {"size": 0}
+
+    def _transfer(file_transfer) -> Result:
+        return Result(id=1, name="done")
+
+    return [JSONRPCFdTransferMethod(
+        "file.get", accepts=Args, returns=Result, direction=TransferDirection.DOWNLOAD,
+        negotiate=_negotiate, transfer=_transfer, audit=True)]
+
+
+def test_transfer_denied_is_audited():
+    audited = []
+
+    def audit(request, response, session_state, audit_message=None):
+        audited.append(response)
+
+    p = JSONRPCProtocol(
+        _xfer_methods(),
+        authorization_handler=lambda request, session_state: AuthorizationResponse(
+            False, "nope"),
+        audit_handler=audit, name="test", version="1.0.0")
+    r = decode(p.dispatch(req("file.get", {"name": "x"}, id=uid())))
+    assert r["error"]["code"] == JSONRPCError.NOT_AUTHORIZED
+    assert len(audited) == 1 and audited[0]["error"]["code"] == JSONRPCError.NOT_AUTHORIZED
+
+
+def test_transfer_negotiate_failure_is_audited():
+    audited = []
+
+    def audit(request, response, session_state, audit_message=None):
+        audited.append(response)
+
+    def _reject(request, session_state):
+        raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "no such file")
+
+    p = JSONRPCProtocol(
+        _xfer_methods(negotiate=_reject),
+        authorization_handler=lambda request, session_state: AuthorizationResponse(True),
+        audit_handler=audit, name="test", version="1.0.0")
+    r = decode(p.dispatch(req("file.get", {"name": "x"}, id=uid())))
+    assert r["error"]["code"] == JSONRPCError.REQUEST_FAILED
+    assert len(audited) == 1 and audited[0]["error"]["code"] == JSONRPCError.REQUEST_FAILED
 
 
 # --- audit sees success + error ----------------------------------------------

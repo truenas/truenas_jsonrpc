@@ -95,15 +95,24 @@ def default_origin(session_state: Any) -> str | None:
     return _peer_origin(peer) if peer is not None else None
 
 
+#: Identity-dict keys copied into a record's ``credentials_data``. An **allowlist**, not a
+#: denylist, so a secret a stack happens to stash on the identity (a token, a session key)
+#: can never leak into the audit log. A custom stack with extra *non-secret* identity fields
+#: worth auditing should pass its own ``credentials`` extractor to :class:`AuditFormatter`.
+_CREDENTIALS_KEYS = ("username", "account_attributes", "api_key_id")
+
+
 def default_credentials(session_state: Any) -> dict[str, Any] | None:
     """The ``svc_data.credentials`` block: ``{"credentials": <kind>, "credentials_data":
-    <non-secret identity dump>}`` for a dict identity (kind ``API_KEY`` when an ``api_key_id``
-    is present, else ``USER_SESSION``), or ``None`` (no identity / a bare ``Peer``)."""
+    {...}}`` for a dict identity (kind ``API_KEY`` when an ``api_key_id`` is present, else
+    ``USER_SESSION``), or ``None`` (no identity / a bare ``Peer``). Only the
+    :data:`_CREDENTIALS_KEYS` allowlist is copied — never the whole identity dict — so a
+    secret stashed on it is never written to the audit log."""
     ident = getattr(session_state, "server_state_internal", None)
     if not isinstance(ident, dict):
         return None
     kind = "API_KEY" if ident.get("api_key_id") else "USER_SESSION"
-    data = {k: v for k, v in ident.items() if k != "origin"}   # origin is surfaced separately
+    data = {k: ident[k] for k in _CREDENTIALS_KEYS if k in ident}
     return {"credentials": kind, "credentials_data": data}
 
 

@@ -810,33 +810,44 @@ class JSONRPCProtocol:
                         session: SessionState) -> dict[str, Any] | Transfer:
         """Authorize, then run the transfer method's ``negotiate`` callback and return
         a :class:`Transfer` directive (or an error envelope). The server drives the
-        wire handshake and the fd handoff from there."""
+        wire handshake and the fd handoff from there. An authorization denial or a
+        ``negotiate`` failure is audited here (as a normal method's denial/error is);
+        a transfer that proceeds is audited in :meth:`_run_transfer`."""
         if note:
             return self._error_envelope(
                 None, JSONRPCError.INVALID_REQUEST, "Invalid request",
                 "a transfer request requires an 'id'")
         assert rid is not None           # not a notification -> id present
+
+        def fail(response: dict[str, Any]) -> dict[str, Any]:
+            # Audit the failed attempt, mirroring the normal-method path (which audits
+            # every authorized call — success, error, or denial — exactly once).
+            audit = self._audit_handler
+            if audit is not None and method.audit:
+                self._audit(audit, req, response, session, method, None)
+            return response
+
         authorize = self._authorization_handler
         if authorize is not None:
             try:
                 auth = authorize(request=req, session_state=session)
             except Exception as e:
-                return self._error_envelope(
-                    rid, JSONRPCError.INTERNAL_ERROR, "Internal error", str(e))
+                return fail(self._error_envelope(
+                    rid, JSONRPCError.INTERNAL_ERROR, "Internal error", str(e)))
             if not isinstance(auth, AuthorizationResponse):
-                return self._error_envelope(
+                return fail(self._error_envelope(
                     rid, JSONRPCError.INTERNAL_ERROR, "Internal error",
-                    "authorization_handler must return an AuthorizationResponse")
+                    "authorization_handler must return an AuthorizationResponse"))
             if not auth.authorized:
-                return self._error_envelope(
-                    rid, JSONRPCError.NOT_AUTHORIZED, auth.message, auth.data)
+                return fail(self._error_envelope(
+                    rid, JSONRPCError.NOT_AUTHORIZED, auth.message, auth.data))
         try:
             interim = method.negotiate(request=params, session_state=session)
         except JsonRpcError as e:
-            return self._error_envelope(rid, e.code, e.message, e.data)
+            return fail(self._error_envelope(rid, e.code, e.message, e.data))
         except Exception as e:
-            return self._error_envelope(
-                rid, JSONRPCError.INTERNAL_ERROR, "Internal error", str(e))
+            return fail(self._error_envelope(
+                rid, JSONRPCError.INTERNAL_ERROR, "Internal error", str(e)))
         ready = {"jsonrpc": _VERSION, "method": _TRANSFER_READY_METHOD,
                  "params": {"id": rid,
                             "direction": method.transfer_direction.value,

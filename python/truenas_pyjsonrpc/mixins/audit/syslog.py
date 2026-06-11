@@ -58,8 +58,12 @@ class SyslogAuditHandler:
         try:
             self._logger.info(
                 self._formatter.format(request, response, session_state, audit_message))
-        except Exception:
-            pass                                     # auditing must never break dispatch/drain
+        except Exception as e:
+            # Auditing must never break dispatch/drain — but don't lose the record
+            # *silently*: a record too large for a SOCK_DGRAM syslog socket (the default
+            # STREAM socket has no such limit) would otherwise vanish without a trace.
+            logging.getLogger(__name__).warning(
+                "dropped audit record for %r: %s", request.method, e)
 
     def close(self) -> None:
         """Detach and close the underlying syslog handler."""

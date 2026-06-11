@@ -23,6 +23,47 @@ from .errors import JsonRpcError
 from .types import JSONRPCError
 
 
+def _write_all(fd: int, data: bytes) -> None:
+    """``os.write`` the entire buffer, looping over short writes — a raw fd (pipe, socket,
+    or other non-regular-file target) may accept fewer bytes per call than offered, so a
+    single ``os.write`` can silently leave a tail unwritten."""
+    mv = memoryview(data)
+    while mv:
+        mv = mv[os.write(fd, mv):]
+
+
+def _splice_socket_to_fd(src_fd: int, dst_fd: int, count: int) -> int | None:
+    """Move up to ``count`` bytes ``src_fd`` -> ``dst_fd`` **zero-copy** via ``splice()``
+    through a kernel pipe (``splice`` needs one end to be a pipe, so socket -> pipe -> fd);
+    the bytes never enter the process. Returns the number moved (< ``count`` if the peer
+    closed early), or ``None`` — *before consuming anything* — when ``splice`` is
+    unavailable (non-Linux / no ``os.splice``) or the kernel rejects it for these fds (e.g.
+    some kTLS sockets), so the caller can fall back to a buffered copy. A failure *after*
+    partial progress propagates as ``OSError`` (a real I/O error, not an unsupported fd)."""
+    if not hasattr(os, "splice"):                # Linux + Python >= 3.10 only
+        return None
+    r, w = os.pipe()
+    try:
+        moved = 0
+        while moved < count:
+            try:
+                n = os.splice(src_fd, w, count - moved)        # socket -> pipe
+            except OSError:
+                if moved == 0:
+                    return None                  # unsupported here -> caller falls back
+                raise                            # mid-stream: a genuine error
+            if n == 0:
+                break                            # peer closed early
+            off = 0
+            while off < n:                       # pipe -> fd: drain the n buffered bytes
+                off += os.splice(r, dst_fd, n - off)
+            moved += n
+        return moved
+    finally:
+        os.close(r)
+        os.close(w)
+
+
 class TransferDirection(enum.StrEnum):
     """Which way the bulk stream flows once the fd is handed over.
 
@@ -80,14 +121,22 @@ class FileTransfer(abc.ABC):
         return sent
 
     def recvfile(self, file: IO[bytes] | int, count: int) -> int:
-        """Read exactly ``count`` bytes of the stream and write them to ``file`` (a
-        file object or fd); returns the number received (< ``count`` if the peer
-        closed early)."""
+        """Read exactly ``count`` bytes of the stream and write them to ``file`` (a file
+        object or fd); returns the number received (< ``count`` if the peer closed early).
+
+        For an **fd** target this is zero-copy — it ``splice()``s socket -> fd through a
+        kernel pipe, so the payload never enters the process. (It is the receive-side
+        analogue of :meth:`sendfile`; since no single syscall moves socket -> file, a pipe
+        is the conduit.) It falls back to a buffered ``os.read``/``os.write`` copy for a
+        Python file-object target, or where the kernel can't ``splice`` these fds
+        (non-Linux, or some kTLS sockets)."""
         in_fd = self.fileno()
         write: Callable[[bytes], object]
         if isinstance(file, int):
-            out_fd = file
-            write = lambda chunk: os.write(out_fd, chunk)   # noqa: E731
+            moved = _splice_socket_to_fd(in_fd, file, count)
+            if moved is not None:
+                return moved                                  # zero-copy splice path
+            write = lambda chunk: _write_all(file, chunk)     # noqa: E731  (fallback)
         else:
             write = file.write
         got = 0
