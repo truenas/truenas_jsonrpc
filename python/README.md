@@ -14,6 +14,9 @@ table and fuses parse + validate into a single msgspec pass.
 - For a complete service, the opt-in **[`truenas_pyjsonrpc.mixins`](#a-full-application)** layer
   adds **protocol mixins** — PAM/SCRAM **authentication** and middleware-style syslog **audit** —
   that you mix into your protocol class to get authentication, authorization, and an audit trail.
+- **Building a service?** → **[GUIDE.md](GUIDE.md)** is a start-to-finish walkthrough —
+  declare a versioned protocol, define methods, serve it, generate a typed client and
+  OpenRPC document, then evolve the API from v1 to v2.
 - Embedding the core in your own loop instead? → **[ARCHITECTURE.md](truenas_pyjsonrpc/ARCHITECTURE.md)**
   covers the session state machine, the `$/` control messages, and the
   server-integration contract.
