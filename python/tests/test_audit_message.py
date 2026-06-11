@@ -66,7 +66,7 @@ def _proto(handler, *, audit=True, audit_message=None, authorization_handler=Non
                        handler=handler)],
         authorization_handler=authorization_handler,
         audit_handler=audit_handler,
-        use_audit_queue=use_audit_queue)
+        use_audit_queue=use_audit_queue, name="test", version="1.0.0")
     return seen, p
 
 
@@ -163,7 +163,7 @@ def test_notification_carries_message():
     p = JSONRPCProtocol(
         [JSONRPCMethod("note", accepts=Args, audit=True, audit_message="Note",
                        handler=h)],
-        audit_handler=audit)
+        audit_handler=audit, name="test", version="1.0.0")
     assert p.dispatch(req("note", {"name": "tank"})) is None   # notification
     assert seen == ["Note tank"]
 
@@ -200,7 +200,7 @@ def test_secret_field_redacted_while_message_passed_verbatim():
     p = JSONRPCProtocol(
         [JSONRPCMethod("login", accepts=Login, returns=Login, audit=True,
                        audit_message="Login", handler=h)],
-        audit_handler=audit)
+        audit_handler=audit, name="test", version="1.0.0")
     wire = msgspec.json.decode(p.dispatch(
         req("login", {"user": "u", "password": "hunter2"}, id=uid())))
     assert wire["result"]["password"] == "hunter2"       # real value on the wire
@@ -217,7 +217,7 @@ def test_cancel_audit_message_is_none():
         if request.method == "$/cancelRequest":
             seen.append(audit_message)
 
-    p = JSONRPCProtocol(audit_handler=audit)
+    p = JSONRPCProtocol(audit_handler=audit, name="test", version="1.0.0")
     p.dispatch(json.dumps({"jsonrpc": "2.0", "method": "$/cancelRequest",
                            "id": uid(), "params": {"target_id": uid()}}))
     assert seen == [None]                                # control op, no message

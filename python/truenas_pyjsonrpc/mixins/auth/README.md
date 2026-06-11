@@ -55,7 +55,8 @@ class MyAuth(AuthStack):
     def client_certificate(self, peercert, *, peer):
         return Authenticated(map_cert_to_user(peercert))
 
-protocol = JSONRPCProtocol(methods, name="truenas.api.v1", audit_handler=audit)
+protocol = JSONRPCProtocol(methods, name="truenas.api.v1", version="1.0.0",
+                           audit_handler=audit)
 MyAuth().install(protocol)        # registers $/sessionSetup + $/sessionSetupContinue
 ```
 

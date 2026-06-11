@@ -72,7 +72,7 @@ def test_authorized_dispatches_and_audits():
         _methods(),
         authorization_handler=_allow,
         audit_handler=lambda request, response, session_state, audit_message=None: seen.append(
-            (request, response)),
+            (request, response)), name="test", version="1.0.0"
     )
     r = decode(p.dispatch(req("pool.create", {"name": "tank"}, id=u)))
     assert r == {"jsonrpc": "2.0", "result": {"id": 7, "name": "tank"}, "id": u}
@@ -87,7 +87,7 @@ def test_authorized_dispatches_and_audits():
 
 def test_no_handlers_behaves_as_plain_dispatch():
     u = uid()
-    p = JSONRPCProtocol(_methods())
+    p = JSONRPCProtocol(_methods(), name="test", version="1.0.0")
     r = decode(p.dispatch(req("pool.create", {"name": "tank"}, id=u)))
     assert r == {"jsonrpc": "2.0", "result": {"id": 7, "name": "tank"}, "id": u}
 
@@ -99,7 +99,7 @@ def test_authz_and_audit_receive_session_state():
         authorization_handler=lambda request, session_state: (
             captured.append(("authz", session_state)) or AuthorizationResponse(True)),
         audit_handler=lambda request, response, session_state, audit_message=None: captured.append(
-            ("audit", session_state)),
+            ("audit", session_state)), name="test", version="1.0.0"
     )
     sentinel = {"session": "abc"}
     session = p.new_session(server_state=sentinel)
@@ -115,7 +115,7 @@ def test_authz_handler_called_by_keyword():
         seen.update(kw)
         return AuthorizationResponse(True)
 
-    p = JSONRPCProtocol(_methods(), authorization_handler=authz)
+    p = JSONRPCProtocol(_methods(), authorization_handler=authz, name="test", version="1.0.0")
     p.dispatch(req("pool.create", {"name": "x"}, id=uid()),
                p.new_session(server_state="S"))
     assert set(seen) == {"request", "session_state"}
@@ -138,7 +138,7 @@ def test_denied_skips_dispatch_audits_and_returns_error():
                        audit=True)],
         authorization_handler=lambda request, session_state: AuthorizationResponse(
             False, "nope", {"reason": "rbac"}),
-        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response),
+        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response), name="test", version="1.0.0"
     )
     r = decode(p.dispatch(req("pool.create", {"name": "tank"}, id=u)))
     assert dispatched == []                                  # dispatch skipped
@@ -152,7 +152,7 @@ def test_denied_skips_dispatch_audits_and_returns_error():
 def test_denied_default_message_omits_none_data():
     p = JSONRPCProtocol(
         _methods(),
-        authorization_handler=lambda request, session_state: AuthorizationResponse(False),
+        authorization_handler=lambda request, session_state: AuthorizationResponse(False), name="test", version="1.0.0"
     )
     r = decode(p.dispatch(req("pool.create", {"name": "x"}, id=uid())))
     assert r["error"]["code"] == JSONRPCError.NOT_AUTHORIZED
@@ -165,7 +165,7 @@ def test_audit_sees_handler_error():
     audited = []
     p = JSONRPCProtocol(
         _methods(),
-        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response),
+        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response), name="test", version="1.0.0"
     )
     r = decode(p.dispatch(req("boom", {"name": "x"}, id=uid())))
     assert r["error"]["code"] == JSONRPCError.INTERNAL_ERROR
@@ -179,7 +179,7 @@ def test_audit_exception_does_not_break_response():
     def audit(request, response, session_state, audit_message=None):
         raise RuntimeError("audit blew up")
 
-    p = JSONRPCProtocol(_methods(), audit_handler=audit)
+    p = JSONRPCProtocol(_methods(), audit_handler=audit, name="test", version="1.0.0")
     r = decode(p.dispatch(req("pool.create", {"name": "tank"}, id=u)))
     assert r == {"jsonrpc": "2.0", "result": {"id": 7, "name": "tank"}, "id": u}
 
@@ -192,7 +192,7 @@ def test_notification_authorized_dispatched_audited_returns_none():
         [JSONRPCMethod("note", accepts=NoArgs, audit=True,
                        handler=lambda request, session_state, request_state: dispatched.append(1))],
         authorization_handler=_allow,
-        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response),
+        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response), name="test", version="1.0.0"
     )
     assert p.dispatch(req("note", {})) is None               # no id => notification
     assert dispatched == [1]
@@ -206,7 +206,7 @@ def test_notification_denied_audited_returns_none():
         [JSONRPCMethod("note", accepts=NoArgs, audit=True,
                        handler=lambda request, session_state, request_state: dispatched.append(1))],
         authorization_handler=lambda request, session_state: AuthorizationResponse(False),
-        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response),
+        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response), name="test", version="1.0.0"
     )
     assert p.dispatch(req("note", {})) is None
     assert dispatched == []                                   # denied => not dispatched
@@ -223,7 +223,7 @@ def test_authz_raising_is_internal_error_and_audited():
     p = JSONRPCProtocol(
         _methods(),
         authorization_handler=authz,
-        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response),
+        audit_handler=lambda request, response, session_state, audit_message=None: audited.append(response), name="test", version="1.0.0"
     )
     r = decode(p.dispatch(req("pool.create", {"name": "x"}, id=uid())))
     assert r["error"]["code"] == JSONRPCError.INTERNAL_ERROR
@@ -233,7 +233,7 @@ def test_authz_raising_is_internal_error_and_audited():
 def test_authz_returning_non_response_is_internal_error():
     p = JSONRPCProtocol(
         _methods(),
-        authorization_handler=lambda request, session_state: True,   # not Authz...
+        authorization_handler=lambda request, session_state: True, name="test", version="1.0.0"   # not Authz...
     )
     r = decode(p.dispatch(req("pool.create", {"name": "x"}, id=uid())))
     assert r["error"]["code"] == JSONRPCError.INTERNAL_ERROR
@@ -253,7 +253,7 @@ def test_pre_method_errors_skip_authz_and_audit():
             _methods(),
             authorization_handler=lambda request, session_state: (
                 calls.append("authz") or AuthorizationResponse(True)),
-            audit_handler=lambda request, response, session_state, audit_message=None: calls.append("audit"),
+            audit_handler=lambda request, response, session_state, audit_message=None: calls.append("audit"), name="test", version="1.0.0"
         )
         r = decode(p.dispatch(wire))
         assert r["error"]["code"] == expect_code
@@ -266,7 +266,7 @@ def test_invalid_params_skips_authz_and_audit():
         _methods(),
         authorization_handler=lambda request, session_state: (
             calls.append("authz") or AuthorizationResponse(True)),
-        audit_handler=lambda request, response, session_state, audit_message=None: calls.append("audit"),
+        audit_handler=lambda request, response, session_state, audit_message=None: calls.append("audit"), name="test", version="1.0.0"
     )
     r = decode(p.dispatch(req("pool.create", {}, id=uid())))   # missing 'name'
     assert r["error"]["code"] == JSONRPCError.INVALID_PARAMS
@@ -275,7 +275,7 @@ def test_invalid_params_skips_authz_and_audit():
 
 # --- registration setters -----------------------------------------------------
 def test_register_setters_toggle_and_validate():
-    p = JSONRPCProtocol(_methods())
+    p = JSONRPCProtocol(_methods(), name="test", version="1.0.0")
     p.register_authorization_handler(
         lambda request, session_state: AuthorizationResponse(False))
     assert decode(p.dispatch(req("pool.create", {"name": "x"}, id=uid())))[
@@ -317,7 +317,7 @@ def test_method_roles_surfaced_to_authorize():
         seen[request.method] = request.roles
         return AuthorizationResponse(True)
 
-    p = JSONRPCProtocol(_role_methods(), authorization_handler=authz)
+    p = JSONRPCProtocol(_role_methods(), authorization_handler=authz, name="test", version="1.0.0")
     for m in ("vm.create", "vm.read", "ping"):
         decode(p.dispatch(req(m, {"name": "x"}, id=uid())))
     assert seen["vm.create"] == ("VM_WRITE",)
@@ -327,7 +327,7 @@ def test_method_roles_surfaced_to_authorize():
 
 def test_roles_enforced_allow_on_overlap():
     p = JSONRPCProtocol(_role_methods(),
-                        authorization_handler=_role_authorizer({"VM_WRITE"}))
+                        authorization_handler=_role_authorizer({"VM_WRITE"}), name="test", version="1.0.0")
     r = decode(p.dispatch(req("vm.create", {"name": "x"}, id=uid())))
     assert r["result"] == {"id": 7, "name": "x"}              # VM_WRITE overlaps -> allowed
 
@@ -335,7 +335,7 @@ def test_roles_enforced_allow_on_overlap():
 def test_roles_enforced_deny_without_overlap():
     u = uid()
     p = JSONRPCProtocol(_role_methods(),
-                        authorization_handler=_role_authorizer({"VM_READ"}))
+                        authorization_handler=_role_authorizer({"VM_READ"}), name="test", version="1.0.0")
     r = decode(p.dispatch(req("vm.create", {"name": "x"}, id=u)))   # needs VM_WRITE
     assert r["error"]["code"] == JSONRPCError.NOT_AUTHORIZED
     assert r["id"] == u
@@ -345,7 +345,7 @@ def test_roles_enforced_deny_without_overlap():
 
 
 def test_roles_in_describe():
-    d = JSONRPCProtocol(_role_methods()).describe()
+    d = JSONRPCProtocol(_role_methods(), name="test", version="1.0.0").describe()
     assert d["vm.create"]["roles"] == ["VM_WRITE"]
     assert d["vm.read"]["roles"] == ["VM_READ", "VM_WRITE"]
     assert d["ping"]["roles"] == []
@@ -356,7 +356,7 @@ def test_roles_in_audit_request():
     p = JSONRPCProtocol(
         _role_methods(),
         audit_handler=lambda request, response, session_state, audit_message=None: seen.append(
-            request.roles))
+            request.roles), name="test", version="1.0.0")
     decode(p.dispatch(req("vm.create", {"name": "x"}, id=uid())))   # audit=True
     assert seen == [("VM_WRITE",)]                            # roles reach the audit handler
 

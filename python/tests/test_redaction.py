@@ -136,7 +136,7 @@ def test_audit_redacted_wire_and_authz_real():
     p = JSONRPCProtocol(
         [JSONRPCMethod("login", accepts=Login, returns=Login, handler=handler,
                        audit=True)],
-        authorization_handler=authz, audit_handler=audit)
+        authorization_handler=authz, audit_handler=audit, name="test", version="1.0.0")
     u = str(uuid.uuid4())
     wire = msgspec.json.decode(p.dispatch(json.dumps(
         {"jsonrpc": "2.0", "method": "login", "id": u,

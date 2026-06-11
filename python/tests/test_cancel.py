@@ -47,14 +47,14 @@ def decode(out):
 
 # --- simple (no concurrency) paths -------------------------------------------
 def test_cancel_no_id_is_invalid_request():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     r = decode(p.dispatch('{"jsonrpc":"2.0","method":"$/cancelRequest",'
                           '"params":{"target_id":"x"}}'))
     assert r["error"]["code"] == JSONRPCError.INVALID_REQUEST and r["id"] is None
 
 
 def test_cancel_bad_params_is_invalid_params():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     u = uid()
     r = decode(p.dispatch(json.dumps({"jsonrpc": "2.0", "method": "$/cancelRequest",
                                       "id": u, "params": {}})))   # no target_id
@@ -65,7 +65,7 @@ def test_cancel_unknown_target_is_request_failed_and_audited():
     audited = []
     p = JSONRPCProtocol(
         audit_handler=lambda request, response, session_state, audit_message=None: audited.append(
-            (request.method, response)))
+            (request.method, response)), name="test", version="1.0.0")
     r = decode(p.dispatch(cancel_req(uid())))            # target not in flight
     assert r["error"]["code"] == -32803                  # REQUEST_FAILED
     assert audited and audited[-1][0] == "$/cancelRequest"
@@ -75,13 +75,15 @@ def test_cancel_unknown_target_is_request_failed_and_audited():
 def test_cancel_denied_by_authz():
     p = JSONRPCProtocol(
         authorization_handler=lambda request, session_state, target=None:
-            AuthorizationResponse(False))
+            AuthorizationResponse(False), name="test", version="1.0.0")
     r = decode(p.dispatch(cancel_req(uid())))
     assert r["error"]["code"] == -32000                  # NOT_AUTHORIZED
 
 
 # --- end-to-end with a concurrently in-flight target -------------------------
 def _inflight_protocol(handler, **kw):
+    kw.setdefault("name", "v1")
+    kw.setdefault("version", "1.0.0")
     return JSONRPCProtocol(
         [JSONRPCMethod("slow", accepts=NoArgs, handler=handler, audit=True,
                        cancellable=True)], **kw)
@@ -199,7 +201,7 @@ def test_cancel_non_cancellable_method_is_request_failed():
         release.wait(2)
         return {"ok": True}
 
-    p = JSONRPCProtocol([JSONRPCMethod("work", accepts=NoArgs, handler=blocker)])
+    p = JSONRPCProtocol([JSONRPCMethod("work", accepts=NoArgs, handler=blocker)], name="test", version="1.0.0")
     tid = uid()                                          # NOT cancellable (default)
     th = threading.Thread(target=lambda: p.dispatch(req("work", {}, id=tid)))
     th.start()
@@ -220,10 +222,10 @@ def test_cancel_event_present_only_when_cancellable():
         return {"ok": True}
 
     JSONRPCProtocol([JSONRPCMethod("c", accepts=NoArgs, handler=h,
-                                   cancellable=True)]).dispatch(req("c", {}, id=uid()))
+                                   cancellable=True)], name="test", version="1.0.0").dispatch(req("c", {}, id=uid()))
     assert isinstance(seen["event"], threading.Event)    # cancellable -> an Event
 
-    JSONRPCProtocol([JSONRPCMethod("n", accepts=NoArgs, handler=h)]).dispatch(
+    JSONRPCProtocol([JSONRPCMethod("n", accepts=NoArgs, handler=h)], name="test", version="1.0.0").dispatch(
         req("n", {}, id=uid()))
     assert seen["event"] is None                         # not cancellable -> None
 
@@ -239,7 +241,7 @@ def test_wait_for_cancel_wakes_on_cancel():
         return {"woke": woke["v"]}
 
     p = JSONRPCProtocol([JSONRPCMethod("w", accepts=NoArgs, handler=waiter,
-                                       cancellable=True)])
+                                       cancellable=True)], name="test", version="1.0.0")
     tid = uid()
     result = {}
     th = threading.Thread(target=lambda: result.__setitem__(
@@ -261,14 +263,14 @@ def test_wait_for_cancel_timeout_and_non_cancellable_return_false():
         return {"ok": True}
 
     JSONRPCProtocol([JSONRPCMethod("c", accepts=NoArgs, handler=c,
-                                   cancellable=True)]).dispatch(req("c", {}, id=uid()))
+                                   cancellable=True)], name="test", version="1.0.0").dispatch(req("c", {}, id=uid()))
     assert seen["timed_out"] is False                    # timed out, not cancelled
 
     def n(request, session_state, request_state):
         seen["nc"] = request_state.wait_for_cancel(5)    # no event -> immediate False
         return {"ok": True}
 
-    JSONRPCProtocol([JSONRPCMethod("n", accepts=NoArgs, handler=n)]).dispatch(
+    JSONRPCProtocol([JSONRPCMethod("n", accepts=NoArgs, handler=n)], name="test", version="1.0.0").dispatch(
         req("n", {}, id=uid()))
     assert seen["nc"] is False
 
@@ -299,7 +301,7 @@ def test_cancel_session_scoped_authz():
 
     p = JSONRPCProtocol(
         [JSONRPCMethod("slow", accepts=NoArgs, handler=slow, cancellable=True)],
-        authorization_handler=authz)
+        authorization_handler=authz, name="test", version="1.0.0")
 
     owner = p.new_session(server_state={"uid": 1})
     other = p.new_session(server_state={"uid": 2})
@@ -333,7 +335,7 @@ def test_cancel_authz_gets_none_target_when_not_in_flight():
         seen["target"] = target
         return AuthorizationResponse(False, "nope")      # deny regardless
 
-    p = JSONRPCProtocol(authorization_handler=authz)
+    p = JSONRPCProtocol(authorization_handler=authz, name="test", version="1.0.0")
     r = decode(p.dispatch(cancel_req(uid())))            # target not in flight
     assert seen["target"] is None                        # authz saw None...
     assert r["error"]["code"] == JSONRPCError.NOT_AUTHORIZED  # ...denied before leak
@@ -341,6 +343,8 @@ def test_cancel_authz_gets_none_target_when_not_in_flight():
 
 # --- $/cancelRequest cancels subscriptions (wire-level unsubscribe) -----------
 def _pubsub_protocol(**kw):
+    kw.setdefault("name", "v1")
+    kw.setdefault("version", "1.0.0")
     return JSONRPCProtocol(
         [JSONRPCMethod("events", accepts=NoArgs, notifies=Event,
                        direction=MessageDirection.SERVER_CLIENT)], **kw)

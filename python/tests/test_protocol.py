@@ -57,7 +57,7 @@ PROTO = JSONRPCProtocol([
     JSONRPCMethod("badret", accepts=PoolCreateArgs,
                   returns=PoolCreateResult, handler=_bad_return),
     JSONRPCMethod("orphan", accepts=PoolCreateArgs),          # no handler
-])
+], name="test", version="1.0.0")
 
 
 def uid() -> str:
@@ -149,7 +149,7 @@ def test_notification_runs_handler_side_effect():
     p = JSONRPCProtocol([
         JSONRPCMethod("note", accepts=NoArgs,
                       handler=lambda request, session_state, request_state: seen.append(1)),
-    ])
+    ], name="test", version="1.0.0")
     assert p.dispatch(req("note", {})) is None
     assert seen == [1]
 
@@ -161,7 +161,7 @@ def test_session_state_passed_to_handler():
         captured.append(session_state)
         return {"ok": True}
 
-    p = JSONRPCProtocol([JSONRPCMethod("m", accepts=NoArgs, handler=h)])
+    p = JSONRPCProtocol([JSONRPCMethod("m", accepts=NoArgs, handler=h)], name="test", version="1.0.0")
     sentinel = {"uid": 0, "session": "abc"}
     session = p.new_session(server_state=sentinel)
     p.dispatch(req("m", {}, id=uid()), session)
@@ -176,7 +176,7 @@ def test_ephemeral_session_when_none_passed():
         captured.append(session_state)
         return {"ok": True}
 
-    JSONRPCProtocol([JSONRPCMethod("m", accepts=NoArgs, handler=h)]).dispatch(
+    JSONRPCProtocol([JSONRPCMethod("m", accepts=NoArgs, handler=h)], name="test", version="1.0.0").dispatch(
         req("m", {}, id=uid()))
     assert len(captured) == 1                                # an ephemeral session
     assert captured[0].server_state_internal is None
@@ -190,7 +190,7 @@ def test_handler_called_by_keyword():
         seen.update(kw)
         return {"ok": True}
 
-    p = JSONRPCProtocol([JSONRPCMethod("m", accepts=AB, handler=h)])
+    p = JSONRPCProtocol([JSONRPCMethod("m", accepts=AB, handler=h)], name="test", version="1.0.0")
     p.dispatch(req("m", {"a": 1}, id=uid()), p.new_session(server_state="S"))
     assert set(seen) == {"request", "session_state", "request_state"}
     assert seen["request"].a == 1 and seen["session_state"].server_state_internal == "S"
@@ -274,14 +274,14 @@ def test_method_without_handler():
 # --- registry -----------------------------------------------------------------
 def test_methods_is_copy():
     p = JSONRPCProtocol([JSONRPCMethod(
-        "m", accepts=NoArgs, handler=lambda request, session_state, request_state: {})])
+        "m", accepts=NoArgs, handler=lambda request, session_state, request_state: {})], name="test", version="1.0.0")
     p.methods.clear()
     assert "m" in p.methods
 
 
 def test_register_duplicate_rejected():
     p = JSONRPCProtocol([JSONRPCMethod(
-        "m", accepts=NoArgs, handler=lambda request, session_state, request_state: {})])
+        "m", accepts=NoArgs, handler=lambda request, session_state, request_state: {})], name="test", version="1.0.0")
     with pytest.raises(ValueError):
         p.register(JSONRPCMethod(
             "m", accepts=NoArgs, handler=lambda request, session_state, request_state: {}))
@@ -289,17 +289,17 @@ def test_register_duplicate_rejected():
 
 def test_register_rejects_non_method():
     with pytest.raises(TypeError):
-        JSONRPCProtocol().register("nope")
+        JSONRPCProtocol(name="test", version="1.0.0").register("nope")
 
 
 def test_register_rejects_rpc_prefix():
     with pytest.raises(ValueError):
-        JSONRPCProtocol().register(JSONRPCMethod("rpc.internal", accepts=NoArgs))
+        JSONRPCProtocol(name="test", version="1.0.0").register(JSONRPCMethod("rpc.internal", accepts=NoArgs))
 
 
 def test_register_rejects_dollar_prefix():
     with pytest.raises(ValueError):
-        JSONRPCProtocol().register(JSONRPCMethod("$/control", accepts=NoArgs))
+        JSONRPCProtocol(name="test", version="1.0.0").register(JSONRPCMethod("$/control", accepts=NoArgs))
 
 
 def test_request_failed_code_passthrough():
@@ -308,7 +308,7 @@ def test_request_failed_code_passthrough():
     def h(request, session_state, request_state):
         raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "expected failure")
 
-    p = JSONRPCProtocol([JSONRPCMethod("f", accepts=NoArgs, handler=h)])
+    p = JSONRPCProtocol([JSONRPCMethod("f", accepts=NoArgs, handler=h)], name="test", version="1.0.0")
     r = msgspec.json.decode(p.dispatch(req("f", {}, id=uid())))
     assert r["error"]["code"] == JSONRPCError.REQUEST_FAILED == -32803
     assert r["error"]["message"] == "expected failure"

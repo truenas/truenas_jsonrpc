@@ -36,14 +36,14 @@ def req(method, params=None, id=...):
 
 def _proto_with(handler):
     return JSONRPCProtocol(
-        [JSONRPCMethod("work", accepts=NoArgs, returns=Result, handler=handler)])
+        [JSONRPCMethod("work", accepts=NoArgs, returns=Result, handler=handler)], name="test", version="1.0.0")
 
 
 # --- poll_notification -------------------------------------------------------
 # (server->client publish lives in test_pubsub.py; here we only exercise progress
 # + the drain queue.)
 def test_poll_empty_returns_none():
-    assert JSONRPCProtocol().poll_notification(block=False) is None
+    assert JSONRPCProtocol(name="test", version="1.0.0").poll_notification(block=False) is None
 
 
 # --- progress: live delivery vs purge-on-completion --------------------------
@@ -137,7 +137,7 @@ def test_inflight_cleared_on_handler_error():
     def boom(request, session_state, request_state):
         raise RuntimeError("kaboom")
 
-    p = JSONRPCProtocol([JSONRPCMethod("work", accepts=NoArgs, handler=boom)])
+    p = JSONRPCProtocol([JSONRPCMethod("work", accepts=NoArgs, handler=boom)], name="test", version="1.0.0")
     p.dispatch(req("work", {}, id=uid()))
     assert p._inflight == {}                             # finally-cleanup ran
 
@@ -147,7 +147,7 @@ def test_concurrent_dispatch_is_safe():
     proto = JSONRPCProtocol([JSONRPCMethod(
         "echo", accepts=Args, returns=Result,
         handler=lambda request, session_state, request_state: Result(
-            id=1, name=request.name))])
+            id=1, name=request.name))], name="test", version="1.0.0")
     errors = []
 
     def worker(n):

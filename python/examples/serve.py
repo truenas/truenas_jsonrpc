@@ -120,6 +120,7 @@ protocol = JSONRPCProtocol(
                                 audit=True, audit_message="Download file"),
     ],
     name="truenas",
+    version="1.0.0",
     authorization_handler=authorize,
     audit_handler=audit,
 )

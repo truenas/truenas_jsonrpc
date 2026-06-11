@@ -67,7 +67,7 @@ def test_audit_mixin_registers_and_enables_queue():
         def make_audit_handler(self):
             return lambda **kw: seen.append(kw["request"].method)
 
-    p = P(_methods(), name="v1")
+    p = P(_methods(), name="v1", version="1.0.0")
     assert p._use_audit_queue is True                # set at construction by the mixin
     assert p._audit_handler is not None
     p.dispatch(req("work", {}, id=uid()))            # no auth gate -> dispatches; audit queued
@@ -84,7 +84,7 @@ def test_audit_use_queue_false_runs_inline():
         def make_audit_handler(self):
             return lambda **kw: seen.append(kw["request"].method)
 
-    p = P(_methods(), name="v1")
+    p = P(_methods(), name="v1", version="1.0.0")
     assert p._use_audit_queue is False
     p.dispatch(req("work", {}, id=uid()))            # inline audit
     assert seen == ["work"]
@@ -95,7 +95,7 @@ def test_auth_stack_mixin_installs_session_setup():
         def make_auth_stack(self):
             return _PeercredStack()
 
-    p = P(_methods(), name="v1")
+    p = P(_methods(), name="v1", version="1.0.0")
     assert p._session_setup is not None              # install() ran
     s = p.new_session(server_state=Peer(transport="unix", uid=0))
     r = decode(p.dispatch(req("$/sessionSetup", {}, id=uid()), s))
@@ -108,7 +108,7 @@ def test_default_hooks_install_nothing():
     class P(AuthStackMixin, AuditMixin, JSONRPCProtocol):
         audit_use_queue = False
 
-    p = P(_methods(), name="v1")
+    p = P(_methods(), name="v1", version="1.0.0")
     assert p._session_setup is None and p._audit_handler is None
 
 
@@ -121,7 +121,7 @@ def test_combined_mixins_cooperative_init():
         def make_audit_handler(self):
             return lambda **kw: seen.append(kw["request"].method)
 
-    p = P(_methods(), name="v1")
+    p = P(_methods(), name="v1", version="1.0.0")
     assert [c.__name__ for c in type(p).__mro__][:4] == [
         "P", "AuthStackMixin", "AuditMixin", "JSONRPCProtocol"]
     assert p._use_audit_queue is True
@@ -142,7 +142,7 @@ def test_truenas_auth_mixin_builds_truenas_auth():
     class P(TrueNASAuthMixin, JSONRPCProtocol):
         auth_scram_service = "x-scram"
 
-    p = P(_methods(), name="v1")
+    p = P(_methods(), name="v1", version="1.0.0")
     assert p._session_setup is not None              # installed at construction
     stack = p.make_auth_stack()
     assert isinstance(stack, TrueNASAuth)
@@ -160,7 +160,7 @@ def test_truenas_audit_mixin_emits_to_socket(tmp_path):
             audit_socktype = socket.SOCK_STREAM
             # audit_service unset -> defaults to the protocol name ("zfsd")
 
-        p = P(_methods(), name="zfsd")
+        p = P(_methods(), name="zfsd", version="1.0.0")
         assert p._use_audit_queue is True
         p.dispatch(req("work", {}, id=uid()))
         p.poll_audit(block=False).run()              # emits to the socket

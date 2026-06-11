@@ -1,7 +1,7 @@
 """``SyslogAuditHandler`` — emit middleware-shaped ``@cee`` audit records to syslog.
 
-It is the ``audit_handler`` callable: pass an instance to ``JSONRPCProtocol(audit_handler=…,
-use_audit_queue=True)``. Each audited call is formatted (via :class:`AuditFormatter`) into a
+It is the ``audit_handler`` callable: pass an instance to ``JSONRPCProtocol(…,
+audit_handler=…, use_audit_queue=True)``. Each audited call is formatted (via :class:`AuditFormatter`) into a
 ``@cee:{"TNAUDIT":{…}}`` line and written through a stdlib
 ``logging.handlers.SysLogHandler``.
 

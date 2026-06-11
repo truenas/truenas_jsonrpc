@@ -57,7 +57,7 @@ def _whoami(request: NoArgs, session_state, request_state) -> WhoAmI:
 
 protocol = JSONRPCProtocol(
     [JSONRPCMethod("whoami", accepts=NoArgs, returns=WhoAmI, handler=_whoami)],
-    name="truenas.example.v1")
+    name="truenas.example.v1", version="1.0.0")
 
 # SCRAM ONLY — every other mechanism is refused.
 TrueNASAuth(mechanisms={"SCRAM"}, scram_service=SCRAM_SERVICE).install(protocol)

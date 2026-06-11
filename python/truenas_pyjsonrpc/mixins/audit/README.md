@@ -10,7 +10,7 @@ from truenas_pyjsonrpc import JSONRPCProtocol
 from truenas_pyjsonrpc.mixins.audit import SyslogAuditHandler
 
 audit = SyslogAuditHandler(service="vm.api")           # -> /var/run/syslog-ng/vm.api.sock (STREAM)
-protocol = JSONRPCProtocol(methods, name="vm.api.v1",
+protocol = JSONRPCProtocol(methods, name="vm.api.v1", version="1.0.0",
                            audit_handler=audit, use_audit_queue=True)
 ```
 

@@ -175,4 +175,4 @@ def build_protocol(root: str, *, name: str = "fileshare") -> JSONRPCProtocol:
                                 direction=TransferDirection.UPLOAD,
                                 negotiate=share.put_negotiate,
                                 transfer=share.put_transfer),
-    ], name=name)
+    ], name=name, version="1.0.0")

@@ -273,12 +273,21 @@ class JSONRPCProtocol:
     """
 
     def __init__(self, methods: Iterable[JSONRPCMethod] = (), *,
-                 name: str | None = None,
+                 name: str,
+                 version: str,
                  authorization_handler: Callable[..., Any] | None = None,
                  audit_handler: Callable[..., Any] | None = None,
                  cancellation_handler: Callable[..., Any] | None = None,
                  use_audit_queue: bool = False) -> None:
+        # ``name`` (the ``$/negotiate`` discriminator) and ``version`` are required:
+        # together they form the protocol's identity, and they are what makes a
+        # generated OpenRPC document's (mandatory) info.title / info.version valid.
+        if not isinstance(name, str) or not name:
+            raise ValueError("JSONRPCProtocol requires a non-empty 'name'")
+        if not isinstance(version, str) or not version:
+            raise ValueError("JSONRPCProtocol requires a non-empty 'version'")
         self._name = name
+        self._version = version
         self._methods: dict[str, JSONRPCMethod] = {}
         self._authorization_handler: Callable[..., Any] | None = None
         self._audit_handler: Callable[..., Any] | None = None
@@ -316,10 +325,18 @@ class JSONRPCProtocol:
             self.register_cancellation_handler(cancellation_handler)
 
     @property
-    def name(self) -> str | None:
-        """The protocol's configured ``name`` (the discriminator a client selects with
-        ``$/negotiate``), or ``None``."""
+    def name(self) -> str:
+        """The protocol's configured ``name`` — the discriminator a client selects with
+        ``$/negotiate`` (and the default OpenRPC ``info.title``)."""
         return self._name
+
+    @property
+    def version(self) -> str:
+        """The protocol's configured ``version`` — an arbitrary, human-meaningful string
+        (the default OpenRPC ``info.version``). This is the *protocol/API contract* version
+        and is distinct from the ``$/serverInfo`` server/OS version, which is configured
+        separately via :meth:`register_server_info`."""
+        return self._version
 
     # --- sessions ------------------------------------------------------------
     def new_session(self, server_state: Any = None) -> SessionState:

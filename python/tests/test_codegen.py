@@ -61,10 +61,13 @@ def test_generate_skips_control_methods_and_reuses_types():
 
 
 def test_generate_requires_a_protocol_name():
-    nameless = JSONRPCProtocol([
-        JSONRPCMethod("echo", accepts=EchoArgs, returns=Result)])
+    # A JSONRPCProtocol always carries a name now, but codegen still guards the
+    # explicit override path: an empty protocol_name has nothing to $/negotiate.
+    proto = JSONRPCProtocol(
+        [JSONRPCMethod("echo", accepts=EchoArgs, returns=Result)],
+        name="v1", version="1.0.0")
     with pytest.raises(ValueError, match="no protocol name"):
-        generate(nameless)
+        generate(proto, protocol_name="")
 
 
 def test_generate_rejects_main_module_structs():
@@ -72,7 +75,7 @@ def test_generate_rejects_main_module_structs():
         a: int
     Local.__module__ = "__main__"               # ...pretend it's __main__
     proto = JSONRPCProtocol([
-        JSONRPCMethod("x", accepts=Local, returns=Result)], name="v1")
+        JSONRPCMethod("x", accepts=Local, returns=Result)], name="v1", version="1.0.0")
     with pytest.raises(ValueError, match="__main__"):
         generate(proto)
 
@@ -191,7 +194,8 @@ def test_codegen_cli_writes_importable_source(tmp_path):
         "class Ping(msgspec.Struct):\n"
         "    n: int\n"
         "protocol = JSONRPCProtocol(\n"
-        "    [JSONRPCMethod('ping', accepts=Ping, returns=Ping)], name='cli.v1')\n")
+        "    [JSONRPCMethod('ping', accepts=Ping, returns=Ping)],\n"
+        "    name='cli.v1', version='1.0.0')\n")
     out = tmp_path / "gen.py"
     sys.path.insert(0, str(tmp_path))
     try:

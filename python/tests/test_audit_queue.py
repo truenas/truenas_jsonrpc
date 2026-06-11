@@ -44,7 +44,7 @@ def test_audit_disabled_method_not_audited():
     seen = []
     p = JSONRPCProtocol(
         [JSONRPCMethod("m", accepts=NoArgs, handler=_handler)],      # audit=False
-        audit_handler=lambda request, response, session_state, audit_message=None: seen.append(1))
+        audit_handler=lambda request, response, session_state, audit_message=None: seen.append(1), name="test", version="1.0.0")
     p.dispatch(req("m", uid(), {}))
     assert seen == []                                    # not audited
     assert p.poll_audit(block=False) is None             # nothing queued either
@@ -54,7 +54,7 @@ def test_audit_enabled_sync_called_inline():
     seen = []
     p = JSONRPCProtocol(
         [JSONRPCMethod("m", accepts=NoArgs, handler=_handler, audit=True)],
-        audit_handler=lambda request, response, session_state, audit_message=None: seen.append(request.method))
+        audit_handler=lambda request, response, session_state, audit_message=None: seen.append(request.method), name="test", version="1.0.0")
     p.dispatch(req("m", uid(), {}))
     assert seen == ["m"]                                 # inline (sync)
     assert p.poll_audit(block=False) is None             # queue unused
@@ -66,7 +66,7 @@ def test_audit_queue_defers_off_path():
     p = JSONRPCProtocol(
         [JSONRPCMethod("m", accepts=NoArgs, handler=_handler, audit=True)],
         audit_handler=lambda request, response, session_state, audit_message=None: seen.append(request.method),
-        use_audit_queue=True)
+        use_audit_queue=True, name="test", version="1.0.0")
     p.dispatch(req("m", uid(), {}))
     assert seen == []                                    # NOT called on the IO path
     rec = p.poll_audit(block=False)
@@ -77,7 +77,7 @@ def test_audit_queue_defers_off_path():
 
 
 def test_poll_audit_empty_returns_none():
-    assert JSONRPCProtocol().poll_audit(block=False) is None
+    assert JSONRPCProtocol(name="test", version="1.0.0").poll_audit(block=False) is None
 
 
 def test_audit_queue_redacts_off_path():
@@ -90,7 +90,7 @@ def test_audit_queue_redacts_off_path():
                        audit=True)],
         audit_handler=lambda request, response, session_state, audit_message=None: captured.append(
             (request.params["password"], response["result"]["password"])),
-        use_audit_queue=True)
+        use_audit_queue=True, name="test", version="1.0.0")
     wire = msgspec.json.decode(p.dispatch(req("login", uid(),
                                               {"user": "u", "password": "hunter2"})))
     assert wire["result"]["password"] == "hunter2"       # wire unredacted
@@ -104,7 +104,7 @@ def test_audit_queue_concurrent_dispatch_and_drain():
     p = JSONRPCProtocol(
         [JSONRPCMethod("m", accepts=NoArgs, handler=_handler, audit=True)],
         audit_handler=lambda request, response, session_state, audit_message=None: None,
-        use_audit_queue=True)
+        use_audit_queue=True, name="test", version="1.0.0")
     n_threads, per = 8, 200
     drained = []
     stop = threading.Event()

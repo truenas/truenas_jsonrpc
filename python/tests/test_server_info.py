@@ -40,17 +40,17 @@ def _info_handler(session_state):
 
 # --- not registered -----------------------------------------------------------
 def test_not_registered_request_is_method_not_found():
-    r = decode(JSONRPCProtocol().dispatch(info_req(id=uid())))
+    r = decode(JSONRPCProtocol(name="test", version="1.0.0").dispatch(info_req(id=uid())))
     assert r["error"]["code"] == JSONRPCError.METHOD_NOT_FOUND
 
 
 def test_not_registered_notification_is_ignored():
-    assert JSONRPCProtocol().dispatch(info_req()) is None     # no id -> ignored
+    assert JSONRPCProtocol(name="test", version="1.0.0").dispatch(info_req()) is None     # no id -> ignored
 
 
 # --- registered happy path ----------------------------------------------------
 def test_registered_returns_validated_result():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(_info_handler, returns=Info)
     u = uid()
     r = decode(p.dispatch(info_req(id=u)))
@@ -59,7 +59,7 @@ def test_registered_returns_validated_result():
 
 
 def test_result_can_use_the_builtin_serverinfo_struct():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(
         lambda session_state: ServerInfo(name="tn", version="1.0"), returns=ServerInfo)
     r = decode(p.dispatch(info_req(id=uid())))
@@ -71,7 +71,7 @@ def test_bypasses_authorization():
     calls = []
     p = JSONRPCProtocol(
         authorization_handler=lambda request, session_state: (
-            calls.append("authz") or AuthorizationResponse(False, "denied")))
+            calls.append("authz") or AuthorizationResponse(False, "denied")), name="test", version="1.0.0")
     p.register_server_info(_info_handler, returns=Info)
     r = decode(p.dispatch(info_req(id=uid())))
     assert r["result"] == {"name": "truenas", "version": "25.04"}   # not denied
@@ -83,7 +83,7 @@ def test_not_audited():
     audited = []
     p = JSONRPCProtocol(
         audit_handler=lambda request, response, session_state, audit_message=None:
-            audited.append(request.method))
+            audited.append(request.method), name="test", version="1.0.0")
     p.register_server_info(_info_handler, returns=Info)
     p.dispatch(info_req(id=uid()))
     assert audited == []                                 # $/serverInfo not audited
@@ -91,7 +91,7 @@ def test_not_audited():
 
 # --- request-only -------------------------------------------------------------
 def test_registered_no_id_is_invalid_request():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(_info_handler, returns=Info)
     r = decode(p.dispatch(info_req()))                   # no id
     assert r["error"]["code"] == JSONRPCError.INVALID_REQUEST
@@ -103,7 +103,7 @@ def test_handler_jsonrpcerror_passthrough():
     def boom(session_state):
         raise JsonRpcError(JSONRPCError.REQUEST_FAILED, "nope")
 
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(boom, returns=Info)
     r = decode(p.dispatch(info_req(id=uid())))
     assert r["error"]["code"] == JSONRPCError.REQUEST_FAILED
@@ -114,7 +114,7 @@ def test_handler_generic_exception_is_internal_error():
     def boom(session_state):
         raise RuntimeError("kaboom")
 
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(boom, returns=Info)
     r = decode(p.dispatch(info_req(id=uid())))
     assert r["error"]["code"] == JSONRPCError.INTERNAL_ERROR
@@ -124,7 +124,7 @@ def test_bad_result_shape_is_invalid_result():
     def bad(session_state):
         return {"name": "x"}                             # missing required 'version'
 
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(bad, returns=Info)
     r = decode(p.dispatch(info_req(id=uid())))
     assert r["error"]["code"] == JSONRPCError.INTERNAL_ERROR
@@ -133,7 +133,7 @@ def test_bad_result_shape_is_invalid_result():
 
 # --- params ignored / session_state passthrough -------------------------------
 def test_params_are_ignored():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(_info_handler, returns=Info)
     u = uid()
     wire = json.dumps({"jsonrpc": "2.0", "method": "$/serverInfo", "id": u,
@@ -148,7 +148,7 @@ def test_handler_receives_session_state():
         seen["ss"] = session_state
         return Info(name="n", version="v")
 
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(h, returns=Info)
     sentinel = {"conn": 1}
     session = p.new_session(server_state=sentinel)
@@ -159,7 +159,7 @@ def test_handler_receives_session_state():
 
 # --- registration validation + clearing --------------------------------------
 def test_register_validation():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     with pytest.raises(TypeError):
         p.register_server_info(123, returns=Info)        # non-callable handler
     with pytest.raises(TypeError):
@@ -169,7 +169,7 @@ def test_register_validation():
 
 
 def test_clear_disables():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register_server_info(_info_handler, returns=Info)
     assert decode(p.dispatch(info_req(id=uid())))["result"]["name"] == "truenas"
     p.register_server_info(None)                         # clear

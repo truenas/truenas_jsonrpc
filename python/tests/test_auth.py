@@ -96,7 +96,7 @@ class _Stack(AuthStack):
 def _proto(**kw) -> JSONRPCProtocol:
     p = JSONRPCProtocol(
         [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)],
-        name="v1", **kw)
+        name="v1", version="1.0.0", **kw)
     _Stack().install(p)
     return p
 
@@ -233,7 +233,7 @@ class _ScramOtpStack(AuthStack):
 @requires_scram
 def test_scram_then_otp():
     p = JSONRPCProtocol(
-        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1")
+        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1", version="1.0.0")
     _ScramOtpStack().install(p)
     s = p.new_session(server_state=Peer(transport="tcp", tls=True))
     cf, r = _scram_setup_first(p, s, "scott")
@@ -290,7 +290,7 @@ class _GssapiStack(AuthStack):
 
 def test_gssapi_multi_round_exchange():
     p = JSONRPCProtocol(
-        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1")
+        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1", version="1.0.0")
     _GssapiStack().install(p)
     s = p.new_session(server_state=Peer(transport="tcp", tls=True))
     r = decode(p.dispatch(req("$/sessionSetup", _gssapi(b"t1"), id=uid()), s))
@@ -317,7 +317,7 @@ class _CertOtpStack(AuthStack):
 def test_gssapi_continue_with_wrong_pending_is_auth_err():
     # a GSSAPI continue when the in-flight exchange isn't GSSAPI is rejected
     p = JSONRPCProtocol(
-        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1")
+        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1", version="1.0.0")
     _CertOtpStack().install(p)
     s = p.new_session(server_state=Peer(transport="tcp", tls=True,
                                         peercert={"subject": "alice"}))
@@ -348,7 +348,7 @@ def test_secrets_redacted_in_audit():
 
     p = JSONRPCProtocol(
         [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)],
-        name="v1", audit_handler=audit)
+        name="v1", audit_handler=audit, version="1.0.0")
     _CertOtpStack().install(p)
     s = p.new_session(server_state=Peer(transport="tcp", tls=True,
                                         peercert={"subject": "alice"}))
@@ -388,7 +388,7 @@ def test_scram_transcript_redacted_in_audit():
 def test_e2e_peercred_over_unix():
     path = _tmp_sock()
     proto = JSONRPCProtocol(
-        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1")
+        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1", version="1.0.0")
 
     class _UidStack(AuthStack):                  # trust the connecting process's own uid
         def peercred(self, peer):

@@ -140,7 +140,7 @@ def _work(request, session_state, request_state) -> Ok:
 
 def _proto(stack: TrueNASAuth) -> JSONRPCProtocol:
     p = JSONRPCProtocol(
-        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1")
+        [JSONRPCMethod("work", accepts=NoArgs, returns=Ok, handler=_work)], name="v1", version="1.0.0")
     stack.install(p)
     return p
 

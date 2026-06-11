@@ -73,6 +73,8 @@ def _login(request, session_state):
 
 def _setup_proto(**kw):
     """A protocol with a normal `work` method + single-step `$/sessionSetup`."""
+    kw.setdefault("name", "v1")
+    kw.setdefault("version", "1.0.0")
     p = JSONRPCProtocol([_work()], **kw)
     p.add_session_setup(JSONRPCMethod("$/sessionSetup", accepts=Creds,
                                       returns=LoginResult, handler=_login))
@@ -81,7 +83,7 @@ def _setup_proto(**kw):
 
 # --- SessionState / new_session ----------------------------------------------
 def test_new_session_has_uuid_name_and_seeded_internal():
-    p = JSONRPCProtocol(name="truenas")
+    p = JSONRPCProtocol(name="truenas", version="1.0.0")
     s = p.new_session(server_state={"conn": 1})
     uuid.UUID(s.session_uuid)                              # a valid uuid
     assert s.protocol_name == "truenas"
@@ -92,7 +94,7 @@ def test_new_session_has_uuid_name_and_seeded_internal():
 
 
 def test_no_setup_means_no_gate():
-    p = JSONRPCProtocol([_work()])                         # no add_session_setup
+    p = JSONRPCProtocol([_work()], name="test", version="1.0.0")                         # no add_session_setup
     assert decode(p.dispatch(req("work", {}, id=uid())))["result"] == {"ok": True}
 
 
@@ -121,7 +123,7 @@ def test_normal_method_gated_before_established():
 def test_pre_auth_method_allowed_before_established():
     p = JSONRPCProtocol([JSONRPCMethod(
         "ping", accepts=NoArgs, pre_auth=True,
-        handler=lambda request, session_state, request_state: {"pong": True})])
+        handler=lambda request, session_state, request_state: {"pong": True})], name="test", version="1.0.0")
     p.add_session_setup(JSONRPCMethod("$/sessionSetup", accepts=Creds,
                                       returns=LoginResult, handler=_login))
     s = p.new_session()                                   # NONE
@@ -141,7 +143,7 @@ def _continue_2fa(request, session_state):
 
 
 def _twostep_proto():
-    p = JSONRPCProtocol([_work()])
+    p = JSONRPCProtocol([_work()], name="test", version="1.0.0")
     p.add_session_setup(
         JSONRPCMethod("$/sessionSetup", accepts=Creds, returns=OtpStep,
                       handler=_login_2fa),
@@ -183,7 +185,7 @@ def test_continue_only_at_init():
 
 # --- not enabled / no id -----------------------------------------------------
 def test_setup_not_registered_is_method_not_found():
-    r = decode(JSONRPCProtocol().dispatch(req("$/sessionSetup", {}, id=uid())))
+    r = decode(JSONRPCProtocol(name="test", version="1.0.0").dispatch(req("$/sessionSetup", {}, id=uid())))
     assert r["error"]["code"] == JSONRPCError.METHOD_NOT_FOUND
 
 
@@ -246,7 +248,7 @@ def test_setup_failure_is_audited_and_stays_none():
 
 # --- handler-contract violations ---------------------------------------------
 def test_setup_bad_return_shape_is_internal_error():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.add_session_setup(JSONRPCMethod(
         "$/sessionSetup", accepts=Creds, returns=LoginResult,
         handler=lambda request, session_state: "not a tuple"))
@@ -257,7 +259,7 @@ def test_setup_bad_return_shape_is_internal_error():
 
 
 def test_setup_bad_lifecycle_is_internal_error():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.add_session_setup(JSONRPCMethod(
         "$/sessionSetup", accepts=Creds, returns=LoginResult,
         handler=lambda request, session_state: ("established", LoginResult(welcome="x"))))
@@ -267,7 +269,7 @@ def test_setup_bad_lifecycle_is_internal_error():
 
 
 def test_setup_bad_result_is_invalid_result():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.add_session_setup(JSONRPCMethod(
         "$/sessionSetup", accepts=Creds, returns=LoginResult,
         handler=lambda request, session_state: (SessionLifecycle.ESTABLISHED, {"nope": 1})))
@@ -309,7 +311,7 @@ def test_session_close_with_no_session_is_request_failed():
 
 def test_close_session_helper_drops_subscriptions():
     p = JSONRPCProtocol([JSONRPCMethod("evt", accepts=NoArgs, notifies=NoArgs,
-                                       direction=MessageDirection.SERVER_CLIENT)])
+                                       direction=MessageDirection.SERVER_CLIENT)], name="test", version="1.0.0")
     s = p.new_session()
     sub = decode(p.dispatch(req("evt", id=uid()), s))
     assert sub["result"] in p._subscriptions["evt"]
@@ -332,7 +334,7 @@ def test_server_info_works_before_established():
 
 # --- add_session_setup validation --------------------------------------------
 def test_add_session_setup_validation():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     with pytest.raises(TypeError):
         p.add_session_setup("nope")                       # not a JSONRPCMethod
     with pytest.raises(TypeError):                        # SERVER_CLIENT not allowed

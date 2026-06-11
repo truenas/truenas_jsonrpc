@@ -112,7 +112,7 @@ def ping(request, session_state, request_state) -> Pong:
 
 protocol = JSONRPCProtocol([
     JSONRPCMethod("core.ping", accepts=PingArgs, returns=Pong, handler=ping),
-], name="truenas.api.v1")
+], name="truenas.api.v1", version="1.0.0")
 
 
 async def main() -> None:
@@ -327,7 +327,8 @@ def session_setup_continue(request: ContinueArgs, session_state) -> tuple:
 Wire them onto the protocol:
 
 ```python
-protocol = JSONRPCProtocol(methods, name="truenas.api.v1", audit_handler=audit)
+protocol = JSONRPCProtocol(methods, name="truenas.api.v1", version="1.0.0",
+                           audit_handler=audit)
 protocol.add_session_setup(
     JSONRPCMethod("$/sessionSetup", accepts=SetupArgs, returns=LoginResult,
                   handler=session_setup),

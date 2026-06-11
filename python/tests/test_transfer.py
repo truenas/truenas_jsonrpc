@@ -101,7 +101,7 @@ def _build() -> JSONRPCProtocol:
                                 direction=TransferDirection.UPLOAD,
                                 negotiate=_ul_negotiate, transfer=_ul_transfer,
                                 pre_auth=True),
-    ], name="v1")
+    ], name="v1", version="1.0.0")
     p.add_session_setup(_auth_setup())
     return p
 

@@ -123,7 +123,8 @@ def _methods():
 
 
 def _proto(audit, **kw):
-    return JSONRPCProtocol(_methods(), name="v1", audit_handler=audit, **kw)
+    return JSONRPCProtocol(_methods(), name="v1", version="1.0.0",
+                           audit_handler=audit, **kw)
 
 
 # --- record shape ------------------------------------------------------------
@@ -225,7 +226,7 @@ def _setup_login(request, session_state):
 
 def test_control_message_via_session_setup():
     h, cap = _handler()
-    p = JSONRPCProtocol([], name="v1", audit_handler=h)
+    p = JSONRPCProtocol([], name="v1", audit_handler=h, version="1.0.0")
     p.add_session_setup(JSONRPCMethod("$/sessionSetup", accepts=Creds, returns=SetupReply,
                                       handler=_setup_login))
     s = p.new_session(server_state=Peer(transport="tcp", tls=True, address=("10.0.0.9", 4444)))

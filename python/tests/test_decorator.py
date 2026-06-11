@@ -42,7 +42,7 @@ def req(method, id, params=None):
 
 
 def test_builds_method_and_registers():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
 
     @jrpc_method(name="pool.create", accepts=Args, returns=Result, protocols=[p])
     def pool_create(request, session_state, request_state):
@@ -74,7 +74,7 @@ def test_name_defaults_to_func_name():
 
 
 def test_dispatches_end_to_end():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
 
     @jrpc_method(name="pool.create", accepts=Args, returns=Result, protocols=[p])
     def pool_create(request, session_state, request_state):
@@ -86,7 +86,7 @@ def test_dispatches_end_to_end():
 
 
 def test_registers_into_multiple_protocols_sharing_one_method():
-    a, b = JSONRPCProtocol(), JSONRPCProtocol()
+    a, b = JSONRPCProtocol(name="test", version="1.0.0"), JSONRPCProtocol(name="test", version="1.0.0")
 
     @jrpc_method(name="m", accepts=NoArgs, protocols=[a, b])
     def m(request, session_state, request_state):
@@ -102,13 +102,13 @@ def test_no_protocols_attaches_method_for_manual_registration():
         return {}
 
     assert isinstance(m.method, JSONRPCMethod)
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     p.register(m.method)
     assert "m" in p.methods
 
 
 def test_server_client_topic_has_no_handler_and_works():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
 
     @jrpc_method(name="pool.events", accepts=NoArgs, notifies=Event,
                  direction=MessageDirection.SERVER_CLIENT, protocols=[p])
@@ -129,7 +129,7 @@ def test_server_client_topic_has_no_handler_and_works():
 
 
 def test_duplicate_name_raises_through_register():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
 
     @jrpc_method(name="m", accepts=NoArgs, protocols=[p])
     def m1(request, session_state, request_state):
@@ -142,7 +142,7 @@ def test_duplicate_name_raises_through_register():
 
 
 def test_rpc_prefix_raises_through_register():
-    p = JSONRPCProtocol()
+    p = JSONRPCProtocol(name="test", version="1.0.0")
     with pytest.raises(ValueError):
         @jrpc_method(name="rpc.internal", accepts=NoArgs, protocols=[p])
         def x(request, session_state, request_state):

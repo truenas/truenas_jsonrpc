@@ -47,7 +47,7 @@ def pool_create(request: PoolCreateArgs, session_state, request_state) -> PoolCr
 protocol = JSONRPCProtocol([
     JSONRPCMethod("pool.create", accepts=PoolCreateArgs,
                   returns=PoolCreateResult, handler=pool_create),
-])
+], name="truenas.api.v1", version="1.0.0")
 
 uid = "550e8400-e29b-41d4-a716-446655440000"            # ids MUST be UUIDs
 print(protocol.dispatch(
@@ -64,6 +64,11 @@ a message with no `id` is a notification (no reply; `dispatch` returns `None`).
 `dispatch(wire, session=None)` takes a per-connection `SessionState`
 ([Sessions & authentication](#sessions--authentication)); `None` mints a throwaway
 one — fine for stateless / no-auth use.
+
+Every `JSONRPCProtocol` requires a **`name`** (the `$/negotiate` discriminator a client
+selects, and the default OpenRPC `info.title`) and a **`version`** (an arbitrary string —
+the OpenRPC `info.version`; distinct from the `$/serverInfo` server/OS version). API
+*versioning* is done by building a separate protocol per version.
 
 ## Defining methods
 
@@ -104,7 +109,7 @@ attached as `func.method`.
 ```python
 from truenas_pyjsonrpc import JSONRPCProtocol, MessageDirection, jrpc_method
 
-public = JSONRPCProtocol()                       # create the protocol(s) first
+public = JSONRPCProtocol(name="truenas.api.v1", version="1.0.0")   # name + version required
 
 @jrpc_method(name="pool.create", accepts=PoolCreateArgs, returns=PoolCreateResult,
              protocols=[public])
@@ -140,8 +145,8 @@ def audit(request, response, session_state, audit_message=None) -> None:
     outcome = "error" if "error" in response else "ok"
     log.info("%s -> %s (%s)", request.method, outcome, audit_message)
 
-protocol = JSONRPCProtocol(methods, authorization_handler=authorize,
-                           audit_handler=audit)
+protocol = JSONRPCProtocol(methods, name="truenas.api.v1", version="1.0.0",
+                           authorization_handler=authorize, audit_handler=audit)
 ```
 
 - **Authorization** must return an `AuthorizationResponse`; an `authorized=False`
@@ -400,6 +405,19 @@ Result`. See **[`examples/`](examples/)**: `serve_async.py` / `serve_ws.py` (ser
 `client_async.py` / `client_ws.py` (self-contained end-to-end demos), and the generated
 `client_gen.py`.
 
+**OpenRPC document.** Emit a spec-valid [OpenRPC](https://spec.open-rpc.org/) service
+description (a sibling build-time tool at the repo root) for docs, validators, mock
+servers, and cross-language generators:
+
+```
+python openrpc_gen.py mypkg.api:protocol --out openrpc.json
+```
+
+`info.title` / `info.version` come from the protocol's `name` / `version`; each method
+becomes by-name `params` (decomposed from `accepts`) plus a `result` (from `returns`),
+with pub/sub, fd-transfer, and `roles` metadata as `x-*` extensions and the shared
+Structs under `components.schemas`. Override with `--title` / `--version`.
+
 **Raw-fd transfers (bulk streams).** For a self-delimiting bulk stream — e.g. piping a
 `zfs send`/`recv` stream through libzfs (`lzc_send` / `lzc_receive`) directly on the
 socket — a `JSONRPCFdTransferMethod` lends its handler the connection's **raw socket
@@ -504,7 +522,7 @@ Run from this directory (`python/` — the Python implementation root):
 
 ```sh
 python -m pytest tests/          # WebSocket / PAM tests skip unless their deps are present
-python -m mypy truenas_pyjsonrpc truenas_pyjsonrpc_server truenas_pyjsonrpc_client codegen.py
+python -m mypy truenas_pyjsonrpc truenas_pyjsonrpc_server truenas_pyjsonrpc_client codegen.py openrpc_gen.py
 python examples/serve.py
 
 pip install -e .[websocket]      # optional: enable the WebSocket transport

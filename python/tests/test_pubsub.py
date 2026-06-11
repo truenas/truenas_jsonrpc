@@ -56,7 +56,7 @@ def _subscribe(p, session):
 
 # --- subscribe ----------------------------------------------------------------
 def test_subscribe_returns_sub_id_and_registers():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     u = uid()
     r = decode(p.dispatch(sub_req("pool.events", u),
                           p.new_session(server_state="conn1")))
@@ -67,7 +67,7 @@ def test_subscribe_returns_sub_id_and_registers():
 
 
 def test_subscribe_without_id_is_invalid_request():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     r = decode(p.dispatch(json.dumps({"jsonrpc": "2.0", "method": "pool.events"})))
     assert r["error"]["code"] == JSONRPCError.INVALID_REQUEST and r["id"] is None
     assert p._subscriptions.get("pool.events", {}) == {}     # nothing registered
@@ -76,7 +76,7 @@ def test_subscribe_without_id_is_invalid_request():
 def test_subscribe_denied_by_authz_registers_nothing():
     p = JSONRPCProtocol(
         [_topic()],
-        authorization_handler=lambda request, session_state: AuthorizationResponse(False),
+        authorization_handler=lambda request, session_state: AuthorizationResponse(False), name="test", version="1.0.0"
     )
     r = decode(p.dispatch(sub_req("pool.events", uid()),
                           p.new_session(server_state="conn1")))
@@ -89,7 +89,7 @@ def test_subscribe_is_audited():
     p = JSONRPCProtocol(
         [_topic()],
         audit_handler=lambda request, response, session_state, audit_message=None:
-            seen.append((request.method, response)),
+            seen.append((request.method, response)), name="test", version="1.0.0"
     )
     p.dispatch(sub_req("pool.events", uid()), p.new_session(server_state="conn1"))
     assert len(seen) == 1 and seen[0][0] == "pool.events" and "result" in seen[0][1]
@@ -97,7 +97,7 @@ def test_subscribe_is_audited():
 
 # --- publish ------------------------------------------------------------------
 def test_publish_fans_out_to_each_subscriber():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     s1 = p.new_session(server_state="conn1")
     s2 = p.new_session(server_state="conn2")
     _subscribe(p, s1)
@@ -114,13 +114,13 @@ def test_publish_fans_out_to_each_subscriber():
 
 
 def test_publish_no_subscribers_is_noop():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     p.send_notification("pool.events", {"name": "x", "state": "ONLINE"})
     assert p.poll_notification(block=False) is None
 
 
 def test_publish_unknown_method_raises():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     with pytest.raises(ValueError):
         p.send_notification("nope", {"name": "x", "state": "y"})
 
@@ -129,13 +129,13 @@ def test_publish_client_server_method_raises():
     p = JSONRPCProtocol([
         JSONRPCMethod("ping", accepts=NoArgs,
                       handler=lambda request, session_state, request_state: {}),
-    ])
+    ], name="test", version="1.0.0")
     with pytest.raises(ValueError):
         p.send_notification("ping", {})
 
 
 def test_publish_invalid_payload_raises_and_enqueues_nothing():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     _subscribe(p, p.new_session())
     with pytest.raises(msgspec.ValidationError):
         p.send_notification("pool.events", {"name": "tank"})  # missing 'state'
@@ -144,7 +144,7 @@ def test_publish_invalid_payload_raises_and_enqueues_nothing():
 
 # --- unsubscribe --------------------------------------------------------------
 def test_unsubscribe_stops_delivery():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     sid = _subscribe(p, p.new_session())
     assert p.unsubscribe(sid) is True
     p.send_notification("pool.events", {"name": "x", "state": "ONLINE"})
@@ -153,7 +153,7 @@ def test_unsubscribe_stops_delivery():
 
 
 def test_unsubscribe_all_clears_one_connection():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     c1 = p.new_session(server_state={"conn": 1})              # one connection...
     c2 = p.new_session(server_state={"conn": 2})              # ...another
     _subscribe(p, c1)
@@ -168,7 +168,7 @@ def test_unsubscribe_all_clears_one_connection():
 
 # --- concurrency --------------------------------------------------------------
 def test_concurrent_subscribe_then_publish():
-    p = JSONRPCProtocol([_topic()])
+    p = JSONRPCProtocol([_topic()], name="test", version="1.0.0")
     n = 20
 
     def sub(i):

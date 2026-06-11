@@ -88,7 +88,7 @@ def _build() -> JSONRPCProtocol:
                       cancellable=True),
         JSONRPCMethod("events", accepts=NoArgs, notifies=Event,
                       direction=MessageDirection.SERVER_CLIENT),
-    ], name="v1")
+    ], name="v1", version="1.0.0")
     p.add_session_setup(JSONRPCMethod("$/sessionSetup", accepts=Creds,
                                       returns=LoginResult, handler=_login))
     return p
@@ -326,7 +326,7 @@ def _build_peer_probe() -> JSONRPCProtocol:
     p = JSONRPCProtocol([
         JSONRPCMethod("whoami", accepts=NoArgs, returns=PeerProbe, handler=_whoami,
                       pre_auth=True),
-    ], name="v1")
+    ], name="v1", version="1.0.0")
     p.add_session_setup(_auth_setup())
     return p
 
@@ -432,7 +432,7 @@ def test_network_transport_requires_authentication():
     # clients, so a TCP/WebSocket server must refuse to surface it.
     bare = JSONRPCProtocol(
         [JSONRPCMethod("whoami", accepts=NoArgs, returns=PeerProbe, handler=_whoami)],
-        name="v1")
+        name="v1", version="1.0.0")
     with pytest.raises(ValueError, match="no authentication"):
         JSONRPCServer({"v1": bare}, name="test",
                       tcp_config=TCPConfig(host="127.0.0.1", port=0))

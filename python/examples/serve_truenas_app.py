@@ -143,6 +143,7 @@ protocol = VmProtocol(
                       audit_message="Delete VM"),
     ],
     name="truenas.vm.v1",
+    version="1.0.0",
     authorization_handler=authorize,
 )
 protocol.register_server_info(server_info, returns=ServerInfo)
