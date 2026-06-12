@@ -1,0 +1,16 @@
+# Cross-cutting ignores only. Each language implementation carries its own
+# ignores — see python/.gitignore (and a future rust/.gitignore for target/, etc.).
+
+# Editor swap/backup files
+*.swp
+*.swo
+*~
+
+# OS cruft
+.DS_Store
+
+# Debian package build outputs (dpkg-buildpackage writes these beside the source dir)
+*.deb
+*.ddeb
+*.changes
+*.buildinfo

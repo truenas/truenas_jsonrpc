@@ -1,0 +1,5 @@
+truenas-pyjsonrpc (0.1.0) unstable; urgency=medium
+
+  * Initial Debian packaging.
+
+ -- iXsystems, Inc., dba TrueNAS <dev@truenas.com>  Tue, 09 Jun 2026 14:18:47 +0000

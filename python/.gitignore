@@ -1,0 +1,22 @@
+# Python build output
+build/
+dist/
+*.egg-info/
+*.egg
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+
+# pybuild / Debian build artifacts
+.pybuild/
+debian/.debhelper/
+debian/files
+debian/*.substvars
+debian/*.debhelper.log
+debian/debhelper-build-stamp
+debian/python3-truenas-pyjsonrpc/

@@ -1,0 +1,12 @@
+#!/usr/bin/make -f
+
+export PYBUILD_NAME=truenas_pyjsonrpc
+
+%:
+	dh $@ --with python3 --buildsystem=pybuild
+
+# The build stays self-contained: tests are run separately (python -m pytest) and
+# need python3-msgspec (plus the optional python3-websockets / python3-cryptography
+# for the full suite). To run them at build time instead, add those to Build-Depends
+# and delete this override.
+override_dh_auto_test:
