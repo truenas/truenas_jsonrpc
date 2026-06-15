@@ -63,6 +63,15 @@ marked secret are redacted in the audit view).
 **publish** is a notification `{"method": "<topic>", "params": <payload>}` delivered to
 that connection. `$/cancelRequest` with the subscription id unsubscribes.
 
+**Query methods.** A method may declare its result a filterable list. Such a method takes
+two optional by-name params — `query-filters` (a condition list, e.g.
+`[["name", "=", "tank"], ["OR", [...]]]`) and `query-options` (`select`, `order_by`,
+`offset`, `limit`, plus `count` → an integer and `get` → a single record) — that narrow
+the result *at the source*. Omitting them returns the full list, so it is additive. The
+filter/option grammar is the same middleware `query` syntax every binding must implement;
+the full operator and option tables are in
+**[ARCHITECTURE.md → Query methods](ARCHITECTURE.md#7-query-methods-filtering)**.
+
 **Raw socket operations.** Two operations step *outside* JSON-RPC framing to do raw I/O
 directly on the established socket, coordinated by the `$/transferReady`/`$/transferGo`
 handshake (the reader pauses, the operation runs, then normal JSON-RPC resumes). They are

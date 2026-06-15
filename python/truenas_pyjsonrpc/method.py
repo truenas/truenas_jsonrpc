@@ -221,3 +221,48 @@ class JSONRPCFdPassMethod(JSONRPCFdTransferMethod):
     the open file's access mode/offset; the receiver **owns** the new fds and must close
     them.
     """
+
+
+class FilterableJSONRPCMethod(JSONRPCMethod):
+    """A **query** method whose result is a homogeneous list of ``entry`` records,
+    narrowed by the standard ``query-filters`` / ``query-options``.
+
+    The method's ``accepts`` is augmented (see
+    :func:`truenas_pyjsonrpc.query.augment_accepts`) with two optional fields,
+    ``query-filters`` and ``query-options`` (additive and non-breaking on the wire).
+    At dispatch the framework compiles them and passes them **into** the handler as
+    ``filters=`` / ``options=`` keyword arguments, so the handler applies the filter at
+    its source (typically by streaming a lazy generator through
+    ``truenas_pyfilter.tnfilter``) instead of building a full list for the framework to
+    filter - important when the unfiltered set is large (e.g. a million audit rows). A
+    filterable handler is therefore
+    ``def h(request, session_state, request_state, filters, options)`` and returns the
+    narrowed result (an ``int`` for ``query-options.count``, otherwise a ``list``); the
+    framework applies the ``get`` single-record convention, so the effective return is
+    ``list[entry] | entry | int``.
+
+    The element type is carried explicitly as ``entry`` (a ``msgspec.Struct``), which
+    is what lets a list/collection return be expressed without relaxing the base
+    ``returns`` (it stays ``None`` - the framework, not the base convert step, narrows
+    and encodes the result; ``entry`` drives codegen's return annotation).
+    """
+
+    def __init__(self, name: str, *,
+                 accepts: _StructType,
+                 entry: _StructType,
+                 handler: Callable[..., Any] | None = None,
+                 doc: str | None = None,
+                 pre_auth: bool = False,
+                 audit: bool = False,
+                 audit_message: str | None = None,
+                 roles: Iterable[str] = (),
+                 accepts_validator: Callable[[Any], Any] | None = None) -> None:
+        if not _is_struct(entry):
+            raise TypeError("'entry' must be a msgspec.Struct subclass")
+        from .query import augment_accepts
+        self.entry = entry
+        self.base_accepts = accepts
+        super().__init__(name, accepts=augment_accepts(accepts), returns=None,
+                         handler=handler, doc=doc, pre_auth=pre_auth, audit=audit,
+                         audit_message=audit_message, roles=roles,
+                         accepts_validator=accepts_validator)

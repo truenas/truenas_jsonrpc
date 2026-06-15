@@ -10,7 +10,13 @@ and :class:`JSONRPCRequest`).
 """
 from .decorators import JRPCMethod, jrpc_method
 from .errors import JsonRpcError
-from .method import JSONRPCFdPassMethod, JSONRPCFdTransferMethod, JSONRPCMethod
+from .method import (
+    FilterableJSONRPCMethod,
+    JSONRPCFdPassMethod,
+    JSONRPCFdTransferMethod,
+    JSONRPCMethod,
+)
+from .query import QueryFilters, QueryOptions
 from .protocol import (
     AuditRecord,
     JSONRPCProtocol,
@@ -36,6 +42,9 @@ __all__ = [
     "JSONRPCMethod",
     "JSONRPCFdTransferMethod",
     "JSONRPCFdPassMethod",
+    "FilterableJSONRPCMethod",
+    "QueryFilters",
+    "QueryOptions",
     "TransferDirection",
     "FileTransfer",
     "Transfer",

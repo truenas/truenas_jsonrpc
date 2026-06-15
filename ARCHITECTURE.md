@@ -11,7 +11,7 @@ For the Python implementation's concrete API mapping (the `dispatch()` /
 [python/truenas_pyjsonrpc/ARCHITECTURE.md](python/truenas_pyjsonrpc/ARCHITECTURE.md).
 
 It is JSON-RPC 2.0 ([spec](https://www.jsonrpc.org/specification)) with deliberate
-refinements (§8), and borrows its control-message namespace, progress, cancellation, and
+refinements (§9), and borrows its control-message namespace, progress, cancellation, and
 extended error ranges from the LSP base protocol
 ([spec](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/)).
 
@@ -316,7 +316,90 @@ transfer to session state, or cancel an in-flight transfer from the command chan
 possible future extension (see [ROADMAP](python/ROADMAP.md)); it would share one
 connection-binding primitive with a separate back channel.
 
-## 7. Error codes
+## 7. Query methods (filtering)
+
+A **query method** returns a homogeneous list of records and takes two **optional**,
+by-name params — `query-filters` and `query-options` — that narrow the result *at the
+source* (an implementation pushes them down to its data store / iterator rather than
+materializing the full set, so a million-row table is never built just to be trimmed).
+Both are additive: a request that omits them gets the unfiltered list, so adding query
+support to an existing method is non-breaking. Every language binding implements the
+**same** grammar below — it is the wire contract, independent of the engine that
+evaluates it.
+
+### `query-filters` — the condition list
+
+A JSON array whose top-level elements are combined with **AND**. Two element shapes:
+
+- **leaf** `[field, op, value]` — one condition. `field` is a record key; a **dotted
+  path** (`"nested.key"`) addresses a nested field.
+- **node** `["OR", [<filters>, <filters>, …]]` — a disjunction whose branches are each a
+  full `query-filters` array, so AND/OR nest arbitrarily.
+
+Example: `[["name", "=", "tank"], ["OR", [["state", "=", "ONLINE"], ["readonly", "=", true]]]]`
+
+**Operators** (`op`):
+
+| op | match | `value` |
+|---|---|---|
+| `=` `!=` | (in)equality | scalar |
+| `>` `>=` `<` `<=` | ordering | scalar |
+| `~` | regex search | regex string |
+| `in` `nin` | (not) a member of | array |
+| `^` `!^` | (not) starts-with | string |
+| `$` `!$` | (not) ends-with | string |
+| `rin` `rnin` | (not) matching any regex in | array of regex strings |
+
+A leading **`C`** makes a string operator case-insensitive via casefold (`C=`, `C~`, `C^`,
+…; string values only). Any other operator → `INVALID_PARAMS`.
+
+### `query-options` — result shaping
+
+| field | type | effect |
+|---|---|---|
+| `select` | `[field \| [field, alias], …]` | project only these fields; `[source, alias]` renames the projected key (`source` may be a dotted path) |
+| `order_by` | `[directive, …]` | sort by each directive in turn; a `-` prefix reverses (`"-id"`), `nulls_first:`/`nulls_last:` place nulls (`"nulls_last:name"`); dotted paths allowed |
+| `offset` | int | skip the first N matches (0 = none) |
+| `limit` | int | cap at N matches (0 = no cap) |
+| `count` | bool | return the **count** of matches as an integer — counts **all** matches, ignoring `offset`/`limit` |
+| `get` | bool | return the **single** first matching record; cannot be combined with `offset` or `limit > 1` |
+
+### Result shape & errors
+
+| options | `result` |
+|---|---|
+| (default) | array of records |
+| `count: true` | integer |
+| `get: true` | the single record — or `REQUEST_FAILED` (-32803) if nothing matched |
+
+Evaluation is filter → `order_by` → `offset` → `limit`, then `select` projects the
+surviving records; `count`/`get` reduce the matched set as above. A malformed filter or
+option (unknown operator, wrong value type, an illegal `get`/`offset` combination) →
+`INVALID_PARAMS` (-32602).
+
+### On the wire
+
+Both fields live inside the request's `params` object and are optional — a request that
+omits them (or sends `"params": {}`) gets the full, unfiltered list.
+
+```jsonc
+// request — pools named "tank", newest first, first 50, projecting two fields
+{"jsonrpc": "2.0", "id": "f81d4fae-…", "method": "pool.query", "params": {
+  "query-filters": [["name", "=", "tank"]],
+  "query-options": {"order_by": ["-id"], "limit": 50, "select": ["id", "name"]}}}
+
+// default result — an array of records
+{"jsonrpc": "2.0", "id": "f81d4fae-…", "result": [{"id": 7, "name": "tank"}]}
+
+// same request with query-options.count: true — an integer (ignores offset/limit)
+{"jsonrpc": "2.0", "id": "f81d4fae-…", "result": 1}
+
+// same request with query-options.get: true — the single record
+// (or an error response with code -32803 REQUEST_FAILED if nothing matched)
+{"jsonrpc": "2.0", "id": "f81d4fae-…", "result": {"id": 7, "name": "tank"}}
+```
+
+## 8. Error codes
 
 | name | code | meaning |
 |---|---|---|
@@ -330,7 +413,7 @@ connection-binding primitive with a separate back channel.
 | `REQUEST_CANCELLED` | -32800 | request cancelled via `$/cancelRequest` (LSP-derived) |
 | `REQUEST_FAILED` | -32803 | valid + authorized request failed for an expected reason; vs `INTERNAL_ERROR` = bug (LSP-derived) |
 
-## 8. Deliberate divergences from JSON-RPC 2.0
+## 9. Deliberate divergences from JSON-RPC 2.0
 
 - **No batch** — top-level arrays are `INVALID_REQUEST`.
 - **UUID-only ids** — a present `id` must be a canonical UUID string.

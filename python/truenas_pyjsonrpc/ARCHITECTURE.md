@@ -106,6 +106,14 @@ gate is off** and all methods are reachable from `NONE` — mirroring "no `autho
 11. **audit** (if `method.audit` and an `audit_handler` is registered).
 12. **Rebuild** the response envelope (or `None` for a notification).
 
+A **`FilterableJSONRPCMethod`** wraps step 10: after the param decode (step 9) the
+framework compiles the request's `query-filters`/`query-options` (invalid → `INVALID_PARAMS`)
+and passes them to the handler as `filters`/`options`; the handler returns the narrowed
+`list[entry]` (or an `int` for `count`), and the framework applies the `get` single-record
+convention (no match → `REQUEST_FAILED`) before encoding. `returns` stays `None` — `entry`
+carries the element type. The wire grammar is the language-agnostic
+[ARCHITECTURE.md → Query methods](../../ARCHITECTURE.md#7-query-methods-filtering).
+
 Errors never raise out of `dispatch` — every protocol/handler fault becomes a wire
 error object. A handler may `raise JsonRpcError(code, message, data)` to choose the
 code; any other exception becomes `INTERNAL_ERROR` (-32603).
@@ -387,6 +395,7 @@ All hooks are called **by keyword**; handlers may use `**kwargs`.
 | hook | signature | returns |
 |---|---|---|
 | method handler | `handler(request=<accepts>, session_state, request_state)` | `<returns>` (or raise `JsonRpcError`) |
+| filterable handler | `handler(request=<accepts>, session_state, request_state, filters, options)` | `list[entry]` (or `int` for `count`); framework then applies `get` |
 | `authorization_handler` | `(request=JSONRPCRequest, session_state[, target=RequestState\|Subscription\|None])` | `AuthorizationResponse` |
 | `audit_handler` | `(request=JSONRPCRequest, response=dict, session_state, audit_message=str\|None)` | ignored |
 | `cancellation_handler` | `(request=JSONRPCRequest, target=RequestState, session_state)` | ignored |

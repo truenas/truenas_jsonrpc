@@ -14,6 +14,9 @@ dependencies = ["msgspec"]
 # WebSocket transport (truenas_pyjsonrpc_server.WebSocketConfig /
 # truenas_pyjsonrpc_client.WebSocketConfig). Not needed for AF_UNIX or plain/TLS TCP.
 websocket = ["websockets>=13"]
+# FilterableJSONRPCMethod delegates query-filters/query-options to the truenas_pyfilter
+# C engine; imported lazily, so only needed when a protocol registers filterable methods.
+filterable = ["truenas_pyfilter"]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -361,6 +361,21 @@ class BaseClient:
         raw = self.transfer(method, msgspec.to_builtins(request), callback=callback)
         return msgspec.convert(raw, returns)
 
+    def _typed_filterable(self, method: str, request: Any, query_filters: Any,
+                          query_options: Any, entry: type[_T]) -> Any:
+        """Used by generated clients for a filterable (query) method: merge the request
+        Struct with the ``query-filters``/``query-options`` onto the wire, call, and
+        decode the result into ``list[entry] | entry | int`` (a single ``entry`` for
+        ``query-options.get``, an ``int`` for ``query-options.count``). The generated
+        method carries the precise return annotation."""
+        params: dict[str, Any] = (
+            msgspec.to_builtins(request) if request is not None else {})
+        params["query-filters"] = query_filters if query_filters is not None else []
+        params["query-options"] = (
+            msgspec.to_builtins(query_options) if query_options is not None else {})
+        raw = self.call(method, params)
+        return msgspec.convert(raw, list[entry] | entry | int)
+
     def _subscribe(self, topic: str, request: Any, *,
                    callback: Callable[[Any], None] | None = None,
                    notifies: type | None = None) -> str:
