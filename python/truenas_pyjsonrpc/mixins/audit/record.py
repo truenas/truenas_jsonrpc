@@ -22,13 +22,23 @@ from __future__ import annotations
 
 import datetime
 import enum
-import json
 import uuid
 from typing import Any, Callable
 
 import msgspec
 
 from truenas_pyjsonrpc import JSONRPCRequest
+
+
+#: ``enc_hook=str`` preserves the old ``json.dumps(default=str)`` safety net — a stray exotic
+#: value (after redaction) is stringified rather than raising and breaking the audit trail —
+#: while msgspec renders uuid/datetime/etc. natively. Shared, like the client's encoder.
+_ENCODER = msgspec.json.Encoder(enc_hook=str)
+
+
+def _encode(value: Any) -> str:
+    """Compact JSON **string** for an audit field (msgspec encodes to ``bytes``)."""
+    return _ENCODER.encode(value).decode()
 
 
 class EventType(enum.StrEnum):
@@ -178,9 +188,9 @@ class AuditFormatter:
             "sess": getattr(session_state, "session_uuid", None),
             "time": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S.%f"),
             "svc": self.service,
-            "svc_data": json.dumps(svc_data, default=str),
+            "svc_data": _encode(svc_data),
             "event": event,
-            "event_data": json.dumps(event_data, default=str),
+            "event_data": _encode(event_data),
             "success": success,
         }}
 
@@ -188,4 +198,4 @@ class AuditFormatter:
                audit_message: str | None = None) -> str:
         """The wire string: ``"@cee:"`` + the JSON record (what middleware emits to syslog)."""
         record = self.build(request, response, session_state, audit_message)
-        return "@cee:" + json.dumps(record, default=str)
+        return "@cee:" + _encode(record)

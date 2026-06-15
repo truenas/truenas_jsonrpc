@@ -25,12 +25,12 @@ CLI (run from the repo root)::
 """
 from __future__ import annotations
 
-import json
 from typing import Any
 
 import msgspec
 
 from truenas_pyjsonrpc import (
+    FilterableJSONRPCMethod,
     JSONRPCError,
     JSONRPCFdPassMethod,
     JSONRPCFdTransferMethod,
@@ -70,7 +70,10 @@ def _collect_types(methods: dict[str, JSONRPCMethod]) -> list[_StructType]:
     by_name: dict[str, _StructType] = {}
     ordered: list[_StructType] = []
     for m in methods.values():
-        for t in (m.accepts, m.returns, m.notifies):
+        # A filterable method's element type (`entry`) is its result-schema source;
+        # `returns` is None for it (the framework, not msgspec, shapes the result).
+        extra = (m.entry,) if isinstance(m, FilterableJSONRPCMethod) else ()
+        for t in (m.accepts, m.returns, m.notifies, *extra):
             if t is None:
                 continue
             prev = by_name.get(t.__name__)
@@ -117,6 +120,12 @@ def _method_object(name: str, m: JSONRPCMethod, schemas: dict[str, Any],
     # methods and SERVER_CLIENT pub/sub topics).
     if m.returns is not None:
         obj["result"] = {"name": m.returns.__name__, "schema": type_ref[m.returns]}
+    elif isinstance(m, FilterableJSONRPCMethod):
+        # Query result: an array of entry records (a single entry for
+        # query-options.get, an int for query-options.count - flagged via x-query).
+        obj["result"] = {"name": m.entry.__name__,
+                         "schema": {"type": "array", "items": type_ref[m.entry]}}
+        obj["x-query"] = True
 
     # Extensions (x-*): spec-valid, ignored by generic tooling.
     obj["x-direction"] = m.direction.value
@@ -231,7 +240,7 @@ def main(argv: list[str] | None = None) -> int:
     doc = generate_openrpc(protocol, title=ns.title, version=ns.version,
                            openrpc_version=ns.openrpc_version,
                            include_errors=not ns.no_errors)
-    text = json.dumps(doc, indent=2)
+    text = msgspec.json.format(msgspec.json.encode(doc), indent=2).decode()
     if ns.out:
         _write_output(ns.out, text + "\n")
     else:

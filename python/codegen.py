@@ -27,6 +27,7 @@ import re
 import msgspec
 
 from truenas_pyjsonrpc import (
+    FilterableJSONRPCMethod,
     JSONRPCFdTransferMethod,
     JSONRPCProtocol,
     MessageDirection,
@@ -120,7 +121,11 @@ def generate(protocol: JSONRPCProtocol, *, class_name: str | None = None,
         # SERVER_CLIENT topics are emitted as subscribe_<py>; everything else as <py>.
         claim(f"subscribe_{py}" if m.direction is MessageDirection.SERVER_CLIENT else py,
               name)
-        accepts = ref(m.accepts)
+        # A filterable method's `accepts` is a synthetic (augmented) struct with no
+        # importable name; the client method takes the *base* accepts plus explicit
+        # query kwargs, so reference base_accepts here.
+        accepts = ref(m.base_accepts if isinstance(m, FilterableJSONRPCMethod)
+                      else m.accepts)
         if isinstance(m, JSONRPCFdTransferMethod):
             assert m.returns is not None        # transfer methods require returns
             returns = ref(m.returns)
@@ -148,10 +153,23 @@ def generate(protocol: JSONRPCProtocol, *, class_name: str | None = None,
                 f'on_notification."""\n'
                 f"        return self._subscribe({name!r}, request, "
                 f"callback=callback, notifies={notifies})\n")
+        elif isinstance(m, FilterableJSONRPCMethod):
+            entry = ref(m.entry)
+            imports["QueryFilters"] = "truenas_pyjsonrpc"
+            imports["QueryOptions"] = "truenas_pyjsonrpc"
+            ret = f"list[{entry}] | {entry} | int"
+            doc = _emit_doc(m.doc, "        ") if m.doc else ""
+            block = (
+                f"    def {py}(self, request: {accepts}, *, "
+                f"query_filters: QueryFilters | None = None, "
+                f"query_options: QueryOptions | None = None) -> {ret}:\n"
+                f"{doc}"
+                f"        return self._typed_filterable({name!r}, request, "
+                f"query_filters, query_options, {entry})\n")
         else:
-            ret = ref(m.returns) if m.returns is not None else None
-            ret_anno = ret if ret is not None else "Any"
-            ret_arg = ret if ret is not None else "None"
+            returns_ref = ref(m.returns) if m.returns is not None else None
+            ret_anno = returns_ref if returns_ref is not None else "Any"
+            ret_arg = returns_ref if returns_ref is not None else "None"
             doc = _emit_doc(m.doc, "        ") if m.doc else ""
             block = (
                 f"    def {py}(self, request: {accepts}, *, progress: "

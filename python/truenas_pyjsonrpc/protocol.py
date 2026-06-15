@@ -59,7 +59,13 @@ from .types import (
     SessionLifecycle,
 )
 from .errors import JsonRpcError
-from .method import JSONRPCFdPassMethod, JSONRPCFdTransferMethod, JSONRPCMethod
+from .method import (
+    FilterableJSONRPCMethod,
+    JSONRPCFdPassMethod,
+    JSONRPCFdTransferMethod,
+    JSONRPCMethod,
+)
+from .query import compile_query, finalize_result
 from .transfer import FileTransfer, Transfer
 
 _VERSION = "2.0"
@@ -1194,8 +1200,17 @@ class JSONRPCProtocol:
             with self._cond:
                 self._inflight[rid] = request_state
         try:
-            result: Any = handler(request=params, session_state=session,
-                                  request_state=request_state)
+            if isinstance(method, FilterableJSONRPCMethod):
+                # Compile the query and hand it to the handler so it can apply the
+                # filter at its source (e.g. stream a generator through tnfilter)
+                # rather than materialize a full list for the framework to filter.
+                cf, co = compile_query(params.query_filters, params.query_options)
+                result: Any = handler(request=params, session_state=session,
+                                      request_state=request_state, filters=cf, options=co)
+                result = finalize_result(result, params.query_options)
+            else:
+                result = handler(request=params, session_state=session,
+                                 request_state=request_state)
         except JsonRpcError as e:
             return self._error_envelope(rid, e.code, e.message, e.data), request_state
         except Exception as e:

@@ -6,7 +6,6 @@ passes it to every ``dispatch``. With session setup configured, normal methods
 require an ESTABLISHED session. Run from the repo root: ``python examples/serve.py``
 """
 import hashlib
-import json
 import tempfile
 import threading
 import time
@@ -133,7 +132,7 @@ def _msg(method, params=None):
     m = {"jsonrpc": "2.0", "method": method, "id": str(uuid.uuid4())}
     if params is not None:
         m["params"] = params
-    return json.dumps(m)
+    return msgspec.json.encode(m).decode()
 
 
 def main() -> None:

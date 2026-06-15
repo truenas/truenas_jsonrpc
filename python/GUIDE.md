@@ -104,6 +104,7 @@ to the full treatment in the README so this guide stays short:
 | Declare a method from its handler | `@jrpc_method(accepts=…, protocols=[protocol])` | [Defining methods](README.md#defining-methods) |
 | Authorize / audit a call | `roles=[…]`, `audit=True`, `audit_message="…"` | [Authorization & audit](README.md#authorization--audit) |
 | Push server→client events (pub/sub) | `direction=MessageDirection.SERVER_CLIENT`, `notifies=Event` | [Pub/sub](README.md#pubsub-subscribable-methods) |
+| Return a filterable list (`query-filters`/`query-options`) | `FilterableJSONRPCMethod(accepts=…, entry=Record)` | [Query methods](README.md#query-methods-filterable-lists) |
 | Let a long call be aborted | `cancellable=True` | [Cancellation](README.md#cancellation) |
 | Allow a call before login (e.g. auth) | `pre_auth=True` | [Sessions & authentication](README.md#sessions--authentication) |
 | Stream bulk bytes over the raw fd | `JSONRPCFdTransferMethod` / `JSONRPCFdPassMethod` | [ARCHITECTURE §6](truenas_pyjsonrpc/ARCHITECTURE.md#6-raw-fd-transfer-bulk-streams) |

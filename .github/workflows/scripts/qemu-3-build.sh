@@ -12,6 +12,12 @@
 #   truenas_pypam     -> python3-truenas-pypam       (truenas_pypam + truenas_authenticator)
 #   pam_truenas       -> libpam-truenas + python3-truenas-pam-utils
 #                                                    (pam_truenas.so + truenas_pam_faillog)
+#
+# FilterableJSONRPCMethod's query-filters/query-options delegate to the
+# truenas_pyfilter C engine (truenas_pyjsonrpc/query.py), so the VM also
+# needs it - both to exercise filterable methods and so strict mypy resolves
+# that lazy import against the type stubs the package ships:
+#   truenas_pyos      -> python3-truenas-pyos        (truenas_pyfilter + stubs)
 ######################################################################
 
 set -eu
@@ -85,10 +91,17 @@ clone_build pam_truenas
 sudo dpkg -i ../libpam-truenas_*.deb \
              ../python3-truenas-pam-utils_*.deb
 
+# 6. Query (filter/options) C engine -> truenas_pyfilter (+ type stubs),
+#    used by FilterableJSONRPCMethod and required for strict mypy.
+clone_build truenas_pyos
+sudo dpkg -i ../python3-truenas-pyos_*.deb
+
 # Verify everything test_pam.py imports is present
 echo "Verifying dependency stack..."
 python3 -c "import truenas_pyscram, truenas_pypwenc, truenas_keyring, truenas_api_key, truenas_authenticator, truenas_pypam; from truenas_pam_faillog import PamFaillog; print('dependency stack OK')"
 test -f /usr/lib/security/pam_truenas.so || (echo "ERROR: pam_truenas.so not found"; exit 1)
+# Verify the query engine that FilterableJSONRPCMethod / strict mypy need
+python3 -c "from truenas_pyfilter import compile_filters, compile_options; print('truenas_pyfilter OK')"
 
 echo "Dependency stack built and installed"
 REMOTE_SCRIPT

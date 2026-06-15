@@ -23,6 +23,7 @@ table and fuses parse + validate into a single msgspec pass.
 
 ## Contents
 [Quickstart](#quickstart) · [Defining methods](#defining-methods) ·
+[Query methods](#query-methods-filterable-lists) ·
 [Authorization & audit](#authorization--audit) · [Pub/sub](#pubsub-subscribable-methods) ·
 [Cancellation](#cancellation) · [Server info](#server-info-serverinfo) ·
 [Sessions & authentication](#sessions--authentication) ·
@@ -129,6 +130,37 @@ def pool_events():
 `"pool.create"`). `protocols=()` (the default) builds + attaches `func.method`
 without registering. Duplicate and `rpc.`/`$/`-prefixed names raise via `register`.
 `JRPCMethod` is an alias for `jrpc_method`.
+
+### Query methods (filterable lists)
+
+`FilterableJSONRPCMethod(name, *, accepts, entry, handler=None, …)` returns a homogeneous
+list of `entry` records narrowed by the standard `query-filters` / `query-options`
+([wire grammar](../ARCHITECTURE.md#7-query-methods-filtering)). It adds those two optional
+fields to `accepts`, compiles them, and passes them to the handler as `filters` / `options`
+to apply at its data source:
+
+```python
+from truenas_pyjsonrpc import FilterableJSONRPCMethod
+from truenas_pyfilter import tnfilter
+
+class Pool(msgspec.Struct):
+    id: int
+    name: str
+
+def pool_query(request, session_state, request_state, filters, options):
+    return tnfilter(pools(), filters=filters, options=options)
+
+FilterableJSONRPCMethod("pool.query", accepts=NoParams, entry=Pool, handler=pool_query)
+```
+
+- **`entry`** (required) — the element `Struct`; it sets the result type, so `returns`
+  stays `None`.
+- The handler gains `filters`, `options` and returns the narrowed `list[entry]` (or an
+  `int` for `count`); the framework applies `get`, so the effective return is
+  `list[entry] | entry | int`.
+
+The generated typed client exposes `query_filters` / `query_options` keyword args and a
+`list[Pool] | Pool | int` return.
 
 ## Authorization & audit
 
