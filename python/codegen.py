@@ -167,9 +167,9 @@ def generate(protocol: JSONRPCProtocol, *, class_name: str | None = None,
                 f"        return self._typed_filterable({name!r}, request, "
                 f"query_filters, query_options, {entry})\n")
         else:
-            ret = ref(m.returns) if m.returns is not None else None
-            ret_anno = ret if ret is not None else "Any"
-            ret_arg = ret if ret is not None else "None"
+            returns_ref = ref(m.returns) if m.returns is not None else None
+            ret_anno = returns_ref if returns_ref is not None else "Any"
+            ret_arg = returns_ref if returns_ref is not None else "None"
             doc = _emit_doc(m.doc, "        ") if m.doc else ""
             block = (
                 f"    def {py}(self, request: {accepts}, *, progress: "

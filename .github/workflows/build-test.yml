@@ -37,6 +37,17 @@ jobs:
                ../libtruenas-scram-dev_*.deb \
                ../python3-truenas-scram_*.deb
 
+    # The filterable (query) tests need the truenas_pyfilter C engine shipped by
+    # truenas_pyos. Like truenas_scram above it is not in Debian, so build it from
+    # source; without it the tests in tests/test_filterable.py self-skip.
+    - name: Build and install truenas_pyos (enables the filterable tests)
+      run: |
+        cd /tmp
+        git clone --depth 1 https://github.com/truenas/truenas_pyos.git
+        cd truenas_pyos
+        dpkg-buildpackage -us -uc -b
+        dpkg -i ../python3-truenas-pyos_*.deb
+
     # The package lives under python/ (debian/, pyproject.toml, tests/ are all there). The
     # build's dh_auto_test is disabled (see python/debian/rules), so this only builds the .deb.
     - name: Build the Debian package

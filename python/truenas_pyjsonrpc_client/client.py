@@ -374,7 +374,9 @@ class BaseClient:
         params["query-options"] = (
             msgspec.to_builtins(query_options) if query_options is not None else {})
         raw = self.call(method, params)
-        return msgspec.convert(raw, list[entry] | entry | int)
+        # `entry` is a runtime class (type[_T]); the decode union is built from it
+        # dynamically, which mypy can't treat as a static type subscription.
+        return msgspec.convert(raw, list[entry] | entry | int)  # type: ignore[valid-type]
 
     def _subscribe(self, topic: str, request: Any, *,
                    callback: Callable[[Any], None] | None = None,

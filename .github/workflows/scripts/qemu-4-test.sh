@@ -67,7 +67,11 @@ echo "=========================================="
 echo "pytest (full suite, incl. real pam_truenas)"
 echo "=========================================="
 # PAM auth + the kernel keyring need root, so run pytest under sudo.
-sudo sh -c "cd /home/debian/truenas_pyjsonrpc/python && python3 -m pytest tests/ -v" \
+# This VM has the *full* optional stack installed, so no test should self-skip
+# here: TRUENAS_FORBID_TEST_SKIPS turns any skip into a failure (see
+# tests/conftest.py) to catch a silently-missing dependency. CI from the runner
+# does not survive ssh+sudo, hence the explicit variable on the command.
+sudo sh -c "cd /home/debian/truenas_pyjsonrpc/python && TRUENAS_FORBID_TEST_SKIPS=1 python3 -m pytest tests/ -v" \
   2>&1 | tee ~/test-output.txt
 PYTEST_RC=${PIPESTATUS[0]}
 
