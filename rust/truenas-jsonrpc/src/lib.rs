@@ -26,7 +26,7 @@ mod request;
 mod session;
 mod types;
 
-pub use error::{Error, ErrorCode, JsonRpcError, Result};
+pub use error::{BuildResult, Error, ErrorCode, JsonRpcError};
 pub use method::{AsyncJsonRpcMethod, JsonRpcMethod, MethodDef};
 pub use protocol::{
     AuditSink, Authorizer, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,

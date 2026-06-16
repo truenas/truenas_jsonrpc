@@ -3,7 +3,7 @@
 //! `RequestState`.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use serde::Serialize;
 
@@ -79,7 +79,7 @@ impl<S> RequestCtx<S> {
     /// Record a runtime audit detail (joined with the method's static `audit_message`).
     /// Last write wins.
     pub fn set_audit(&self, message: impl Into<String>) {
-        *self.audit_detail.lock().unwrap() = Some(message.into());
+        *self.audit_detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.into());
     }
 
     /// Emit a `$/progress` notification for this request. A no-op for a notification

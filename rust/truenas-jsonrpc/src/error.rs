@@ -41,8 +41,11 @@ impl ErrorCode {
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("[{code}] {message}")]
 pub struct JsonRpcError {
+    /// The wire error code (a known [`ErrorCode`] or a custom server-range `i32`).
     pub code: i32,
+    /// The human-readable error message.
     pub message: String,
+    /// Optional structured error data.
     pub data: Option<serde_json::Value>,
 }
 
@@ -63,24 +66,31 @@ impl JsonRpcError {
         self
     }
 
+    /// An `INVALID_PARAMS` error (the params failed validation).
     pub fn invalid_params(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::InvalidParams, msg)
     }
+    /// A `METHOD_NOT_FOUND` error.
     pub fn method_not_found(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::MethodNotFound, msg)
     }
+    /// A `NOT_AUTHORIZED` error (an authorizer denied the call).
     pub fn not_authorized(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::NotAuthorized, msg)
     }
+    /// A `REQUEST_FAILED` error (a valid call that failed for an expected reason).
     pub fn request_failed(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::RequestFailed, msg)
     }
+    /// An `INTERNAL_ERROR` (an unexpected handler/server fault — a bug).
     pub fn internal(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::InternalError, msg)
     }
+    /// A `SESSION_NOT_ESTABLISHED` error.
     pub fn session_not_established(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::SessionNotEstablished, msg)
     }
+    /// A `REQUEST_CANCELLED` error (for a `$/cancelRequest`-aborted handler).
     pub fn cancelled() -> Self {
         Self::new(ErrorCode::RequestCancelled, "Request cancelled")
     }
@@ -90,13 +100,19 @@ impl JsonRpcError {
 /// Distinct from [`JsonRpcError`] (the wire error) — **never** produced by `dispatch`.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
+    /// A method name in the reserved `rpc.` / `$/` namespace was registered.
     #[error("method names beginning with 'rpc.' or '$/' are reserved: {0:?}")]
     ReservedName(String),
+    /// The same method name was registered twice.
     #[error("duplicate method: {0:?}")]
     DuplicateMethod(String),
+    /// A miscellaneous builder configuration error.
     #[error("{0}")]
     Config(String),
 }
 
-/// Result alias for construction-time operations (the builder).
-pub type Result<T> = std::result::Result<T, Error>;
+/// Result alias for construction-time / builder operations (error type [`Error`]).
+/// Deliberately **not** named `Result`: handlers and the wire layer use the std
+/// `Result<T, JsonRpcError>`, and a crate-level `Result` alias would shadow it
+/// (forcing fully-qualified `std::result::Result` at every handler signature).
+pub type BuildResult<T> = std::result::Result<T, Error>;

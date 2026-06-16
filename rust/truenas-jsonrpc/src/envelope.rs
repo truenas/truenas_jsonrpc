@@ -82,12 +82,11 @@ pub(crate) fn parse(wire: &[u8]) -> Result<ParsedRequest, ParseError> {
             id: None,
         });
     }
-    let env: RawEnvelope = serde_json::from_str(raw.get()).map_err(|e| ParseError {
-        code: ErrorCode::InvalidRequest,
-        message: "Invalid request".into(),
-        data: Some(e.to_string()),
-        id: None,
-    })?;
+    // `raw` is an already-validated JSON object and every `RawEnvelope` field is an
+    // optional `RawValue` (which captures any value verbatim), so this re-parse is
+    // infallible — a failure would be a serde_json bug, not bad input.
+    let env: RawEnvelope = serde_json::from_str(raw.get())
+        .expect("a validated JSON object always deserializes into RawEnvelope");
 
     // 2. Resolve id: a present id MUST be a canonical UUID string; absent → notification.
     let id = match env.id {
@@ -179,4 +178,23 @@ pub(crate) fn error(
 pub(crate) fn error_from_parse(e: &ParseError) -> Vec<u8> {
     let data = e.data.as_ref().map(|s| serde_json::Value::String(s.clone()));
     error(e.id.as_deref(), e.code.code(), &e.message, data.as_ref())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_canonical_uuid;
+
+    #[test]
+    fn canonical_uuid_accepts_and_rejects() {
+        // Accepted: canonical hyphenated form, case-insensitive.
+        assert!(is_canonical_uuid("f81d4fae-7dec-11d0-a765-00a0c91e6bf6"));
+        assert!(is_canonical_uuid("F81D4FAE-7DEC-11D0-A765-00A0C91E6BF6"));
+        // Wrong length → rejected before the per-byte scan.
+        assert!(!is_canonical_uuid(""));
+        assert!(!is_canonical_uuid("not-a-uuid"));
+        // Length 36 but a non-hex digit where a hex digit is required.
+        assert!(!is_canonical_uuid("g81d4fae-7dec-11d0-a765-00a0c91e6bf6"));
+        // Length 36 but a non-hyphen where a hyphen is required (index 8).
+        assert!(!is_canonical_uuid("f81d4fae07dec-11d0-a765-00a0c91e6bf6"));
+    }
 }

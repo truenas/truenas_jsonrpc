@@ -3,7 +3,7 @@
 //! dispatch deterministic for unit tests and the A/B harness.
 
 use std::sync::atomic::{AtomicU8, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 
 use crate::types::SessionLifecycle;
 
@@ -13,6 +13,7 @@ pub type SessionId = uuid::Uuid;
 /// Generates ids (session ids, subscription ids). Injectable so tests and the A/B
 /// harness can pin them; the default is a random UUIDv4.
 pub trait IdGen: Send + Sync {
+    /// Generate a fresh id.
     fn new_id(&self) -> uuid::Uuid;
 }
 
@@ -50,6 +51,7 @@ impl Clock for SystemClock {
 /// are **non-blocking** (drop on backpressure), so a sync handler can emit progress
 /// without `.await`.
 pub trait Outbound: Send + Sync {
+    /// Enqueue one outbound message (non-blocking; may drop on backpressure).
     fn send(&self, message: Vec<u8>);
 }
 
@@ -65,31 +67,26 @@ struct AtomicLifecycle(AtomicU8);
 
 impl AtomicLifecycle {
     fn new(l: SessionLifecycle) -> Self {
-        Self(AtomicU8::new(encode(l)))
+        Self(AtomicU8::new(l as u8))
     }
     fn load(&self) -> SessionLifecycle {
         decode(self.0.load(Ordering::Acquire))
     }
     fn store(&self, l: SessionLifecycle) {
-        self.0.store(encode(l), Ordering::Release)
+        self.0.store(l as u8, Ordering::Release)
     }
 }
 
-fn encode(l: SessionLifecycle) -> u8 {
-    match l {
-        SessionLifecycle::None => 0,
-        SessionLifecycle::Init => 1,
-        SessionLifecycle::Established => 2,
-        SessionLifecycle::Closed => 3,
-    }
-}
-
+/// Inverse of `SessionLifecycle as u8`. The cell is only ever written via that cast
+/// (values 0–3), so any other byte is genuinely unreachable — fail loudly rather than
+/// silently coercing a future/garbage variant to `Closed`.
 fn decode(v: u8) -> SessionLifecycle {
     match v {
         0 => SessionLifecycle::None,
         1 => SessionLifecycle::Init,
         2 => SessionLifecycle::Established,
-        _ => SessionLifecycle::Closed,
+        3 => SessionLifecycle::Closed,
+        _ => unreachable!("invalid SessionLifecycle discriminant: {v}"),
     }
 }
 
@@ -148,30 +145,68 @@ impl<S> Session<S> {
     /// Read the server-internal state (identity/permissions/connection handle). The
     /// closure runs under a brief read lock; do not `.await` inside it.
     pub fn with_internal<R>(&self, f: impl FnOnce(Option<&S>) -> R) -> R {
-        f(self.internal.read().unwrap().as_ref())
+        f(self.internal.read().unwrap_or_else(PoisonError::into_inner).as_ref())
     }
 
     /// Replace the server-internal state (a setup handler sets the identity here).
     pub fn set_internal(&self, state: S) {
-        *self.internal.write().unwrap() = Some(state);
+        *self.internal.write().unwrap_or_else(PoisonError::into_inner) = Some(state);
     }
 
     /// Mutate the server-internal state in place (e.g. enrich an identity across setup
     /// rounds).
     pub fn with_internal_mut<R>(&self, f: impl FnOnce(&mut Option<S>) -> R) -> R {
-        f(&mut self.internal.write().unwrap())
+        f(&mut self.internal.write().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// The client-facing setup result (`server_state_external`), if any.
     pub fn external(&self) -> Option<serde_json::Value> {
-        self.external.read().unwrap().clone()
+        self.external.read().unwrap_or_else(PoisonError::into_inner).clone()
     }
 
     pub(crate) fn set_external(&self, value: serde_json::Value) {
-        *self.external.write().unwrap() = Some(value);
+        *self.external.write().unwrap_or_else(PoisonError::into_inner) = Some(value);
     }
 
     pub(crate) fn outbound(&self) -> &Arc<dyn Outbound> {
         &self.out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_clock_is_after_the_epoch() {
+        assert!(SystemClock.now_unix() > 0.0);
+    }
+
+    #[test]
+    fn null_outbound_send_discards() {
+        NullOutbound.send(vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn lifecycle_round_trips_through_the_atomic_cell() {
+        for l in [
+            SessionLifecycle::None,
+            SessionLifecycle::Init,
+            SessionLifecycle::Established,
+            SessionLifecycle::Closed,
+        ] {
+            let cell = AtomicLifecycle::new(l);
+            assert_eq!(cell.load(), l);
+            let other = AtomicLifecycle::new(SessionLifecycle::None);
+            other.store(l);
+            assert_eq!(other.load(), l);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid SessionLifecycle discriminant")]
+    fn decode_rejects_unknown_discriminant() {
+        // Only 0..=3 are ever written (via `as u8`); any other byte is corruption.
+        let _ = decode(4);
     }
 }

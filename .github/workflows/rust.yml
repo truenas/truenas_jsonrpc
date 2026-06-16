@@ -6,26 +6,35 @@ on:
   push:
     branches: [ master, main ]
 
+# A push to a PR branch would otherwise build twice; keep only the latest run.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    working-directory: rust
+
 jobs:
-  rust:
+  # Build + lint + test gate. clippy runs with `-D warnings`, so the workspace lint
+  # policy (rust/Cargo.toml: `unsafe_code = "forbid"`, `missing_docs = "warn"`) is
+  # enforced — a missing doc or any clippy lint fails the build.
+  clippy-and-test:
     name: Rust core — build, clippy, A/B conformance
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: rust
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # ubuntu-latest ships a rustup-managed stable toolchain; ensure clippy is present.
+      # ubuntu-latest ships rustup + a current stable toolchain; just add clippy.
       - name: Ensure clippy
         run: rustup component add clippy
 
-      - name: Build (all targets)
-        run: cargo build --all-targets --locked
-
-      - name: Clippy (deny warnings)
-        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Clippy (all targets, deny warnings)
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
       # Runs the unit/integration tests, including tests/conformance.rs — the A/B
       # differential check that replays the committed golden corpus
@@ -37,4 +46,30 @@ jobs:
       # QEMU VM pipeline (qemu-test.yml, scripts/qemu-4b-rust.sh), which is also where
       # Rust<->Python client/server conformance will run. No Python is needed here.
       - name: Test
-        run: cargo test --locked
+        run: cargo test --all-features --locked
+
+  # Coverage gate: native source-based coverage (`rustc -C instrument-coverage` + the
+  # toolchain's bundled `llvm-profdata`/`llvm-cov`), driven by rust/coverage.sh, with a
+  # hard 100%-of-lines floor. No third-party tools. Runs on stable: rather than
+  # *excluding* defensive code, the tests exercise it directly (e.g. `#[should_panic]`
+  # over the "can't happen" arms), so the floor is a real 100%.
+  coverage:
+    name: Rust core — 100% line coverage
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # The runner's stable toolchain only lacks the LLVM coverage tools; add them.
+      - name: Add llvm-tools
+        run: rustup component add llvm-tools-preview
+
+      - name: Coverage (100% line floor)
+        run: bash coverage.sh 100
+
+      - name: Upload lcov report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: rust/target/coverage/cov.lcov

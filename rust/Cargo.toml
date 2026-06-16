@@ -15,6 +15,13 @@ authors = ["iXsystems, Inc., dba TrueNAS <dev@truenas.com>"]
 repository = "https://github.com/truenas/truenas_jsonrpc"
 rust-version = "1.75"
 
+# Lint policy shared by every crate in the workspace (each opts in with
+# `lints.workspace = true`). This is a protocol core: forbid `unsafe` outright and
+# require the public API to stay documented.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }

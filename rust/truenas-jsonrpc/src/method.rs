@@ -149,6 +149,7 @@ pub struct MethodDef {
 }
 
 impl MethodDef {
+    /// Begin a method definition named `name`, with every flag defaulted off.
     pub fn new(name: impl Into<Arc<str>>) -> Self {
         Self {
             name: name.into(),
@@ -248,6 +249,7 @@ pub struct JsonRpcMethod<F> {
 }
 
 impl<F> JsonRpcMethod<F> {
+    /// Pair a [`MethodDef`] with a synchronous handler.
     pub fn new(def: MethodDef, handler: F) -> Self {
         Self { def, handler }
     }
@@ -274,6 +276,7 @@ pub struct AsyncJsonRpcMethod<F> {
 }
 
 impl<F> AsyncJsonRpcMethod<F> {
+    /// Pair a [`MethodDef`] with an asynchronous handler.
     pub fn new(def: MethodDef, handler: F) -> Self {
         Self { def, handler }
     }
