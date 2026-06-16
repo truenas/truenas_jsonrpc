@@ -39,6 +39,7 @@ driven sequentially (don't pipeline a session's own messages during setup).
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import uuid
 from collections import deque
@@ -157,12 +158,17 @@ _CANCEL_DEC = msgspec.json.Decoder(_CancelParams)
 _ENC = msgspec.json.Encoder()
 
 
+#: Canonical hyphenated UUID, case-insensitive. A precompiled ``fullmatch`` is ~8x faster
+#: than building a ``uuid.UUID`` and comparing its ``str()`` — and this runs on every
+#: request's ``id`` — while accepting the exact same set (8-4-4-4-12 hex, any case).
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
 def _is_uuid(value: str) -> bool:
     """True if ``value`` is a canonical hyphenated UUID string (case-insensitive)."""
-    try:
-        return str(uuid.UUID(value)) == value.lower()
-    except ValueError:
-        return False
+    return _UUID_RE.fullmatch(value) is not None
 
 
 class SessionState:

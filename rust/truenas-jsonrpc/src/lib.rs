@@ -1,0 +1,42 @@
+//! `truenas-jsonrpc` — the transport-agnostic JSON-RPC 2.0 **dispatch core** for
+//! TrueNAS, a Rust port of Python's `truenas_pyjsonrpc` (`JSONRPCProtocol` /
+//! `JSONRPCMethod`).
+//!
+//! It is a refinement of JSON-RPC 2.0 designed for long-lived, authenticated,
+//! multiplexed connections; the language-agnostic wire contract lives in the
+//! repo-root `ARCHITECTURE.md`. This crate owns envelope parsing/validation, the
+//! session state machine + gate, the per-request dispatch pipeline, the `$/`
+//! control messages, and message construction. It is **transport-free**: a server
+//! drives [`JsonRpcProtocol::dispatch`] with framed bytes and a per-connection
+//! [`Session`], and routes the bytes it returns.
+//!
+//! ## Execution model (blocking vs. awaitable)
+//!
+//! [`JsonRpcProtocol::dispatch`] is `async` and **branches on the method kind**: a
+//! sync [`JsonRpcMethod`] (the default — covers blocking work like ZFS ioctls,
+//! file I/O, and auth-stack crypto) runs its pipeline on a `spawn_blocking` worker
+//! (the analogue of Python's `ThreadPoolExecutor`); an [`AsyncJsonRpcMethod`] (for
+//! genuinely awaitable work) is awaited on the runtime.
+
+mod envelope;
+mod error;
+mod method;
+mod protocol;
+mod request;
+mod session;
+mod types;
+
+pub use error::{Error, ErrorCode, JsonRpcError, Result};
+pub use method::{AsyncJsonRpcMethod, JsonRpcMethod, MethodDef};
+pub use protocol::{
+    AuditSink, Authorizer, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
+    JsonRpcProtocolBuilder, ServerInfoHandler,
+};
+pub use request::RequestCtx;
+pub use session::{Clock, IdGen, NullOutbound, Outbound, Session, SessionId, SystemClock, UuidGen};
+pub use types::{
+    AuthorizationResponse, JsonRpcRequest, MessageDirection, ServerInfo, SessionLifecycle,
+};
+
+/// The JSON-RPC protocol version string this implementation speaks.
+pub const JSONRPC_VERSION: &str = "2.0";

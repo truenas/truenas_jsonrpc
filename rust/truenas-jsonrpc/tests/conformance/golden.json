@@ -1,0 +1,443 @@
+{
+  "cases": [
+    {
+      "audits": [],
+      "name": "open/echo_ok",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "echo": "hi"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"msg\": \"hi\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/add_ok",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "sum": 5
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"add\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"a\": 2, \"b\": 3}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/boom_request_failed",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32803,
+              "message": "kaboom"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"boom\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/missing_required_param",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32602,
+              "data": "Object missing required field `msg`",
+              "message": "Invalid params"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/wrong_param_type",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32602,
+              "data": "Expected `int`, got `str` - at `$.a`",
+              "message": "Invalid params"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"add\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"a\": \"x\", \"b\": 3}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/unknown_method",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32601,
+              "message": "Method not found"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"nope\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/notification_no_reply",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": null,
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"params\": {\"msg\": \"hi\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/malformed_json",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32700,
+              "data": "JSON is malformed: object keys must be strings (byte 1)",
+              "message": "Parse error"
+            },
+            "id": null,
+            "jsonrpc": "2.0"
+          },
+          "wire": "{not json"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/top_level_array",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32600,
+              "data": "Expected `object`, got `array`",
+              "message": "Invalid request"
+            },
+            "id": null,
+            "jsonrpc": "2.0"
+          },
+          "wire": "[]"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/non_uuid_id",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32600,
+              "data": "'id' must be a UUID string",
+              "message": "Invalid request"
+            },
+            "id": null,
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"id\": \"not-a-uuid\", \"params\": {\"msg\": \"x\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/bad_jsonrpc_version",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32600,
+              "data": "'jsonrpc' must be exactly '2.0'",
+              "message": "Invalid request"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"1.0\", \"method\": \"echo\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"msg\": \"x\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/server_info",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "name": "ref",
+              "version": "1.0.0"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/serverInfo\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"}"
+        }
+      ]
+    },
+    {
+      "audits": [
+        {
+          "audit_message": "audited op",
+          "method": "audit_me",
+          "params": {
+            "password": "********",
+            "user": "u"
+          },
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "password": "********",
+              "user": "u"
+            }
+          }
+        }
+      ],
+      "name": "open/audit_redaction",
+      "protocol": "open",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "password": "hunter2",
+              "user": "u"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"audit_me\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"user\": \"u\", \"password\": \"hunter2\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/ping_preauth",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "pong": true
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"ping\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/echo_before_setup_gated",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32002,
+              "message": "Session not established"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"msg\": \"x\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/unknown_before_setup",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32601,
+              "message": "Method not found"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"nope\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/setup_then_echo",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "welcome": "hi"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
+        },
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "echo": "hi"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"msg\": \"hi\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/setup_bad_token",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "error": {
+              "code": -32000,
+              "message": "bad token"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"bad\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/secret_op_denied",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "welcome": "hi"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
+        },
+        {
+          "response": {
+            "error": {
+              "code": -32000,
+              "message": "denied"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"secret_op\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/session_close_then_call",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "welcome": "hi"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
+        },
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": true
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionClose\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"}"
+        },
+        {
+          "response": {
+            "error": {
+              "code": -32002,
+              "message": "Session is closed"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"msg\": \"x\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "gated/cancel_unknown_target",
+      "protocol": "gated",
+      "steps": [
+        {
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "welcome": "hi"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
+        },
+        {
+          "response": {
+            "error": {
+              "code": -32803,
+              "data": "no active request or subscription with id 'f81d4fae-7dec-11d0-a765-00a0c91e6bf7'",
+              "message": "Request failed"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/cancelRequest\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"target_id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf7\"}}"
+        }
+      ]
+    }
+  ]
+}

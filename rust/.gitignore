@@ -1,0 +1,7 @@
+# Cargo build outputs. `Cargo.lock` IS committed (the workspace builds binaries/tests
+# and CI runs `--locked` for reproducibility; private consumers clone this tree).
+/target
+
+# Ad-hoc performance + profiling scripts — useful locally, not worth carrying in the repo.
+# (The A/B conformance generator lives in rust/conformance/ and is NOT ignored — CI uses it.)
+/bench/

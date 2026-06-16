@@ -34,6 +34,12 @@ jobs:
       timeout-minutes: 25
       run: bash .github/workflows/scripts/qemu-4-test.sh
 
+    # Rust dispatch-core conformance against a golden corpus generated from the repo's
+    # real Python (full truenas_pyfilter/SCRAM/PAM stack) — see scripts/qemu-4b-rust.sh.
+    - name: Rust conformance (golden from the repo's Python)
+      timeout-minutes: 25
+      run: bash .github/workflows/scripts/qemu-4b-rust.sh
+
     - name: Collect logs
       if: always()
       timeout-minutes: 5

@@ -1,0 +1,40 @@
+name: Rust
+
+on:
+  pull_request:
+    branches: [ master, main ]
+  push:
+    branches: [ master, main ]
+
+jobs:
+  rust:
+    name: Rust core — build, clippy, A/B conformance
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ubuntu-latest ships a rustup-managed stable toolchain; ensure clippy is present.
+      - name: Ensure clippy
+        run: rustup component add clippy
+
+      - name: Build (all targets)
+        run: cargo build --all-targets --locked
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Runs the unit/integration tests, including tests/conformance.rs — the A/B
+      # differential check that replays the committed golden corpus
+      # (truenas-jsonrpc/tests/conformance/golden.json) through the Rust dispatch core
+      # and asserts it matches the Python reference's recorded responses + audits.
+      #
+      # This is the fast pre-check. The golden is (re)generated from the repo's *real*
+      # Python — with the full truenas_pyfilter/SCRAM/PAM stack — and drift-checked in the
+      # QEMU VM pipeline (qemu-test.yml, scripts/qemu-4b-rust.sh), which is also where
+      # Rust<->Python client/server conformance will run. No Python is needed here.
+      - name: Test
+        run: cargo test --locked

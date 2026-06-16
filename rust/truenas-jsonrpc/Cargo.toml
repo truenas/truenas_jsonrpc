@@ -1,0 +1,26 @@
+[package]
+name = "truenas-jsonrpc"
+version = "0.1.0"
+description = "Transport-agnostic JSON-RPC 2.0 dispatch core for TrueNAS (Rust port of truenas_pyjsonrpc)"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+# Only `rt` is needed: dispatch is async and offloads sync handlers via spawn_blocking.
+tokio = { workspace = true }
+# Needed only for the AsyncHandler (AsyncJsonRpcMethod) path; the sync Handler needs none.
+async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+
+[features]
+default = []
