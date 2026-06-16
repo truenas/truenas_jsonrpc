@@ -962,11 +962,45 @@ mod tests {
     fn dummy_session() -> Arc<Session<()>> {
         Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)))
     }
-    fn dummy_req() -> JsonRpcRequest {
-        JsonRpcRequest { method: "m".into(), id: None, params: Value::Null, roles: Vec::new() }
-    }
     fn dummy_cx(session: &Arc<Session<()>>) -> RequestCtx<()> {
         RequestCtx::new(None, session.clone(), Arc::new(AtomicBool::new(false)))
+    }
+    fn pipeline(method: Method<()>) -> Pipeline<()> {
+        Pipeline {
+            method: Arc::new(method),
+            session: dummy_session(),
+            req: JsonRpcRequest { method: "m".into(), id: None, params: Value::Null, roles: Vec::new() },
+            rid: None,
+            authorizer: None,
+            audit_sink: None,
+        }
+    }
+
+    // Shared no-op handlers as *named functions* (not closures). The panic/subscribe tests
+    // reference them without invoking them; a fresh closure there would leave an
+    // un-executed closure body in the coverage map. `shared_handlers_execute` runs both so
+    // their bodies are covered, and the panic tests reuse the same items.
+    fn nil_ok(_a: Value, _c: &RequestCtx<()>) -> Result<Value, JsonRpcError> {
+        Ok(Value::Null)
+    }
+    async fn nil_ok_async(_a: Value, _c: RequestCtx<()>) -> Result<Value, JsonRpcError> {
+        Ok(Value::Null)
+    }
+
+    #[tokio::test]
+    async fn shared_handlers_execute() {
+        let proto = JsonRpcProtocol::<()>::builder("t", "1")
+            .method(JsonRpcMethod::new(MethodDef::new("s"), nil_ok))
+            .unwrap()
+            .async_method(AsyncJsonRpcMethod::new(MethodDef::new("a"), nil_ok_async))
+            .unwrap()
+            .build();
+        let s = proto.new_session(Some(()), Arc::new(NullOutbound));
+        let id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+        for m in ["s", "a"] {
+            let wire = format!(r#"{{"jsonrpc":"2.0","method":"{m}","id":"{id}"}}"#);
+            assert!(matches!(proto.dispatch(wire.as_bytes(), &s).await, Dispatched::Reply(_)));
+        }
     }
 
     // The pipeline's variant assertions are unreachable in normal dispatch (`run_method`
@@ -975,43 +1009,20 @@ mod tests {
     #[test]
     #[should_panic(expected = "non-sync")]
     fn run_sync_on_async_method_panics() {
-        let method = AsyncJsonRpcMethod::new(
-            MethodDef::new("a"),
-            |_a: Value, _c: RequestCtx<()>| async { Ok::<Value, JsonRpcError>(Value::Null) },
-        )
-        .erase::<(), Value, Value, _>();
+        let method =
+            AsyncJsonRpcMethod::new(MethodDef::new("a"), nil_ok_async).erase::<(), Value, Value, _>();
         let session = dummy_session();
         let cx = dummy_cx(&session);
-        let p = Pipeline {
-            method: Arc::new(method),
-            session,
-            req: dummy_req(),
-            rid: None,
-            authorizer: None,
-            audit_sink: None,
-        };
-        let _ = p.run_sync(None, cx);
+        let _ = pipeline(method).run_sync(None, cx);
     }
 
     #[tokio::test]
     #[should_panic(expected = "non-async")]
     async fn run_async_on_sync_method_panics() {
-        let method = JsonRpcMethod::new(
-            MethodDef::new("s"),
-            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(Value::Null),
-        )
-        .erase::<(), Value, Value>();
+        let method = JsonRpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
         let session = dummy_session();
         let cx = dummy_cx(&session);
-        let p = Pipeline {
-            method: Arc::new(method),
-            session,
-            req: dummy_req(),
-            rid: None,
-            authorizer: None,
-            audit_sink: None,
-        };
-        let _ = p.run_async(None, cx).await;
+        let _ = pipeline(method).run_async(None, cx).await;
     }
 
     // No public API registers a SERVER_CLIENT (subscribe) method yet, so hand-build one
@@ -1019,11 +1030,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_notification_without_id_is_invalid_request() {
         let mut proto = JsonRpcProtocol::<()>::builder("t", "1").build();
-        let mut method = JsonRpcMethod::new(
-            MethodDef::new("sub"),
-            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(Value::Null),
-        )
-        .erase::<(), Value, Value>();
+        let mut method = JsonRpcMethod::new(MethodDef::new("sub"), nil_ok).erase::<(), Value, Value>();
         method.meta.direction = MessageDirection::ServerClient;
         proto.methods.insert(method.meta.name.clone(), Arc::new(method));
 
