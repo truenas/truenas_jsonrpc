@@ -13,11 +13,12 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
-tracing.workspace = true
 # Only `rt` is needed: dispatch is async and offloads sync handlers via spawn_blocking.
 tokio = { workspace = true }
 # Needed only for the AsyncHandler (AsyncJsonRpcMethod) path; the sync Handler needs none.
 async-trait.workspace = true
+# The query-filters / query-options engine, for filterable (query) methods.
+truenas-filter.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

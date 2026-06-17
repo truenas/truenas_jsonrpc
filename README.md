@@ -72,6 +72,10 @@ filter/option grammar is the same middleware `query` syntax every binding must i
 the full operator and option tables are in
 **[ARCHITECTURE.md → Query methods](ARCHITECTURE.md#7-query-methods-filtering)**.
 
+> **Rust note:** the Rust port intentionally omits `query-options.select` (column projection)
+> and the `~` regex operator; all other filter/option behavior is byte-identical. See
+> [rust/README.md → Filter-engine deviations](rust/README.md#filter-engine-deviations).
+
 **Raw socket operations.** Two operations step *outside* JSON-RPC framing to do raw I/O
 directly on the established socket, coordinated by the `$/transferReady`/`$/transferGo`
 handshake (the reader pauses, the operation runs, then normal JSON-RPC resumes). They are
@@ -185,7 +189,10 @@ are specified in the language-agnostic
   - Quickstart, full API docs, examples, and the Python integration guide
     ([python/truenas_pyjsonrpc/ARCHITECTURE.md](python/truenas_pyjsonrpc/ARCHITECTURE.md))
     all live there.
-- **`rust/`** — *planned* (not yet present).
+- **[`rust/`](rust/)** — *in progress*: the dispatch core (`truenas-jsonrpc`) plus the
+  query-filter engine (`truenas-filter`), A/B-verified byte-for-byte against the Python
+  reference. Two deliberate deviations — `query-options.select` and the `~` regex operator
+  are unsupported (see [rust/README.md](rust/README.md#filter-engine-deviations)).
 - **`go/`** — *planned* (not yet present).
 
 New language implementations target the same wire contract above, so they interoperate

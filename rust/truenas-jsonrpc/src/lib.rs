@@ -27,7 +27,9 @@ mod session;
 mod types;
 
 pub use error::{BuildResult, Error, ErrorCode, JsonRpcError};
-pub use method::{AsyncJsonRpcMethod, JsonRpcMethod, MethodDef};
+pub use method::{
+    AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcMethod, MethodDef, SubscriptionDef,
+};
 pub use protocol::{
     AuditSink, Authorizer, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
     JsonRpcProtocolBuilder, ServerInfoHandler,
@@ -36,6 +38,12 @@ pub use request::RequestCtx;
 pub use session::{Clock, IdGen, NullOutbound, Outbound, Session, SessionId, SystemClock, UuidGen};
 pub use types::{
     AuthorizationResponse, JsonRpcRequest, MessageDirection, ServerInfo, SessionLifecycle,
+};
+// Re-exported from `truenas-filter` so consumers can write filterable (query) handlers
+// without a direct dependency on the engine crate.
+pub use truenas_filter::{
+    compile_filters, compile_options, tnfilter, tnmatch, CompiledFilters, CompiledOptions,
+    FilterError, Filtered, QueryFilters, QueryOptions,
 };
 
 /// The JSON-RPC protocol version string this implementation speaks.

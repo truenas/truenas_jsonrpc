@@ -14,8 +14,13 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::value::{to_raw_value, RawValue};
+use serde_json::Value;
+use truenas_filter::{
+    compile_filters, compile_options, CompiledFilters, CompiledOptions, Filtered, QueryFilters,
+    QueryOptions,
+};
 
 use crate::error::{ErrorCode, JsonRpcError};
 use crate::request::RequestCtx;
@@ -113,6 +118,115 @@ where
             .expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx).await?;
         encode_result(&result)
+    }
+}
+
+// --- subscription (SERVER_CLIENT topic) erasure ------------------------------
+//
+// A subscribable topic has no handler; it carries only the subscribe-request param type
+// `A` (validated like a normal method's `Accepts`) and the published-payload type `N`
+// (Python's `notifies`), both living in the erased self type `SubImpl<A, N>`.
+
+/// Erased validators for a SERVER_CLIENT topic. Independent of the server state `S`.
+pub(crate) trait SubscriptionImpl: Send + Sync {
+    /// Validate subscribe-request params against the topic's `Accepts` (INVALID_PARAMS on fail).
+    fn decode_subscribe(&self, params: Option<&RawValue>) -> Result<(), JsonRpcError>;
+    /// Validate a publish payload against the topic's `Notifies` and re-encode it canonically
+    /// (mirrors Python's `msgspec.convert(payload, type=notifies)` then re-encode).
+    fn validate_publish(&self, payload: &serde_json::Value) -> Result<Box<RawValue>, JsonRpcError>;
+}
+
+struct SubImpl<A, N> {
+    _p: PhantomData<fn() -> (A, N)>,
+}
+
+impl<A, N> SubscriptionImpl for SubImpl<A, N>
+where
+    A: DeserializeOwned + 'static,
+    N: DeserializeOwned + Serialize + 'static,
+{
+    fn decode_subscribe(&self, params: Option<&RawValue>) -> Result<(), JsonRpcError> {
+        let _accepts: A = decode_params(params)?;
+        Ok(())
+    }
+    fn validate_publish(&self, payload: &serde_json::Value) -> Result<Box<RawValue>, JsonRpcError> {
+        let typed: N = serde_json::from_value(payload.clone())
+            .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        encode_result(&typed)
+    }
+}
+
+// --- filterable (query) method erasure ---------------------------------------
+//
+// A filterable method augments its `Accepts` with optional `query-filters` /
+// `query-options` (Python's `augment_accepts`), compiles them *after* authorization,
+// hands the compiled query to the handler (which applies it at its source via
+// `truenas_filter::tnfilter`), and applies the `get`/`count` finalize. It erases to
+// `ErasedSync` — the compile/finalize live inside `run`, so dispatch treats it as sync.
+
+/// The augmented accepts: the base `Accepts` plus the two optional query fields. Structural
+/// decode (`INVALID_PARAMS`) happens before authz; the *semantic* compile happens in `run`.
+#[derive(Deserialize)]
+struct AugIn<A> {
+    #[serde(flatten)]
+    base: A,
+    #[serde(rename = "query-filters", default)]
+    query_filters: QueryFilters,
+    #[serde(rename = "query-options", default)]
+    query_options: QueryOptions,
+}
+
+struct FilterableErased<A, E, F> {
+    f: F,
+    _p: PhantomData<fn() -> (A, E)>,
+}
+
+impl<S, A, E, F> ErasedSync<S> for FilterableErased<A, E, F>
+where
+    S: Send + Sync + 'static,
+    A: DeserializeOwned + Send + 'static,
+    E: 'static,
+    F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>
+        + Send
+        + Sync,
+{
+    fn decode(&self, params: Option<&RawValue>) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        let aug: AugIn<A> = decode_params(params)?;
+        Ok(Box::new(aug))
+    }
+    fn run(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: &RequestCtx<S>,
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        let aug = *decoded
+            .downcast::<AugIn<A>>()
+            .expect("decoded params type matches the method");
+        // Compile after authz (the caller runs `run` only on an allowed request), so a bad
+        // query → INVALID_PARAMS (via `From<FilterError>`) lands *after* NOT_AUTHORIZED.
+        let cf = compile_filters(&aug.query_filters)?;
+        let co = compile_options(&aug.query_options)?;
+        let out = (self.f)(aug.base, cx, &cf, &co)?;
+        let value = finalize(out, &aug.query_options)?;
+        encode_result(&value)
+    }
+}
+
+/// Apply the `get`/`count` finalize convention to the handler's result (Python's
+/// `finalize_result`): `count` → the integer; `get` → the single record (or REQUEST_FAILED
+/// when none matched); otherwise the list.
+fn finalize(out: Filtered, opts: &QueryOptions) -> Result<Value, JsonRpcError> {
+    match out {
+        Filtered::Count(n) => Ok(Value::from(n)),
+        Filtered::Rows(rows) => {
+            if opts.get {
+                rows.into_iter().next().ok_or_else(|| {
+                    JsonRpcError::request_failed("no record matched query with get=True")
+                })
+            } else {
+                Ok(Value::Array(rows))
+            }
+        }
     }
 }
 
@@ -234,6 +348,13 @@ impl MethodDef {
 pub(crate) enum MethodImpl<S> {
     Sync(Box<dyn ErasedSync<S>>),
     Async(Box<dyn ErasedAsync<S>>),
+    /// A SERVER_CLIENT subscribable topic — no handler; carries the subscribe-param and
+    /// notification-payload validators. `S`-independent.
+    Subscription(Box<dyn SubscriptionImpl>),
+    /// A filterable (query) method. Runs like a sync method (the compile → handler →
+    /// finalize logic lives inside the erased `run`); a distinct variant only so a future
+    /// `describe()`/codegen can recover its filterable-ness and `entry` type.
+    Filterable(Box<dyn ErasedSync<S>>),
 }
 
 pub(crate) struct Method<S> {
@@ -292,6 +413,97 @@ impl<F> AsyncJsonRpcMethod<F> {
         Method {
             meta: self.def.into_meta(MessageDirection::ClientServer),
             imp: MethodImpl::Async(Box::new(ClosureAsync { f: self.handler, _p: PhantomData })),
+        }
+    }
+}
+
+/// A subscribable SERVER_CLIENT topic: pairs a [`MethodDef`] with the subscribe-request
+/// param type `A` and the published-payload type `N` (Python's `notifies`). It has **no**
+/// handler — the protocol registers a subscription and acks with its id, and the server
+/// publishes via [`crate::JsonRpcProtocol::send_notification`]. Mirrors Python's
+/// `JSONRPCMethod(direction=SERVER_CLIENT, notifies=...)`.
+pub struct SubscriptionDef<A, N> {
+    def: MethodDef,
+    _p: PhantomData<fn() -> (A, N)>,
+}
+
+impl<A, N> SubscriptionDef<A, N> {
+    /// Begin a subscribable topic from a [`MethodDef`]. `A` is the subscribe-request param
+    /// type, `N` the published-notification payload type.
+    pub fn new(def: MethodDef) -> Self {
+        Self { def, _p: PhantomData }
+    }
+
+    pub(crate) fn erase<S>(self) -> Method<S>
+    where
+        S: Send + Sync + 'static,
+        A: DeserializeOwned + 'static,
+        N: DeserializeOwned + Serialize + 'static,
+    {
+        Method {
+            meta: self.def.into_meta(MessageDirection::ServerClient),
+            imp: MethodImpl::Subscription(Box::new(SubImpl::<A, N> { _p: PhantomData })),
+        }
+    }
+}
+
+/// A **filterable** (query) request method. Pairs a [`MethodDef`] with a handler that
+/// receives the base params plus the compiled `query-filters` / `query-options` and applies
+/// them at its source — typically by streaming a lazy source through
+/// [`truenas_filter::tnfilter`] — returning a [`Filtered`]. The framework augments
+/// `accepts`, compiles the query after authorization, and applies the `get`/`count`
+/// finalize. Mirrors Python's `FilterableJSONRPCMethod`.
+///
+/// `A` is the base accepts type; `E` is the list element (`entry`) type — metadata for a
+/// future `describe()`/codegen (Python's `entry`), carried as `PhantomData` and unused at
+/// runtime (the result is encoded as-is, like Python's `returns=None`).
+pub struct FilterableJsonRpcMethod<A, E, F> {
+    def: MethodDef,
+    handler: F,
+    _p: PhantomData<fn() -> (A, E)>,
+}
+
+impl<A, E, F> FilterableJsonRpcMethod<A, E, F> {
+    /// Pair a [`MethodDef`] with a filterable handler. The handler is
+    /// `Fn(Accepts, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>`.
+    pub fn new(def: MethodDef, handler: F) -> Self {
+        Self { def, handler, _p: PhantomData }
+    }
+
+    pub(crate) fn erase<S>(self) -> Method<S>
+    where
+        S: Send + Sync + 'static,
+        A: DeserializeOwned + Send + 'static,
+        E: 'static,
+        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>
+            + Send
+            + Sync
+            + 'static,
+    {
+        Method {
+            meta: self.def.into_meta(MessageDirection::ClientServer),
+            imp: MethodImpl::Filterable(Box::new(FilterableErased::<A, E, F> {
+                f: self.handler,
+                _p: PhantomData,
+            })),
+        }
+    }
+}
+
+impl From<truenas_filter::FilterError> for JsonRpcError {
+    /// Bridge a query-engine failure into a JSON-RPC error so a handler can `tnfilter(..)?`:
+    /// a compile-time `Compile` is `INVALID_PARAMS`; a runtime `Eval` (incomparable types,
+    /// etc.) is `INTERNAL_ERROR` — matching Python, where a `tnfilter` `TypeError` propagates
+    /// uncaught out of the handler.
+    fn from(e: truenas_filter::FilterError) -> Self {
+        match &e {
+            // "invalid query: …" (matches Python's `compile_query` wrapping + the C message).
+            truenas_filter::FilterError::Compile(_) => JsonRpcError::invalid_params(e.to_string()),
+            // Generic message + detail in `data`, like Python's uncaught-handler-exception path.
+            truenas_filter::FilterError::Eval(m) => {
+                JsonRpcError::new(ErrorCode::InternalError, "Internal error")
+                    .with_data(Value::String(m.clone()))
+            }
         }
     }
 }

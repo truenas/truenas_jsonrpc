@@ -1,0 +1,16 @@
+[package]
+name = "truenas-filter"
+version = "0.1.0"
+description = "TrueNAS middlewared query-filters / query-options engine (Rust port of the truenas_pyfilter C extension)"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

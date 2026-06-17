@@ -20,12 +20,13 @@ use serde_json::{json, Value};
 use crate::envelope::{self, ParsedRequest};
 use crate::error::{BuildResult, Error, ErrorCode, JsonRpcError};
 use crate::method::{
-    decode_params, encode_result, AsyncJsonRpcMethod, JsonRpcMethod, Method, MethodDef, MethodImpl,
-    MethodMeta,
+    decode_params, encode_result, AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcMethod,
+    Method, MethodDef, MethodImpl, MethodMeta, SubscriptionDef, SubscriptionImpl,
 };
 use crate::request::RequestCtx;
 use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SystemClock, UuidGen};
 use crate::types::{AuthorizationResponse, JsonRpcRequest, MessageDirection, SessionLifecycle};
+use truenas_filter::{CompiledFilters, CompiledOptions, Filtered};
 
 const CANCEL_METHOD: &str = "$/cancelRequest";
 const SERVERINFO_METHOD: &str = "$/serverInfo";
@@ -202,6 +203,18 @@ struct Inflight {
     session_id: SessionId,
 }
 
+/// A registered subscription to a SERVER_CLIENT topic: the owning session (for fan-out via
+/// its [`Outbound`] sink and for session-scoped cancel) plus a snapshot of the subscribe
+/// params. Mirrors Python's `Subscription`.
+struct Subscription<S> {
+    session: Arc<Session<S>>,
+    #[allow(dead_code)] // forward-compat (per-subscription filtering); mirrors Python's stored params
+    params: Value,
+}
+
+/// Topic → {sub_id → [`Subscription`]} (alias keeps the registry field type readable).
+type Subscriptions<S> = HashMap<Arc<str>, HashMap<String, Subscription<S>>>;
+
 // --- builder -----------------------------------------------------------------
 
 /// Builds a [`JsonRpcProtocol`] (Python's `JSONRPCProtocol(...)` + `register_*`). Frozen
@@ -270,6 +283,37 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
         Fut: Future<Output = Result<R, JsonRpcError>> + Send + 'static,
     {
         self.insert(method.erase::<S, A, R, Fut>())?;
+        Ok(self)
+    }
+
+    /// Register a subscribable SERVER_CLIENT topic (no handler). Clients subscribe with a
+    /// normal request (which returns a subscription id); the server publishes with
+    /// [`JsonRpcProtocol::send_notification`].
+    pub fn subscription<A, N>(mut self, def: SubscriptionDef<A, N>) -> BuildResult<Self>
+    where
+        A: DeserializeOwned + 'static,
+        N: DeserializeOwned + Serialize + 'static,
+    {
+        self.insert(def.erase::<S>())?;
+        Ok(self)
+    }
+
+    /// Register a filterable (query) request method. The handler receives the compiled
+    /// `query-filters` / `query-options` and applies them at its source via
+    /// [`truenas_filter::tnfilter`]; the framework applies the `get`/`count` finalize.
+    pub fn filterable<F, A, E>(
+        mut self,
+        method: FilterableJsonRpcMethod<A, E, F>,
+    ) -> BuildResult<Self>
+    where
+        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>
+            + Send
+            + Sync
+            + 'static,
+        A: DeserializeOwned + Send + 'static,
+        E: 'static,
+    {
+        self.insert(method.erase::<S>())?;
         Ok(self)
     }
 
@@ -361,6 +405,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             id_gen: self.id_gen,
             clock: self.clock,
             inflight: Mutex::new(HashMap::new()),
+            subscriptions: Mutex::new(HashMap::new()),
             never_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -385,6 +430,9 @@ pub struct JsonRpcProtocol<S> {
     #[allow(dead_code)] // used by audit timestamping once the audit record carries time
     clock: Arc<dyn Clock>,
     inflight: Mutex<HashMap<String, Inflight>>,
+    /// SERVER_CLIENT subscriptions: topic -> {sub_id -> Subscription}. Runtime-mutable
+    /// (subscribe/unsubscribe during dispatch), like `inflight`.
+    subscriptions: Mutex<Subscriptions<S>>,
     /// A shared always-false flag handed to non-cancellable requests so they don't each
     /// allocate a cancel `Arc`.
     never_cancel: Arc<AtomicBool>,
@@ -420,14 +468,73 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         Arc::new(Session::new(self.id_gen.new_id(), self.name.clone(), server_state, out))
     }
 
-    /// Mark a session `CLOSED` (and, later, drop its subscriptions). Call on socket drop.
+    /// Mark a session `CLOSED` and drop all of its subscriptions. Call on socket drop.
     pub fn close_session(&self, session: &Session<S>) {
         session.set_lifecycle(SessionLifecycle::Closed);
+        self.unsubscribe_all(session);
     }
 
-    /// Publish to a `SERVER_CLIENT` topic. (Subscriptions are a later phase; currently a
-    /// no-op with no subscribers.)
-    pub fn send_notification<P: Serialize>(&self, _topic: &str, _payload: &P) -> BuildResult<()> {
+    /// Drop a single subscription by id. Returns `true` if it existed.
+    pub fn unsubscribe(&self, sub_id: &str) -> bool {
+        let mut subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+        for topic in subs.values_mut() {
+            if topic.remove(sub_id).is_some() {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drop every subscription owned by `session` (matched by session id). Returns the count.
+    pub fn unsubscribe_all(&self, session: &Session<S>) -> usize {
+        let sid = session.id();
+        let mut removed = 0;
+        let mut subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+        for topic in subs.values_mut() {
+            topic.retain(|_, sub| {
+                let keep = sub.session.id() != sid;
+                if !keep {
+                    removed += 1;
+                }
+                keep
+            });
+        }
+        removed
+    }
+
+    /// The session that owns `sub_id`, if any (without removing it) — used by `$/cancelRequest`.
+    fn subscription_owner(&self, sub_id: &str) -> Option<SessionId> {
+        let subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+        subs.values().find_map(|topic| topic.get(sub_id).map(|s| s.session.id()))
+    }
+
+    /// Publish a notification to every subscriber of a `SERVER_CLIENT` topic. The payload is
+    /// validated against the topic's notification type, encoded once, and pushed to each
+    /// subscriber's [`Outbound`] back-channel (no subscribers → no-op). Returns `Err` if
+    /// `topic` is not a registered SERVER_CLIENT topic, or the payload is invalid.
+    pub fn send_notification<P: Serialize>(
+        &self,
+        topic: &str,
+        payload: &P,
+    ) -> Result<(), JsonRpcError> {
+        let sub_impl = match self.methods.get(topic).map(|m| &m.imp) {
+            Some(MethodImpl::Subscription(s)) => s,
+            _ => {
+                return Err(JsonRpcError::internal(format!(
+                    "{topic:?} is not a registered SERVER_CLIENT (subscribable) method"
+                )))
+            }
+        };
+        let value =
+            serde_json::to_value(payload).map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        let params = sub_impl.validate_publish(&value)?;
+        let bytes = envelope::notification(topic, &params);
+        let subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(topic_subs) = subs.get(topic) {
+            for sub in topic_subs.values() {
+                sub.session.outbound().send(bytes.clone());
+            }
+        }
         Ok(())
     }
 
@@ -510,6 +617,11 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             );
         }
 
+        // A SERVER_CLIENT topic registers a subscription instead of running a handler.
+        if let MethodImpl::Subscription(sub_impl) = &method.imp {
+            return self.handle_subscribe(&method, sub_impl.as_ref(), parsed, session);
+        }
+
         let response = self.run_method(method, parsed, session.clone()).await;
         finish(note, response)
     }
@@ -550,7 +662,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // Bundle everything the decode → authorize → handler → audit stages share into a
         // single owned value, so the sync path can move it across the `spawn_blocking`
         // boundary as one argument instead of cloning six locals to thread through.
-        let is_sync = matches!(method.imp, MethodImpl::Sync(_));
+        let is_sync = matches!(method.imp, MethodImpl::Sync(_) | MethodImpl::Filterable(_));
         let pipeline = Pipeline {
             method,
             session,
@@ -581,6 +693,64 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             }
         }
         response
+    }
+
+    /// Handle a subscribe request to a SERVER_CLIENT topic: validate params, authorize,
+    /// register a [`Subscription`] (capturing the session for routing), and ack with its id.
+    /// No handler runs; audited iff the topic opted in. Mirrors Python's subscribe branch in
+    /// `_authorize_and_dispatch`.
+    fn handle_subscribe(
+        &self,
+        method: &Method<S>,
+        sub_impl: &dyn SubscriptionImpl,
+        parsed: ParsedRequest,
+        session: &Arc<Session<S>>,
+    ) -> Dispatched {
+        let note = parsed.id.is_none();
+        let rid = parsed.id;
+
+        // 1. Validate subscribe params against the topic's Accepts (INVALID_PARAMS before authz).
+        if let Err(e) = sub_impl.decode_subscribe(parsed.params.as_deref()) {
+            return finish(note, envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref()));
+        }
+
+        // 2. The authz/audit snapshot (also stored on the subscription).
+        let snapshot = raw_to_value(parsed.params.as_deref());
+        let need_snapshot = self.authorizer.is_some() || method.meta.audit;
+        let req = JsonRpcRequest {
+            method: parsed.method,
+            id: rid.clone(),
+            params: if need_snapshot { snapshot.clone() } else { Value::Null },
+            roles: if need_snapshot { method.meta.roles.to_vec() } else { Vec::new() },
+        };
+
+        // 3. Authorize (a subscribe is a normal request — no CancelTarget).
+        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, None) {
+            return finish(
+                note,
+                envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
+            );
+        }
+
+        // 4. Register the subscription; ack with its id.
+        let sub_id = self.id_gen.new_id().to_string();
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(method.meta.name.clone())
+            .or_default()
+            .insert(sub_id.clone(), Subscription { session: session.clone(), params: snapshot });
+        let raw = to_raw_value(&sub_id).expect("encoding a string cannot fail");
+        let ack = envelope::success(rid.as_deref(), &raw);
+
+        // 5. Audit (subscribe is audited iff the topic opted in; static message, no runtime detail).
+        if method.meta.audit {
+            if let Some(sink) = self.audit_sink.as_deref() {
+                audit_call(sink, &method.meta, &req, &ack, None, session);
+            }
+        }
+
+        finish(note, ack)
     }
 
     // --- control messages ----------------------------------------------------
@@ -745,12 +915,20 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             }
         };
 
-        let target = self
+        // Resolve the target against in-flight requests first, then subscriptions (without
+        // removing yet — authorize before acting). `request` carries the cancel flag.
+        let request = self
             .inflight
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&target_id)
             .map(|e| (e.cancel.clone(), e.session_id));
+        let cancel_target = match &request {
+            Some((_, session_id)) => Some(CancelTarget::Request { session_id: *session_id }),
+            None => self
+                .subscription_owner(&target_id)
+                .map(|session_id| CancelTarget::Subscription { session_id }),
+        };
 
         let req = JsonRpcRequest {
             method: parsed.method.clone(),
@@ -759,23 +937,29 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             roles: Vec::new(),
         };
 
-        match target {
-            Some((cancel, session_id)) => {
-                if let Err(denied) = check_authz(
-                    self.authorizer.as_deref(),
-                    &req,
-                    session,
-                    Some(CancelTarget::Request { session_id }),
-                ) {
-                    return finish(
-                        note,
-                        envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
-                    );
-                }
+        // Authorize with the resolved target (may be `None`) BEFORE any existence error, so an
+        // unauthorized caller is denied without learning whether the target exists.
+        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, cancel_target) {
+            return finish(
+                note,
+                envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
+            );
+        }
+
+        match request {
+            // An in-flight request: signal cooperative cancellation + optional active abort.
+            Some((cancel, _)) => {
                 cancel.store(true, Ordering::Relaxed);
                 if let Some(c) = &self.canceller {
                     c.cancel(&req, session);
                 }
+                let raw = to_raw_value(&true).expect("encoding `true` cannot fail");
+                finish(note, envelope::success(rid.as_deref(), &raw))
+            }
+            // A subscription (when `cancel_target` is set): drop it — a wire-level
+            // unsubscribe. The `Canceller` is for in-flight requests only; not invoked here.
+            None if cancel_target.is_some() => {
+                self.unsubscribe(&target_id);
                 let raw = to_raw_value(&true).expect("encoding `true` cannot fail");
                 finish(note, envelope::success(rid.as_deref(), &raw))
             }
@@ -879,6 +1063,27 @@ fn redact_value(value: &mut Value, secret_fields: &[String]) {
     }
 }
 
+/// Emit one audit record: redact the method's `secret_fields` in the request params and the
+/// response result, join the static + runtime audit message, and call the sink. Shared by
+/// the request pipeline ([`Pipeline::do_audit`]) and the subscribe path.
+fn audit_call<S>(
+    sink: &dyn AuditSink<S>,
+    meta: &MethodMeta,
+    req: &JsonRpcRequest,
+    response: &[u8],
+    detail: Option<&str>,
+    session: &Session<S>,
+) {
+    let message = join_audit_message(meta.audit_message.as_deref(), detail);
+    let mut audit_req = req.clone();
+    redact_value(&mut audit_req.params, &meta.secret_fields);
+    let mut resp_value: Value = serde_json::from_slice(response).unwrap_or(Value::Null);
+    if let Some(result) = resp_value.get_mut("result") {
+        redact_value(result, &meta.secret_fields);
+    }
+    sink.audit(&audit_req, &resp_value, session, message.as_deref());
+}
+
 /// Owned, `'static` context for one request's pipeline. Bundles the data the
 /// decode → authorize → handler → audit stages share, so the sync path can move it
 /// across the `spawn_blocking` boundary as a single value (rather than threading six
@@ -896,7 +1101,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
     /// Sync pipeline (runs on a `spawn_blocking` worker): typed decode (INVALID_PARAMS,
     /// before authz so it takes precedence) → authorize → run handler → audit.
     fn run_sync(self, params: Option<&RawValue>, cx: RequestCtx<S>) -> Vec<u8> {
-        let MethodImpl::Sync(erased) = &self.method.imp else {
+        let (MethodImpl::Sync(erased) | MethodImpl::Filterable(erased)) = &self.method.imp else {
             unreachable!("run_sync on a non-sync method")
         };
         let audit_detail = cx.audit_handle();
@@ -942,15 +1147,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         }
         let Some(sink) = self.audit_sink.as_deref() else { return };
         let detail = audit_detail.lock().unwrap_or_else(PoisonError::into_inner).take();
-        let message =
-            join_audit_message(self.method.meta.audit_message.as_deref(), detail.as_deref());
-        let mut audit_req = self.req.clone();
-        redact_value(&mut audit_req.params, &self.method.meta.secret_fields);
-        let mut resp_value: Value = serde_json::from_slice(response).unwrap_or(Value::Null);
-        if let Some(result) = resp_value.get_mut("result") {
-            redact_value(result, &self.method.meta.secret_fields);
-        }
-        sink.audit(&audit_req, &resp_value, &self.session, message.as_deref());
+        audit_call(sink, &self.method.meta, &self.req, response, detail.as_deref(), &self.session);
     }
 }
 
@@ -1025,21 +1222,6 @@ mod tests {
         let _ = pipeline(method).run_async(None, cx).await;
     }
 
-    // No public API registers a SERVER_CLIENT (subscribe) method yet, so hand-build one
-    // and insert it to exercise the "a subscribe request requires an 'id'" guard.
-    #[tokio::test]
-    async fn subscribe_notification_without_id_is_invalid_request() {
-        let mut proto = JsonRpcProtocol::<()>::builder("t", "1").build();
-        let mut method = JsonRpcMethod::new(MethodDef::new("sub"), nil_ok).erase::<(), Value, Value>();
-        method.meta.direction = MessageDirection::ServerClient;
-        proto.methods.insert(method.meta.name.clone(), Arc::new(method));
-
-        let session = proto.new_session(Some(()), Arc::new(NullOutbound));
-        let out = proto
-            .dispatch(br#"{"jsonrpc":"2.0","method":"sub"}"#, &session)
-            .await;
-        let bytes = out.into_bytes().expect("subscribe-without-id yields a reply");
-        let v: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["error"]["code"], -32600);
-    }
+    // (The subscribe-without-id guard and all pub/sub behavior are covered via the real
+    // `.subscription(...)` API in tests/pubsub.rs.)
 }

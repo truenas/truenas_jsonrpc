@@ -159,6 +159,20 @@ pub(crate) fn success(id: Option<&str>, result: &RawValue) -> Vec<u8> {
         .expect("serializing a success envelope cannot fail")
 }
 
+#[derive(Serialize)]
+struct NotificationEnvelope<'a> {
+    jsonrpc: &'static str,
+    method: &'a str,
+    params: &'a RawValue,
+}
+
+/// Build a server→client notification: `{"jsonrpc":"2.0","method":<method>,"params":<params>}`
+/// (no `id`). Used for pub/sub topic publishes.
+pub(crate) fn notification(method: &str, params: &RawValue) -> Vec<u8> {
+    serde_json::to_vec(&NotificationEnvelope { jsonrpc: JSONRPC_VERSION, method, params })
+        .expect("serializing a notification envelope cannot fail")
+}
+
 /// Build an error response: `{"jsonrpc":"2.0","error":{code,message,data?},"id":<id|null>}`.
 pub(crate) fn error(
     id: Option<&str>,

@@ -6,7 +6,7 @@
 # crates are added as later phases (see the plan).
 [workspace]
 resolver = "2"
-members = ["truenas-jsonrpc"]
+members = ["truenas-jsonrpc", "truenas-filter"]
 
 [workspace.package]
 edition = "2021"
@@ -27,6 +27,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
-tracing = "0.1"
 tokio = { version = "1", features = ["rt"] }
 async-trait = "0.1"
+# truenas-jsonrpc depends on the filter engine for filterable (query) methods.
+truenas-filter = { path = "truenas-filter" }

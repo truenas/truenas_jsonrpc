@@ -32,13 +32,16 @@ GOLDEN = os.path.abspath(
 sys.path.insert(0, PY_DIR)
 
 from truenas_pyjsonrpc import (  # noqa: E402
+    FilterableJSONRPCMethod,
     JSONRPCMethod,
     JSONRPCProtocol,
     JsonRpcError,
+    MessageDirection,
     SessionLifecycle,
 )
 from truenas_pyjsonrpc.redaction import SECRET  # noqa: E402
 from truenas_pyjsonrpc.types import AuthorizationResponse, JSONRPCError  # noqa: E402
+from truenas_pyfilter import tnfilter  # noqa: E402
 
 # Pin uuid4 so any server-minted id (session uuid; later, subscription ids) is
 # deterministic. Session uuids never appear in a dispatch response, but pinning keeps
@@ -47,6 +50,8 @@ uuid.uuid4 = lambda: uuid.UUID("00000000-0000-4000-8000-000000000000")  # noqa: 
 
 ID = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"
 ID2 = "f81d4fae-7dec-11d0-a765-00a0c91e6bf7"
+# Every server-minted id (session uuid; subscription id) is the pinned uuid4 above.
+SUB = "00000000-0000-4000-8000-000000000000"
 
 
 # --- reference structs -------------------------------------------------------
@@ -102,6 +107,11 @@ class SrvInfo(msgspec.Struct):
     version: str
 
 
+class PoolEvent(msgspec.Struct):
+    name: str
+    state: str
+
+
 # --- reference handlers ------------------------------------------------------
 def h_echo(request, session_state, request_state):
     return EchoResult(echo=request.msg)
@@ -144,6 +154,25 @@ def authz(request, session_state, target=None):
     return AuthorizationResponse(authorized=True)
 
 
+# --- filterable (query) reference method (mirrors python/tests/test_filterable.py) ------
+class QueryArgs(msgspec.Struct):
+    pass
+
+
+class QueryEntry(msgspec.Struct):
+    id: int
+    name: str
+
+
+_QDATA = [{"id": 1, "name": "a"}, {"id": 2, "name": "b"}, {"id": 3, "name": "a"}]
+
+
+def h_query(request, session_state, request_state, filters, options):
+    # Push-down: stream the source through the compiled query (the framework applies the
+    # get/count finalize on the returned narrowed result).
+    return tnfilter(_QDATA, filters=filters, options=options)
+
+
 def build_open():
     audit_log: list[dict] = []
 
@@ -170,6 +199,15 @@ def build_open():
                 audit=True,
                 audit_message="audited op",
             ),
+            JSONRPCMethod(
+                "events",
+                accepts=Empty,
+                notifies=PoolEvent,
+                direction=MessageDirection.SERVER_CLIENT,
+                audit=True,
+                audit_message="subscribed",
+            ),
+            FilterableJSONRPCMethod("x.query", accepts=QueryArgs, entry=QueryEntry, handler=h_query),
         ],
         name="ref-open",
         version="1.0.0",
@@ -194,6 +232,22 @@ def build_gated():
     )
     proto.add_session_setup(
         JSONRPCMethod("$/sessionSetup", accepts=SetupArgs, returns=SetupResult, handler=h_setup)
+    )
+    return proto, []
+
+
+def build_pubsub():
+    proto = JSONRPCProtocol(
+        [
+            JSONRPCMethod(
+                "events",
+                accepts=Empty,
+                notifies=PoolEvent,
+                direction=MessageDirection.SERVER_CLIENT,
+            ),
+        ],
+        name="ref-pubsub",
+        version="1.0.0",
     )
     return proto, []
 
@@ -255,19 +309,72 @@ CASES = [
         "gated",
         [mk("$/sessionSetup", {"token": "good"}), mk("$/cancelRequest", {"target_id": ID2})],
     ),
+    # --- pub/sub (SERVER_CLIENT) -------------------------------------------------
+    ("open/subscribe_ok", "open", [mk("events", {})]),  # ack carries the (pinned) sub id; audited
+    ("open/subscribe_without_id", "open", [mk("events", {}, id=None)]),  # INVALID_REQUEST
+    (
+        "pubsub/subscribe_then_publish",
+        "pubsub",
+        [mk("events", {}), ("events", {"name": "tank", "state": "ONLINE"})],
+    ),
+    (
+        "pubsub/unsubscribe_via_cancel",
+        "pubsub",
+        [
+            mk("events", {}),
+            mk("$/cancelRequest", {"target_id": SUB}),
+            ("events", {"name": "x", "state": "y"}),  # delivered to nobody now
+        ],
+    ),
+    ("pubsub/cancel_unknown", "pubsub", [mk("$/cancelRequest", {"target_id": ID2})]),
+    # --- filterable (query) ------------------------------------------------------
+    ("open/query_all", "open", [mk("x.query", {})]),
+    ("open/query_filter", "open", [mk("x.query", {"query-filters": [["name", "=", "a"]]})]),
+    (
+        "open/query_count",
+        "open",
+        [mk("x.query", {"query-filters": [["name", "=", "a"]], "query-options": {"count": True}})],
+    ),
+    (
+        "open/query_get",
+        "open",
+        [mk("x.query", {"query-filters": [["name", "=", "a"]], "query-options": {"get": True}})],
+    ),
+    (
+        "open/query_get_nomatch",
+        "open",
+        [mk("x.query", {"query-filters": [["name", "=", "zzz"]], "query-options": {"get": True}})],
+    ),
+    ("open/query_invalid_filter", "open", [mk("x.query", {"query-filters": [["name", "??", "a"]]})]),
 ]
 
 
-def run_case(name: str, proto_name: str, steps: list[str]) -> dict:
-    proto, audit_log = build_open() if proto_name == "open" else build_gated()
+def run_case(name: str, proto_name: str, steps: list) -> dict:
+    builders = {"open": build_open, "gated": build_gated, "pubsub": build_pubsub}
+    proto, audit_log = builders[proto_name]()
     session = proto.new_session(server_state=None)
     out_steps = []
-    for wire in steps:
-        resp = proto.dispatch(wire, session)
-        out_steps.append(
-            {"wire": wire, "response": None if resp is None else json.loads(resp)}
-        )
-    return {"name": name, "protocol": proto_name, "steps": out_steps, "audits": audit_log}
+    for step in steps:
+        if isinstance(step, str):  # a dispatch step (a wire request)
+            resp = proto.dispatch(step, session)
+            out_steps.append(
+                {"kind": "dispatch", "wire": step, "response": None if resp is None else json.loads(resp)}
+            )
+        else:  # a publish step: (topic, payload)
+            topic, payload = step
+            proto.send_notification(topic, payload)
+            out_steps.append({"kind": "publish", "topic": topic, "payload": payload})
+    # Drain any server->client notifications the publishes fanned out (FIFO, deterministic).
+    notifications = []
+    while (pending := proto.poll_notification(block=False)) is not None:
+        notifications.append(json.loads(pending[1]))
+    return {
+        "name": name,
+        "protocol": proto_name,
+        "steps": out_steps,
+        "audits": audit_log,
+        "notifications": notifications,
+    }
 
 
 def main() -> None:

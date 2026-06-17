@@ -8,8 +8,9 @@
 # Mechanism (see https://doc.rust-lang.org/rustc/instrument-coverage.html):
 #   1. build+run tests with `-C instrument-coverage` → one .profraw per test process
 #   2. `llvm-profdata merge -sparse` the .profraw → a .profdata
-#   3. `llvm-cov export --format=lcov` over the instrumented test binaries, scoped to
-#      truenas-jsonrpc/src, then assert the line total and list any uncovered lines.
+#   3. `llvm-cov export --format=lcov` over the instrumented test binaries, scoped to the
+#      workspace crates' src/ (truenas-jsonrpc + truenas-filter), then assert the line total
+#      and list any uncovered lines.
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -51,7 +52,7 @@ IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|
 
 echo "=== line coverage (merged, lcov) — gate: min ${MIN}% ==="
 awk -v min="$MIN" '
-  /^SF:/ { f = substr($0, 4); sub(/.*\/truenas-jsonrpc\//, "", f)
+  /^SF:/ { f = substr($0, 4); sub(/.*\/rust\//, "", f)
            if (!(f in seen)) { seen[f] = 1; order[++n] = f }
            cur = f }
   /^DA:/ { rec = substr($0, 4); k = index(rec, ",")

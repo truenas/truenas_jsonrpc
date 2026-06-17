@@ -3,9 +3,11 @@
     {
       "audits": [],
       "name": "open/echo_ok",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -20,9 +22,11 @@
     {
       "audits": [],
       "name": "open/add_ok",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -37,9 +41,11 @@
     {
       "audits": [],
       "name": "open/boom_request_failed",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32803,
@@ -55,9 +61,11 @@
     {
       "audits": [],
       "name": "open/missing_required_param",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32602,
@@ -74,9 +82,11 @@
     {
       "audits": [],
       "name": "open/wrong_param_type",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32602,
@@ -93,9 +103,11 @@
     {
       "audits": [],
       "name": "open/unknown_method",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32601,
@@ -111,9 +123,11 @@
     {
       "audits": [],
       "name": "open/notification_no_reply",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": null,
           "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"echo\", \"params\": {\"msg\": \"hi\"}}"
         }
@@ -122,9 +136,11 @@
     {
       "audits": [],
       "name": "open/malformed_json",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32700,
@@ -141,9 +157,11 @@
     {
       "audits": [],
       "name": "open/top_level_array",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32600,
@@ -160,9 +178,11 @@
     {
       "audits": [],
       "name": "open/non_uuid_id",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32600,
@@ -179,9 +199,11 @@
     {
       "audits": [],
       "name": "open/bad_jsonrpc_version",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32600,
@@ -198,9 +220,11 @@
     {
       "audits": [],
       "name": "open/server_info",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -233,9 +257,11 @@
         }
       ],
       "name": "open/audit_redaction",
+      "notifications": [],
       "protocol": "open",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -251,9 +277,11 @@
     {
       "audits": [],
       "name": "gated/ping_preauth",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -268,9 +296,11 @@
     {
       "audits": [],
       "name": "gated/echo_before_setup_gated",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32002,
@@ -286,9 +316,11 @@
     {
       "audits": [],
       "name": "gated/unknown_before_setup",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32601,
@@ -304,9 +336,11 @@
     {
       "audits": [],
       "name": "gated/setup_then_echo",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -317,6 +351,7 @@
           "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
         },
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -331,9 +366,11 @@
     {
       "audits": [],
       "name": "gated/setup_bad_token",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32000,
@@ -349,9 +386,11 @@
     {
       "audits": [],
       "name": "gated/secret_op_denied",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -362,6 +401,7 @@
           "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
         },
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32000,
@@ -377,9 +417,11 @@
     {
       "audits": [],
       "name": "gated/session_close_then_call",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -390,6 +432,7 @@
           "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
         },
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -398,6 +441,7 @@
           "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionClose\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\"}"
         },
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32002,
@@ -413,9 +457,11 @@
     {
       "audits": [],
       "name": "gated/cancel_unknown_target",
+      "notifications": [],
       "protocol": "gated",
       "steps": [
         {
+          "kind": "dispatch",
           "response": {
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0",
@@ -426,6 +472,7 @@
           "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/sessionSetup\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"token\": \"good\"}}"
         },
         {
+          "kind": "dispatch",
           "response": {
             "error": {
               "code": -32803,
@@ -436,6 +483,277 @@
             "jsonrpc": "2.0"
           },
           "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/cancelRequest\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"target_id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf7\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [
+        {
+          "audit_message": "subscribed",
+          "method": "events",
+          "params": {},
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": "00000000-0000-4000-8000-000000000000"
+          }
+        }
+      ],
+      "name": "open/subscribe_ok",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": "00000000-0000-4000-8000-000000000000"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"events\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/subscribe_without_id",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "error": {
+              "code": -32600,
+              "data": "a subscribe request requires an 'id'",
+              "message": "Invalid request"
+            },
+            "id": null,
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"events\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "pubsub/subscribe_then_publish",
+      "notifications": [
+        {
+          "jsonrpc": "2.0",
+          "method": "events",
+          "params": {
+            "name": "tank",
+            "state": "ONLINE"
+          }
+        }
+      ],
+      "protocol": "pubsub",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": "00000000-0000-4000-8000-000000000000"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"events\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        },
+        {
+          "kind": "publish",
+          "payload": {
+            "name": "tank",
+            "state": "ONLINE"
+          },
+          "topic": "events"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "pubsub/unsubscribe_via_cancel",
+      "notifications": [],
+      "protocol": "pubsub",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": "00000000-0000-4000-8000-000000000000"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"events\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        },
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": true
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/cancelRequest\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"target_id\": \"00000000-0000-4000-8000-000000000000\"}}"
+        },
+        {
+          "kind": "publish",
+          "payload": {
+            "name": "x",
+            "state": "y"
+          },
+          "topic": "events"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "pubsub/cancel_unknown",
+      "notifications": [],
+      "protocol": "pubsub",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "error": {
+              "code": -32803,
+              "data": "no active request or subscription with id 'f81d4fae-7dec-11d0-a765-00a0c91e6bf7'",
+              "message": "Request failed"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"$/cancelRequest\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"target_id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf7\"}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/query_all",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": [
+              {
+                "id": 1,
+                "name": "a"
+              },
+              {
+                "id": 2,
+                "name": "b"
+              },
+              {
+                "id": 3,
+                "name": "a"
+              }
+            ]
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"x.query\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/query_filter",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": [
+              {
+                "id": 1,
+                "name": "a"
+              },
+              {
+                "id": 3,
+                "name": "a"
+              }
+            ]
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"x.query\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"query-filters\": [[\"name\", \"=\", \"a\"]]}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/query_count",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": 2
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"x.query\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"query-filters\": [[\"name\", \"=\", \"a\"]], \"query-options\": {\"count\": true}}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/query_get",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0",
+            "result": {
+              "id": 1,
+              "name": "a"
+            }
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"x.query\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"query-filters\": [[\"name\", \"=\", \"a\"]], \"query-options\": {\"get\": true}}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/query_get_nomatch",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "error": {
+              "code": -32803,
+              "message": "no record matched query with get=True"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"x.query\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"query-filters\": [[\"name\", \"=\", \"zzz\"]], \"query-options\": {\"get\": true}}}"
+        }
+      ]
+    },
+    {
+      "audits": [],
+      "name": "open/query_invalid_filter",
+      "notifications": [],
+      "protocol": "open",
+      "steps": [
+        {
+          "kind": "dispatch",
+          "response": {
+            "error": {
+              "code": -32602,
+              "message": "invalid query: filter_list: unknown operator '??'"
+            },
+            "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\": \"2.0\", \"method\": \"x.query\", \"id\": \"f81d4fae-7dec-11d0-a765-00a0c91e6bf6\", \"params\": {\"query-filters\": [[\"name\", \"??\", \"a\"]]}}"
         }
       ]
     }

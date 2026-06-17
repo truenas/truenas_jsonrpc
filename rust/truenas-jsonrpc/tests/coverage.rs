@@ -69,7 +69,8 @@ async fn protocol_accessors_and_dispatched_helpers() {
     assert_eq!(proto.name(), "myproto");
     assert_eq!(proto.version(), "9.9");
     assert!(!proto.has_session_setup());
-    assert!(proto.send_notification("topic", &json!({ "x": 1 })).is_ok());
+    // send_notification to an unregistered topic is an error (covered fully in pubsub.rs).
+    assert!(proto.send_notification("topic", &json!({ "x": 1 })).is_err());
 
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     // A reply carries bytes; a suppressed notification does not.

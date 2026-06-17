@@ -19,8 +19,10 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    AuthorizationResponse, CancelTarget, Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol,
-    JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Session, SessionLifecycle,
+    tnfilter, AuthorizationResponse, CancelTarget, CompiledFilters, CompiledOptions, Dispatched,
+    FilterableJsonRpcMethod, Filtered, IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol,
+    JsonRpcRequest, MethodDef, Outbound, RequestCtx, Session, SessionId, SessionLifecycle,
+    SubscriptionDef,
 };
 
 const GOLDEN: &str = include_str!("conformance/golden.json");
@@ -70,8 +72,48 @@ struct SetupArgs {
 struct SetupResult {
     welcome: String,
 }
+#[derive(Serialize, Deserialize)]
+struct PoolEvent {
+    name: String,
+    state: String,
+}
 
 type Captured = Arc<Mutex<Vec<Value>>>;
+
+/// Records bytes pushed to a session's back-channel (server→client notifications).
+struct VecSink(Captured);
+impl Outbound for VecSink {
+    fn send(&self, message: Vec<u8>) {
+        self.0.lock().unwrap().push(serde_json::from_slice(&message).unwrap());
+    }
+}
+
+/// Id generator pinned to match `generate.py`'s pinned `uuid4`, so a server-minted
+/// subscription id is the same constant on both sides.
+#[derive(Clone, Copy)]
+struct FixedId(SessionId);
+impl IdGen for FixedId {
+    fn new_id(&self) -> SessionId {
+        self.0
+    }
+}
+fn pinned() -> SessionId {
+    "00000000-0000-4000-8000-000000000000".parse().unwrap()
+}
+
+/// The fixed source the `x.query` filterable reference method streams (matches `generate.py`).
+fn query_data() -> Vec<Value> {
+    vec![json!({"id": 1, "name": "a"}), json!({"id": 2, "name": "b"}), json!({"id": 3, "name": "a"})]
+}
+
+fn query_handler(
+    _a: Empty,
+    _cx: &RequestCtx<()>,
+    f: &CompiledFilters,
+    o: &CompiledOptions,
+) -> Result<Filtered, JsonRpcError> {
+    Ok(tnfilter(query_data(), f, o)?)
+}
 
 fn build_open() -> (JsonRpcProtocol<()>, Captured) {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
@@ -103,6 +145,16 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
                 "audit_message": msg,
             }));
         })
+        .subscription(
+            SubscriptionDef::<Empty, PoolEvent>::new(MethodDef::new("events").audit_message("subscribed")),
+        )
+        .unwrap()
+        .filterable(FilterableJsonRpcMethod::<Empty, (), _>::new(
+            MethodDef::new("x.query"),
+            query_handler,
+        ))
+        .unwrap()
+        .id_gen(FixedId(pinned()))
         .build();
     (proto, captured)
 }
@@ -146,6 +198,14 @@ fn build_gated() -> JsonRpcProtocol<()> {
         .build()
 }
 
+fn build_pubsub() -> JsonRpcProtocol<()> {
+    JsonRpcProtocol::<()>::builder("ref-pubsub", "1.0.0")
+        .subscription(SubscriptionDef::<Empty, PoolEvent>::new(MethodDef::new("events")))
+        .unwrap()
+        .id_gen(FixedId(pinned()))
+        .build()
+}
+
 /// Strip `error.data` (implementation-specific decode/validation detail) so the
 /// comparison rests on `{jsonrpc, id, error.code, error.message}`.
 fn strip_data(v: &Value) -> Value {
@@ -164,10 +224,23 @@ fn strip_audit(rec: &Value) -> Value {
     r
 }
 
-async fn run_steps(proto: &JsonRpcProtocol<()>, name: &str, steps: &[Value]) -> usize {
+async fn run_steps(
+    proto: &JsonRpcProtocol<()>,
+    name: &str,
+    steps: &[Value],
+    expected_notifs: &[Value],
+) -> usize {
     assert!(!steps.is_empty(), "{name}: case has no steps (nothing would be asserted)");
-    let session = proto.new_session(Some(()), Arc::new(NullOutbound));
+    let notifs: Captured = Arc::new(Mutex::new(Vec::new()));
+    let session = proto.new_session(Some(()), Arc::new(VecSink(notifs.clone())));
+    let mut dispatched = 0;
     for (i, step) in steps.iter().enumerate() {
+        if step["kind"] == json!("publish") {
+            // A server-side publish: fans out to subscribers via the Outbound sink.
+            let topic = step["topic"].as_str().expect("publish topic is a string");
+            proto.send_notification(topic, &step["payload"]).expect("publish succeeds");
+            continue;
+        }
         let wire = step["wire"].as_str().expect("wire is a string");
         let actual = match proto.dispatch(wire.as_bytes(), &session).await {
             Dispatched::Reply(b) => Some(serde_json::from_slice::<Value>(&b).unwrap()),
@@ -180,8 +253,15 @@ async fn run_steps(proto: &JsonRpcProtocol<()>, name: &str, steps: &[Value]) -> 
             let actual = actual.unwrap_or_else(|| panic!("{name} step {i}: expected a reply, got none"));
             assert_eq!(strip_data(expected), strip_data(&actual), "{name} step {i} response mismatch");
         }
+        dispatched += 1;
     }
-    steps.len()
+    // Server→client notifications the publishes fanned out (FIFO — same order Python drains).
+    let got = notifs.lock().unwrap();
+    assert_eq!(expected_notifs.len(), got.len(), "{name}: notification count");
+    for (i, (e, g)) in expected_notifs.iter().zip(got.iter()).enumerate() {
+        assert_eq!(e, g, "{name} notification {i} mismatch");
+    }
+    dispatched
 }
 
 #[tokio::test]
@@ -199,11 +279,12 @@ async fn differential_against_python_reference() {
         let proto_name = case["protocol"].as_str().unwrap();
         let steps = case["steps"].as_array().unwrap();
         let expected_audits = case["audits"].as_array().cloned().unwrap_or_default();
+        let expected_notifs = case["notifications"].as_array().cloned().unwrap_or_default();
 
         match proto_name {
             "open" => {
                 let (proto, captured) = build_open();
-                total_steps += run_steps(&proto, name, steps).await;
+                total_steps += run_steps(&proto, name, steps, &expected_notifs).await;
                 let got = captured.lock().unwrap();
                 assert_eq!(expected_audits.len(), got.len(), "{name}: audit-record count");
                 for (i, (e, g)) in expected_audits.iter().zip(got.iter()).enumerate() {
@@ -213,8 +294,13 @@ async fn differential_against_python_reference() {
             }
             "gated" => {
                 let proto = build_gated();
-                total_steps += run_steps(&proto, name, steps).await;
+                total_steps += run_steps(&proto, name, steps, &expected_notifs).await;
                 assert!(expected_audits.is_empty(), "{name}: gated protocol has no audit sink");
+            }
+            "pubsub" => {
+                let proto = build_pubsub();
+                total_steps += run_steps(&proto, name, steps, &expected_notifs).await;
+                assert!(expected_audits.is_empty(), "{name}: pubsub protocol has no audit sink");
             }
             other => panic!("{name}: unknown protocol {other:?}"),
         }
