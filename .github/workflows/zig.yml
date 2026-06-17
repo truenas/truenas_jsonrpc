@@ -28,7 +28,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install Zig 0.16.0
-        uses: mlugg/setup-zig@v1
+        # v2 (>= v2.0.1) understands Zig 0.16.0's tarball name (zig-x86_64-linux-*, arch-os order);
+        # v1 builds the old zig-linux-x86_64-* name and 404s on every mirror.
+        uses: mlugg/setup-zig@v2
         with:
           version: 0.16.0
 
