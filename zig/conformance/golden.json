@@ -1,0 +1,608 @@
+{
+  "cases": [
+    {
+      "audits": [],
+      "name": "happy_create",
+      "protocol": "open",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "id": 7,
+          "name": "tank"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"pool.create\",\"params\":{\"name\":\"tank\"}}"
+    },
+    {
+      "audits": [],
+      "name": "typed_add",
+      "protocol": "open",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "sum": 5
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":2,\"b\":3}}"
+    },
+    {
+      "audits": [],
+      "name": "uppercase_id_echoed",
+      "protocol": "open",
+      "response": {
+        "id": "123E4567-E89B-12D3-A456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "sum": 2
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123E4567-E89B-12D3-A456-426614174000\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "method_not_found",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "invalid_params_missing",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"pool.create\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "invalid_params_wrongtype",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"pool.create\",\"params\":{\"name\":123}}"
+    },
+    {
+      "audits": [],
+      "name": "invalid_params_array",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":[2,3]}"
+    },
+    {
+      "audits": [],
+      "name": "internal_error",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"boom\"}"
+    },
+    {
+      "audits": [],
+      "name": "custom_request_failed",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "expected failure"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"fail\"}"
+    },
+    {
+      "audits": [],
+      "name": "notification_no_reply",
+      "protocol": "open",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"pool.create\",\"params\":{\"name\":\"tank\"}}"
+    },
+    {
+      "audits": [],
+      "name": "unknown_method_notification",
+      "protocol": "open",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "malformed_json",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{not json"
+    },
+    {
+      "audits": [],
+      "name": "top_level_array",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "[1,2,3]"
+    },
+    {
+      "audits": [],
+      "name": "bad_jsonrpc_version",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"1.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "non_uuid_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "null_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "server_info",
+      "protocol": "open",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "name": "truenas",
+          "version": "42"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/serverInfo\"}"
+    },
+    {
+      "audits": [],
+      "name": "server_info_no_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/serverInfo\"}"
+    },
+    {
+      "audits": [],
+      "name": "unknown_control",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "unknown_control_notification",
+      "protocol": "open",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "authz_allowed",
+      "protocol": "authz",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "sum": 2
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "authz_denied",
+      "protocol": "authz",
+      "response": {
+        "error": {
+          "code": -32000,
+          "message": "nope"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"secret_op\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "authz_denied_bad_params",
+      "protocol": "authz",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"secret_op\",\"params\":[1,2]}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": "user login as bob",
+          "method": "login",
+          "params": {
+            "password": "********",
+            "user": "bob"
+          },
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "ok": true,
+              "token": "********"
+            }
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_login_ok",
+      "protocol": "audit",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "ok": true,
+          "token": "tok-secret"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"login\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": "user login",
+          "method": "login",
+          "params": {
+            "password": "********",
+            "user": "denyme"
+          },
+          "response": {
+            "error": {
+              "code": -32000,
+              "message": "denied"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_login_denied",
+      "protocol": "audit",
+      "response": {
+        "error": {
+          "code": -32000,
+          "message": "denied"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"login\",\"params\":{\"user\":\"denyme\",\"password\":\"x\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": null,
+          "message": "user login as bob",
+          "method": "login",
+          "params": {
+            "password": "********",
+            "user": "bob"
+          },
+          "response": {
+            "id": null,
+            "jsonrpc": "2.0",
+            "result": {
+              "ok": true,
+              "token": "********"
+            }
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_login_notification",
+      "protocol": "audit",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"login\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": "crash op",
+          "method": "crash",
+          "params": {},
+          "response": {
+            "error": {
+              "code": -32603,
+              "message": "Internal error"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_crash",
+      "protocol": "audit",
+      "response": {
+        "error": {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"crash\"}"
+    },
+    {
+      "audits": [],
+      "name": "audit_ping_no_record",
+      "protocol": "audit",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "pong": true
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"ping\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_blocked_before_setup",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32002,
+          "message": "Session not established"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_pre_auth_allowed",
+      "protocol": "gated",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "v": "1.0"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"version\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_setup_no_id",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\"}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_continue_wrong_state",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "Request failed"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_close_wrong_state",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "Request failed"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
+    },
+    {
+      "audits": [],
+      "name": "gated_full_flow",
+      "protocol": "gated",
+      "response": null,
+      "steps": [
+        {
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "init"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\"}}"
+        },
+        {
+          "response": {
+            "error": {
+              "code": -32002,
+              "message": "Session not established"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+        },
+        {
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "established"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"
+        },
+        {
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "who": "authed"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+        },
+        {
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": true
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
+        },
+        {
+          "response": {
+            "error": {
+              "code": -32002,
+              "message": "Session is closed"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+        }
+      ],
+      "wire": ""
+    }
+  ]
+}
