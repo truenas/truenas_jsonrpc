@@ -68,6 +68,14 @@ inline fn consume(d: trpc.Dispatched, reply_alloc: std.mem.Allocator) u64 {
             return n;
         },
         .none => return 0,
+        // The bench corpus is all client_server request methods; a subscribe directive never occurs here,
+        // but the arm keeps the switch exhaustive (and frees the ack + sub_id if one ever did).
+        .subscribe => |s| {
+            const n = s.reply.len;
+            reply_alloc.free(s.reply);
+            reply_alloc.free(s.sub_id);
+            return n;
+        },
     }
 }
 

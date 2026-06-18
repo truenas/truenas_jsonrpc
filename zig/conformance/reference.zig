@@ -3,6 +3,7 @@
 //! `zig/conformance/generate.py` exactly (same names, accepts/returns shapes, handler results, hooks).
 const std = @import("std");
 const trpc = @import("truenas_jsonrpc");
+const rpc_gen = @import("rpc_gen.zig");
 
 pub const PoolCreateArgs = struct { name: []const u8 };
 pub const PoolCreateResult = struct { id: u32, name: []const u8 };
@@ -19,6 +20,10 @@ pub const ContinueArgs = struct { otp: []const u8 };
 pub const SetupAck = struct { stage: []const u8 };
 pub const WhoamiResult = struct { who: []const u8 };
 pub const VersionResult = struct { v: []const u8 };
+pub const GAuthCreds = struct { user: []const u8, password: trpc.Secret([]const u8) };
+pub const GAuthAck = struct { token: trpc.Secret([]const u8), stage: []const u8 };
+pub const GAuthContinue = struct { otp: []const u8 };
+pub const SubArgs = struct { channel: []const u8 };
 
 const Ctx = trpc.RequestCtx(void);
 const Builder = trpc.Protocol(void).Builder;
@@ -73,6 +78,12 @@ pub const Api = struct {
     }
     fn version(_: *Api, _: NoArgs, _: *Ctx) !VersionResult {
         return .{ .v = "1.0" };
+    }
+    fn gauthSetup(_: *Api, _: GAuthCreds, _: *Ctx) !trpc.SetupOutcome(GAuthAck) {
+        return .{ .lifecycle = .init, .result = .{ .token = .{ .value = "t0p" }, .stage = "init" } };
+    }
+    fn gauthContinue(_: *Api, _: GAuthContinue, _: *Ctx) !trpc.SetupOutcome(GAuthAck) {
+        return .{ .lifecycle = .established, .result = .{ .token = .{ .value = "t1" }, .stage = "established" } };
     }
 };
 
@@ -151,5 +162,80 @@ pub fn buildGated(gpa: std.mem.Allocator, api: *Api) !trpc.Protocol(void) {
     try b.method("version", api, Api.version, .{ .pre_auth = true });
     b.sessionSetup(api, Api.gatedSetup);
     b.sessionSetupContinue(api, Api.gatedContinue);
+    return b.build();
+}
+
+/// `gated_audit` — session-setup with a secret credential + secret result + an audit sink, so the
+/// control-op audit records ($/sessionSetup / Continue / Close) are emitted and redacted. Mirrors
+/// generate.py PROTO_GATED_AUDIT.
+pub fn buildGatedAudit(gpa: std.mem.Allocator, api: *Api, cap: *Capture) !trpc.Protocol(void) {
+    var b = trpc.Protocol(void).builder(gpa, "test", "1.0.0");
+    b.sessionSetup(api, Api.gauthSetup);
+    b.sessionSetupContinue(api, Api.gauthContinue);
+    b.auditSink(cap, Capture.onAudit);
+    return b.build();
+}
+
+/// A consumer-owned deterministic id source for the pub/sub A/B golden — the analog of `Capture` (a test
+/// concern that lives in the conformance app, never the library, like Python's FixedIdGen). Mirrors
+/// generate.py's pinned `uuid4` counter (`00000000-0000-4000-8000-{n:012d}`); `reset()` is called per
+/// case so the first minted sub_id is ...000000000001 (matching the Python oracle's per-case reset).
+pub const FixedIdGen = struct {
+    n: u64 = 0,
+
+    pub fn reset(self: *FixedIdGen) void {
+        self.n = 0;
+    }
+    fn nextImpl(ctx: *anyopaque, buf: *[trpc.uuid_len]u8) []const u8 {
+        const self: *FixedIdGen = @ptrCast(@alignCast(ctx));
+        self.n += 1;
+        return std.fmt.bufPrint(buf, "00000000-0000-4000-8000-{d:0>12}", .{self.n}) catch unreachable;
+    }
+    pub fn idGen(self: *FixedIdGen) trpc.IdGen {
+        return .{ .ctx = @ptrCast(self), .nextFn = &nextImpl };
+    }
+};
+
+/// `pubsub` — a SERVER_CLIENT subscribable topic (`alerts.subscribe`); a subscribe request mints a
+/// sub_id ack via the injected FixedIdGen (a consumer concern). No session-setup (gate off) and no
+/// authorizer, mirroring generate.py PROTO_PUBSUB.
+pub fn buildPubSub(gpa: std.mem.Allocator, idg: *FixedIdGen) !trpc.Protocol(void) {
+    var b = trpc.Protocol(void).builder(gpa, "test", "1.0.0");
+    try b.subscription("alerts.subscribe", SubArgs, .{});
+    b.idGen(idg.idGen());
+    return b.build();
+}
+
+/// Hand-written handler bodies for the SPEC-GENERATED `audit` methods — note the param/return types are
+/// the GENERATED `rpc_gen.*` structs, and the bodies match `Api.login`/`ping`/`crash` exactly. `pub` so
+/// the generated `rpc_gen.register` can bind `H.<handler>` across the module boundary.
+pub const GenHandlers = struct {
+    pub fn login(_: *@This(), args: rpc_gen.LoginArgs, ctx: *Ctx) !rpc_gen.LoginResult {
+        ctx.setAudit(std.fmt.allocPrint(ctx.arena, "as {s}", .{args.user}) catch "as ?");
+        return .{ .token = .{ .value = "tok-secret" }, .ok = true };
+    }
+    pub fn ping(_: *@This(), _: rpc_gen.PingArgs, _: *Ctx) !rpc_gen.PingResult {
+        return .{ .pong = true };
+    }
+    pub fn crash(_: *@This(), _: rpc_gen.CrashArgs, _: *Ctx) !rpc_gen.PingResult {
+        return error.Kaboom;
+    }
+    // Not a method (3 params but `*Session`, no error union) — wired as the authorizer hook, not collected.
+    pub fn authorize(_: *@This(), request: trpc.RequestInfo, _: *trpc.Session(void)) trpc.AuthorizationResponse {
+        if (request.params == .object) if (request.params.object.get("user")) |u| {
+            if (u == .string and std.mem.eql(u8, u.string, "denyme")) return .{ .authorized = false, .message = "denied" };
+        };
+        return .{ .authorized = true };
+    }
+};
+
+/// The `audit` protocol built from the SPEC-GENERATED `register()` instead of hand-written `b.method`
+/// calls. Routing the audit golden cases through this proves generated == hand-written. The authorizer
+/// and audit sink are hooks (not methods), so they stay hand-wired — same as `buildAudit`.
+pub fn buildGenerated(gpa: std.mem.Allocator, handlers: *GenHandlers, cap: *Capture) !trpc.Protocol(void) {
+    var b = trpc.Protocol(void).builder(gpa, "test", "1.0.0");
+    try rpc_gen.register(&b, handlers);
+    b.authorizer(handlers, GenHandlers.authorize);
+    b.auditSink(cap, Capture.onAudit);
     return b.build();
 }

@@ -8,6 +8,7 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const session = @import("session.zig");
 const reflect = @import("reflect.zig");
+const types = @import("types.zig");
 
 /// Per-method flags (mirror Python `JSONRPCMethod`). `roles` is metadata only — not enforced here.
 pub const MethodOpts = struct {
@@ -43,6 +44,9 @@ pub fn Method(comptime S: type) type {
         cancellable: bool = false,
         audit_message: ?[]const u8 = null,
         roles: []const []const u8 = &.{},
+        /// `client_server` for a request method; `server_client` for a subscribable topic (no handler —
+        /// dispatch routes it to the subscribe path).
+        direction: types.MessageDirection = .client_server,
         instance: *anyopaque,
         decode_fn: *const fn (arena: std.mem.Allocator, params: std.json.Value) Decoded,
         run_fn: *const fn (instance: *anyopaque, decoded: *anyopaque, ctx: *Ctx) Ran,
@@ -123,6 +127,50 @@ pub fn Method(comptime S: type) type {
                 .audit_params_fn = &Thunks.auditParams,
                 .audit_result_fn = &Thunks.auditResult,
             };
+        }
+
+        /// A `server_client` subscribable topic: decodes the subscribe params (`Accepts`); it has no
+        /// handler, so dispatch routes it to the subscribe path (mint a sub id, ack) and `run`/audit are
+        /// never invoked — they point at stubs. (`notifies` typing for `send_notification` lands with the
+        /// transport, which owns delivery.)
+        pub fn defineTopic(comptime Accepts: type, name: []const u8, opts: MethodOpts) Self {
+            const Thunks = struct {
+                fn decode(arena: std.mem.Allocator, params: std.json.Value) Decoded {
+                    const boxed = arena.create(Accepts) catch return .invalid_params;
+                    boxed.* = std.json.parseFromValueLeaky(Accepts, arena, params, .{ .ignore_unknown_fields = true }) catch
+                        return .invalid_params;
+                    if (@hasDecl(Accepts, "validate")) {
+                        boxed.validate() catch return .invalid_params;
+                    }
+                    return .{ .ok = boxed };
+                }
+            };
+            return .{
+                .name = name,
+                .direction = .server_client,
+                .pre_auth = opts.pre_auth,
+                .audit = opts.audit,
+                .cancellable = opts.cancellable,
+                .audit_message = opts.audit_message,
+                .roles = opts.roles,
+                .instance = undefined, // no handler instance — never read for a topic
+                .decode_fn = &Thunks.decode,
+                .run_fn = &topicRunStub,
+                .audit_params_fn = &topicValueStub,
+                .audit_result_fn = &topicBytesStub,
+            };
+        }
+
+        // A topic's request/audit thunks are never called (dispatch branches on `direction` first); these
+        // stubs satisfy the non-optional fn-pointer fields.
+        fn topicRunStub(_: *anyopaque, _: *anyopaque, _: *Ctx) Ran {
+            return .{ .rpc_error = .{ .code = .internal_error, .message = errors.msg.internal_error } };
+        }
+        fn topicValueStub(_: std.mem.Allocator, _: *anyopaque) std.json.Value {
+            return .null;
+        }
+        fn topicBytesStub(_: std.mem.Allocator, _: []const u8) std.json.Value {
+            return .null;
         }
     };
 }

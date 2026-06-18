@@ -38,6 +38,12 @@ const sink = @import("sink.zig");
 pub const AuditSink = sink.AuditSink;
 pub const AuditRecord = sink.AuditRecord;
 
+/// The id-generation seam (the deterministic generator for tests is a consumer concern, like the
+/// capturing audit sink — see the conformance suite). `uuid_len` is the buffer size a custom `IdGen`
+/// writes into (a canonical UUID is 36 bytes).
+pub const IdGen = @import("idgen.zig").IdGen;
+pub const uuid_len = @import("idgen.zig").uuid_len;
+
 /// Test-support utilities for consumers writing conformance / A-B tests against this protocol
 /// (e.g. the suite under `zig/conformance/`, which consumes this module like any downstream user).
 pub const testing = struct {
@@ -56,6 +62,7 @@ test {
     _ = @import("meta.zig");
     _ = @import("reflect.zig");
     _ = @import("sink.zig");
+    _ = @import("idgen.zig");
     _ = @import("envelope.zig");
     _ = @import("method.zig");
     _ = @import("protocol.zig");

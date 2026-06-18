@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "sample",
+  "version": "1.0.0",
+  "$comment": "Spec-first IDL for the Zig codegen (api-specs/gen.py -> zig/conformance/rpc_gen.zig). The login/ping/crash methods mirror the hand-written `audit` reference protocol so the A/B golden can run through the generated path; Demo/Inner exercise the emitter's type breadth (optional, default, array, enum, nested $ref, secret).",
+  "$defs": {
+    "LoginArgs": {
+      "type": "object",
+      "properties": {
+        "user": { "type": "string" },
+        "password": { "type": "string", "secret": true }
+      },
+      "required": ["user", "password"],
+      "additionalProperties": false
+    },
+    "LoginResult": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "secret": true },
+        "ok": { "type": "boolean" }
+      },
+      "required": ["token", "ok"],
+      "additionalProperties": false
+    },
+    "PingArgs": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "PingResult": {
+      "type": "object",
+      "properties": { "pong": { "type": "boolean" } },
+      "required": ["pong"],
+      "additionalProperties": false
+    },
+    "CrashArgs": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "Inner": {
+      "type": "object",
+      "properties": { "x": { "type": "integer" } },
+      "required": ["x"],
+      "additionalProperties": false
+    },
+    "Demo": {
+      "type": "object",
+      "$comment": "Not registered as a method; exercises the emitter's type mapping for a round-trip unit test.",
+      "properties": {
+        "name": { "type": "string" },
+        "count": { "type": "integer", "default": 0 },
+        "ratio": { "type": "number", "default": 1.5 },
+        "note": { "type": "string" },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "color": { "type": "string", "enum": ["red", "green", "blue"] },
+        "inner": { "$ref": "#/$defs/Inner" },
+        "api_key": { "type": "string", "secret": true }
+      },
+      "required": ["name", "color", "inner", "api_key"],
+      "additionalProperties": false
+    }
+  },
+  "methods": {
+    "login": {
+      "summary": "Authenticate a user; returns a session token.",
+      "params": { "$ref": "#/$defs/LoginArgs" },
+      "result": { "$ref": "#/$defs/LoginResult" },
+      "handler": "login",
+      "audit": true,
+      "auditMessage": "user login"
+    },
+    "ping": {
+      "summary": "Liveness probe.",
+      "params": { "$ref": "#/$defs/PingArgs" },
+      "result": { "$ref": "#/$defs/PingResult" },
+      "handler": "ping"
+    },
+    "crash": {
+      "summary": "Always raises (exercises the error-audit path).",
+      "params": { "$ref": "#/$defs/CrashArgs" },
+      "result": { "$ref": "#/$defs/PingResult" },
+      "handler": "crash",
+      "audit": true,
+      "auditMessage": "crash op"
+    }
+  }
+}

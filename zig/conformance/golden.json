@@ -536,12 +536,89 @@
       "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
     },
     {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": null,
+          "method": "$/sessionSetup",
+          "params": {
+            "password": "********",
+            "user": "bob"
+          },
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "init",
+              "token": "********"
+            }
+          },
+          "roles": []
+        }
+      ],
+      "name": "gated_audit_setup",
+      "protocol": "gated_audit",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "stage": "init",
+          "token": "t0p"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+    },
+    {
+      "audits": [],
+      "name": "subscribe_ok",
+      "protocol": "pubsub",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": "00000000-0000-4000-8000-000000000001"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}"
+    },
+    {
+      "audits": [],
+      "name": "subscribe_no_id",
+      "protocol": "pubsub",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}"
+    },
+    {
+      "audits": [],
+      "name": "subscribe_bad_params",
+      "protocol": "pubsub",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"alerts.subscribe\",\"params\":{}}"
+    },
+    {
       "audits": [],
       "name": "gated_full_flow",
       "protocol": "gated",
       "response": null,
       "steps": [
         {
+          "audits": [],
           "response": {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "jsonrpc": "2.0",
@@ -552,6 +629,7 @@
           "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\"}}"
         },
         {
+          "audits": [],
           "response": {
             "error": {
               "code": -32002,
@@ -563,6 +641,7 @@
           "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
         },
         {
+          "audits": [],
           "response": {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "jsonrpc": "2.0",
@@ -573,6 +652,7 @@
           "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"
         },
         {
+          "audits": [],
           "response": {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "jsonrpc": "2.0",
@@ -583,6 +663,7 @@
           "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
         },
         {
+          "audits": [],
           "response": {
             "id": "123e4567-e89b-12d3-a456-426614174000",
             "jsonrpc": "2.0",
@@ -591,6 +672,7 @@
           "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
         },
         {
+          "audits": [],
           "response": {
             "error": {
               "code": -32002,
@@ -600,6 +682,98 @@
             "jsonrpc": "2.0"
           },
           "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+        }
+      ],
+      "wire": ""
+    },
+    {
+      "audits": [],
+      "name": "gated_audit_flow",
+      "protocol": "gated_audit",
+      "response": null,
+      "steps": [
+        {
+          "audits": [
+            {
+              "id": "123e4567-e89b-12d3-a456-426614174000",
+              "message": null,
+              "method": "$/sessionSetup",
+              "params": {
+                "password": "********",
+                "user": "bob"
+              },
+              "response": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "jsonrpc": "2.0",
+                "result": {
+                  "stage": "init",
+                  "token": "********"
+                }
+              },
+              "roles": []
+            }
+          ],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "init",
+              "token": "t0p"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+        },
+        {
+          "audits": [
+            {
+              "id": "123e4567-e89b-12d3-a456-426614174000",
+              "message": null,
+              "method": "$/sessionSetupContinue",
+              "params": {
+                "otp": "x"
+              },
+              "response": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "jsonrpc": "2.0",
+                "result": {
+                  "stage": "established",
+                  "token": "********"
+                }
+              },
+              "roles": []
+            }
+          ],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "established",
+              "token": "t1"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"
+        },
+        {
+          "audits": [
+            {
+              "id": "123e4567-e89b-12d3-a456-426614174000",
+              "message": null,
+              "method": "$/sessionClose",
+              "params": null,
+              "response": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "jsonrpc": "2.0",
+                "result": true
+              },
+              "roles": []
+            }
+          ],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": true
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
         }
       ],
       "wire": ""

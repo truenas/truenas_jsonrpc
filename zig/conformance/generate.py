@@ -15,6 +15,7 @@ implementations match.
 import json
 import os
 import sys
+import uuid
 from typing import Annotated
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -27,9 +28,30 @@ from truenas_pyjsonrpc import (  # noqa: E402
     JsonRpcError,
     JSONRPCError,
     AuthorizationResponse,
+    MessageDirection,
     SessionLifecycle,
     SECRET,
 )
+
+
+# Deterministic subscription ids: pin uuid4 to a counter so the pub/sub golden's sub_id is reproducible
+# (the Zig side injects a matching FixedIdGen — a *consumer* concern, like the capturing audit sink). The
+# session_uuid is also a uuid4 but never appears on the wire; resetting the counter per case AFTER
+# new_session() consumes it first, so the first minted sub_id is ...000000000001.
+class _SeqUuid:
+    def __init__(self):
+        self.n = 0
+
+    def reset(self):
+        self.n = 0
+
+    def __call__(self):
+        self.n += 1
+        return uuid.UUID(f"00000000-0000-4000-8000-{self.n:012d}")
+
+
+_SEQ_UUID = _SeqUuid()
+uuid.uuid4 = _SEQ_UUID  # protocol.py calls uuid.uuid4() at runtime; _is_uuid uses uuid.UUID (unaffected)
 
 
 class PoolCreateArgs(msgspec.Struct):
@@ -99,6 +121,16 @@ class VersionResult(msgspec.Struct):
     v: str
 
 
+# --- pubsub protocol: a SERVER_CLIENT subscribable topic (subscribe → a minted sub_id ack; no handler) ---
+class SubArgs(msgspec.Struct):
+    channel: str
+
+
+class AlertEvent(msgspec.Struct):  # the `notifies` payload (required for a SERVER_CLIENT method)
+    level: str
+    text: str
+
+
 def pool_create(request, session_state, request_state):
     return PoolCreateResult(id=7, name=request.name)
 
@@ -156,6 +188,30 @@ def whoami(request, session_state, request_state):
 
 def version(request, session_state, request_state):
     return VersionResult(v="1.0")
+
+
+# gated_audit: session-setup with a secret credential AND a secret result, plus an audit handler — so
+# $/sessionSetup / $/sessionSetupContinue / $/sessionClose emit (redacted) control-op audit records.
+class GAuthCreds(msgspec.Struct):
+    user: str
+    password: Annotated[str, SECRET]
+
+
+class GAuthAck(msgspec.Struct):
+    token: Annotated[str, SECRET]
+    stage: str
+
+
+class GAuthContinue(msgspec.Struct):
+    otp: str
+
+
+def gauth_setup(request, session_state):
+    return (SessionLifecycle.INIT, GAuthAck(token="t0p", stage="init"))
+
+
+def gauth_continue(request, session_state):
+    return (SessionLifecycle.ESTABLISHED, GAuthAck(token="t1", stage="established"))
 
 
 def audit_authorize(request, session_state):
@@ -224,7 +280,20 @@ PROTO_GATED.add_session_setup(
     JSONRPCMethod("setup", accepts=SetupArgs, returns=SetupAck, handler=gated_setup),
     JSONRPCMethod("continue", accepts=ContinueArgs, returns=SetupAck, handler=gated_continue),
 )
-PROTOS = {"open": PROTO_OPEN, "authz": PROTO_AUTHZ, "audit": PROTO_AUDIT, "gated": PROTO_GATED}
+PROTO_GATED_AUDIT = JSONRPCProtocol([], name="test", version="1.0.0")
+PROTO_GATED_AUDIT.add_session_setup(
+    JSONRPCMethod("setup", accepts=GAuthCreds, returns=GAuthAck, handler=gauth_setup),
+    JSONRPCMethod("continue", accepts=GAuthContinue, returns=GAuthAck, handler=gauth_continue),
+)
+PROTO_GATED_AUDIT.register_audit_handler(_record_audit)
+PROTO_PUBSUB = JSONRPCProtocol(
+    [JSONRPCMethod("alerts.subscribe", accepts=SubArgs, direction=MessageDirection.SERVER_CLIENT,
+                   notifies=AlertEvent)],
+    name="test",
+    version="1.0.0",
+)
+PROTOS = {"open": PROTO_OPEN, "authz": PROTO_AUTHZ, "audit": PROTO_AUDIT,
+          "gated": PROTO_GATED, "gated_audit": PROTO_GATED_AUDIT, "pubsub": PROTO_PUBSUB}
 
 UID = "123e4567-e89b-12d3-a456-426614174000"
 UID_UPPER = UID.upper()
@@ -267,6 +336,13 @@ CASES = [
     ("gated_setup_no_id", "gated", '{"jsonrpc":"2.0","method":"$/sessionSetup","params":{"user":"bob"}}'),
     ("gated_continue_wrong_state", "gated", '{"jsonrpc":"2.0","id":"%s","method":"$/sessionSetupContinue","params":{"otp":"x"}}' % UID),
     ("gated_close_wrong_state", "gated", '{"jsonrpc":"2.0","id":"%s","method":"$/sessionClose"}' % UID),
+    # gated_audit — control-op audit: $/sessionSetup on a fresh NONE session, creds+result redacted.
+    ("gated_audit_setup", "gated_audit", '{"jsonrpc":"2.0","id":"%s","method":"$/sessionSetup","params":{"user":"bob","password":"hunter2"}}' % UID),
+    # pubsub — subscribe to a SERVER_CLIENT topic: a minted sub_id ack (deterministic via the pinned
+    # uuid4 ↔ the Zig FixedIdGen); a subscribe-as-notification is INVALID_REQUEST; bad params → 422.
+    ("subscribe_ok", "pubsub", '{"jsonrpc":"2.0","id":"%s","method":"alerts.subscribe","params":{"channel":"pool"}}' % UID),
+    ("subscribe_no_id", "pubsub", '{"jsonrpc":"2.0","method":"alerts.subscribe","params":{"channel":"pool"}}'),
+    ("subscribe_bad_params", "pubsub", '{"jsonrpc":"2.0","id":"%s","method":"alerts.subscribe","params":{}}' % UID),
 ]
 
 # Stateful sequences dispatched on ONE session (lifecycle carries forward across steps).
@@ -278,6 +354,12 @@ SEQ_CASES = [
         '{"jsonrpc":"2.0","id":"%s","method":"whoami","params":{}}' % UID,                            # now allowed
         '{"jsonrpc":"2.0","id":"%s","method":"$/sessionClose"}' % UID,                                # → closed (true)
         '{"jsonrpc":"2.0","id":"%s","method":"whoami","params":{}}' % UID,                            # session is closed
+    ]),
+    # control-op audit across the lifecycle: each step emits a redacted audit record (captured per-step).
+    ("gated_audit_flow", "gated_audit", [
+        '{"jsonrpc":"2.0","id":"%s","method":"$/sessionSetup","params":{"user":"bob","password":"hunter2"}}' % UID,  # → init, setup audit
+        '{"jsonrpc":"2.0","id":"%s","method":"$/sessionSetupContinue","params":{"otp":"x"}}' % UID,                  # → established, continue audit
+        '{"jsonrpc":"2.0","id":"%s","method":"$/sessionClose"}' % UID,                                               # → closed, close audit
     ]),
 ]
 
@@ -294,6 +376,7 @@ def main():
     for name, protocol, wire in CASES:
         proto = PROTOS[protocol]
         sess = proto.new_session()
+        _SEQ_UUID.reset()  # sub_ids count from ...001 per case (session_uuid already consumed)
         _AUDIT_LOG.clear()
         out = proto.dispatch(wire, sess)
         records.append({"name": name, "protocol": protocol, "wire": wire,
@@ -301,9 +384,12 @@ def main():
     for name, protocol, wires in SEQ_CASES:
         proto = PROTOS[protocol]
         sess = proto.new_session()  # ONE session for the whole sequence
+        _SEQ_UUID.reset()  # sub_ids count from ...001 across the sequence (session_uuid consumed first)
         steps = []
         for w in wires:
-            steps.append({"wire": w, "response": _resp(proto.dispatch(w, sess))})
+            _AUDIT_LOG.clear()  # capture audits emitted by THIS step
+            response = _resp(proto.dispatch(w, sess))
+            steps.append({"wire": w, "response": response, "audits": list(_AUDIT_LOG)})
         records.append({"name": name, "protocol": protocol, "wire": "",
                         "response": None, "audits": [], "steps": steps})
 

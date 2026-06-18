@@ -23,18 +23,21 @@ jobs:
           devscripts debhelper dh-python pybuild-plugin-pyproject \
           python3-all python3-all-dev python3-setuptools build-essential git \
           libssl-dev libidn-dev libbsd-dev \
-          python3-msgspec python3-pytest python3-websockets python3-cryptography
+          python3-msgspec python3-pytest python3-websockets python3-cryptography python3-jsonschema
 
-    # The Zig port's A/B conformance golden is generated from THIS (the normative Python) reference.
-    # Regenerate it here — where msgspec is already installed — and fail if it drifts from what's
-    # committed, so the Zig engine can never silently diverge from the oracle. Only needs msgspec, so
-    # it runs before the slow C-extension builds below (fast feedback). git diff only inspects the one
-    # generated file, so the Debian package build's artifacts don't affect it.
-    - name: Zig conformance — golden drift check
+    # The Zig port has two committed, generated-from-source artifacts that must never silently drift:
+    #   1. zig/conformance/golden.json   — the A/B oracle, generated from THIS (normative Python) reference.
+    #   2. zig/conformance/rpc_gen.zig   — the spec-first Zig method layer, generated from api-specs/*.json.
+    # Regenerate both here (msgspec + jsonschema already installed) and fail on any diff. Runs before the
+    # slow C-extension builds below (fast feedback); git diff only inspects the two generated files, so the
+    # Debian package build's artifacts don't affect it.
+    - name: Zig conformance + codegen — drift check
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
         python3 zig/conformance/generate.py
         git diff --exit-code zig/conformance/golden.json
+        python3 api-specs/gen.py api-specs/sample.json --out zig/conformance/rpc_gen.zig
+        git diff --exit-code zig/conformance/rpc_gen.zig
 
     # SCRAM (RFC 5802) tests need the truenas_pyscram C extension. It is not in Debian, so
     # build it from source here; without it the SCRAM tests in tests/test_auth.py self-skip.

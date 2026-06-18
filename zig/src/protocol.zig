@@ -12,13 +12,31 @@ const envelope = @import("envelope.zig");
 const method_mod = @import("method.zig");
 const session_mod = @import("session.zig");
 const sink_mod = @import("sink.zig");
+const reflect = @import("reflect.zig");
+const idgen_mod = @import("idgen.zig");
+const IdGen = idgen_mod.IdGen;
 
 pub const Dispatched = union(enum) {
     /// Reply bytes owned by the caller's `reply_alloc` — caller frees.
     reply: []u8,
     /// Nothing to send (a notification, or a notification-context fault).
     none,
+    /// A subscribe request to a `server_client` topic. The (Io-aware) transport sends `reply` (the
+    /// `{result: sub_id}` ack) AND registers the subscription in its own registry. The sans-I/O core only
+    /// mints the id (via the injected `IdGen`) + builds the ack here — mirroring Python's `Transfer`
+    /// directive (delivery + the registry are transport concerns, never the lock-free core's).
+    subscribe: Subscribe,
+
+    pub const Subscribe = struct {
+        reply: []u8, // the `{result: sub_id, id}` ack bytes — caller frees
+        sub_id: []const u8, // the minted subscription id — caller frees
+        topic: []const u8, // the topic's registered method name (long-lived)
+    };
 };
+
+/// Carried out of `dispatchFields` when the matched method is a `server_client` topic: the reply bytes are
+/// returned normally; this side-channel adds the minted id + topic so `dispatch` can build the directive.
+const SubscribeInfo = struct { sub_id: []const u8, topic: []const u8 };
 
 pub fn Protocol(comptime S: type) type {
     const Method = method_mod.Method(S);
@@ -45,9 +63,9 @@ pub fn Protocol(comptime S: type) type {
         /// Outcome of running a session-setup handler: the result serialized to bytes (lifecycle +
         /// `server_state_external` already committed onto the session), or a fault.
         pub const SetupRan = union(enum) {
-            ok: []const u8,
-            invalid_params,
-            rpc_error: errors.JsonRpcError,
+            ok: struct { result_bytes: []const u8, audit_params: std.json.Value, audit_result: std.json.Value },
+            rpc_error: struct { err: errors.JsonRpcError, audit_params: std.json.Value },
+            invalid_params, // decode failed before the audit point → not audited (Python parity)
         };
 
         /// `$/sessionSetup` / `$/sessionSetupContinue` hook — decodes the credentials, runs the handler
@@ -67,6 +85,8 @@ pub fn Protocol(comptime S: type) type {
         audit_sink: ?AuditSink = null,
         session_setup: ?SetupHook = null,
         session_setup_continue: ?SetupHook = null,
+        /// Mints subscription ids (pub/sub topics). Injected (`Builder.idGen`); required once topics exist.
+        idgen: ?IdGen = null,
         /// True once `$/sessionSetup` is configured; activates the ESTABLISHED gate for non-`pre_auth` methods.
         has_session_setup: bool = false,
 
@@ -153,15 +173,21 @@ pub fn Protocol(comptime S: type) type {
                         if (@hasDecl(Accepts, "validate")) {
                             accepts.validate() catch return .invalid_params;
                         }
+                        // Setup is always audited (when a sink is registered) with creds redacted; it runs
+                        // once per connection, so build the redacted view here rather than thread a flag.
+                        const audit_params = redactedValue(Accepts, arena, accepts);
                         var rctx = RequestCtx{ .arena = arena, .id = rid, .sess = session };
                         const outcome = handler(self, accepts, &rctx) catch |e|
-                            return .{ .rpc_error = rctx.takeError(e) };
+                            return .{ .rpc_error = .{ .err = rctx.takeError(e), .audit_params = audit_params } };
                         const bytes = method_mod.serializeToBytes(arena, Returns, outcome.result) catch
-                            return .{ .rpc_error = .{ .code = .internal_error, .message = errors.msg.invalid_result } };
+                            return .{ .rpc_error = .{ .err = .{ .code = .internal_error, .message = errors.msg.invalid_result }, .audit_params = audit_params } };
                         // Commit only after a clean run + serialize (a faulted setup leaves the session untouched).
                         session.lifecycle = outcome.lifecycle;
                         session.server_state_external = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch null;
-                        return .{ .ok = bytes };
+                        // A SEPARATE parse for the audit view — redactValue mutates in place, and the live
+                        // server_state_external above must keep the real (unredacted) result.
+                        const audit_result = reflect.redactValue(Returns, std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch .null);
+                        return .{ .ok = .{ .result_bytes = bytes, .audit_params = audit_params, .audit_result = audit_result } };
                     }
                 };
                 return .{ .ctx = @ptrCast(instance), .run = &Thunk.run };
@@ -177,6 +203,22 @@ pub fn Protocol(comptime S: type) type {
             /// Enable `$/sessionSetupContinue` (a later auth step, valid only at lifecycle `init`).
             pub fn sessionSetupContinue(b: *Builder, instance: anytype, comptime handler: anytype) void {
                 b.proto.session_setup_continue = makeSetupHook(instance, handler);
+            }
+
+            /// Register a `server_client` subscription topic: a client subscribes by calling `name` (a
+            /// request → a `{result: sub_id}` ack); `Accepts` is the subscribe params. No handler — the
+            /// transport delivers the notifications. Same reserved-prefix/duplicate checks as `method`.
+            pub fn subscription(b: *Builder, name: []const u8, comptime Accepts: type, opts: method_mod.MethodOpts) errors.BuildError!void {
+                if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
+                    return error.ReservedMethodName;
+                if (b.proto.methods.contains(name)) return error.DuplicateMethod;
+                try b.proto.methods.put(name, Method.defineTopic(Accepts, name, opts));
+            }
+
+            /// Inject the subscription-id generator (a real `UuidV4` in production; a `FixedIdGen` in
+            /// tests/conformance for a reproducible golden). Required once any topic is registered.
+            pub fn idGen(b: *Builder, gen: IdGen) void {
+                b.proto.idgen = gen;
             }
 
             pub fn build(b: *Builder) Self {
@@ -257,7 +299,7 @@ pub fn Protocol(comptime S: type) type {
 
         /// session_uuid is a fixed placeholder for now (never appears in a response). The injectable
         /// IdGen seam lands with pub/sub, where a *subscription* id does appear on the wire.
-        pub fn newSession(self: *Self, server_state: ?S) Session {
+        pub fn newSession(self: *const Self, server_state: ?S) Session {
             return .{
                 .session_uuid = "00000000-0000-4000-8000-000000000000",
                 .protocol_name = self.name,
@@ -265,19 +307,29 @@ pub fn Protocol(comptime S: type) type {
             };
         }
 
-        pub fn dispatch(self: *Self, reply_alloc: std.mem.Allocator, wire: []const u8, session: *Session) Dispatched {
+        pub fn dispatch(self: *const Self, reply_alloc: std.mem.Allocator, wire: []const u8, session: *Session) Dispatched {
             var arena_state = std.heap.ArenaAllocator.init(self.gpa);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
 
+            // Set by `dispatchFields` only on a successful subscribe (a `server_client` topic): the side
+            // channel that promotes the normal reply into a `.subscribe` directive for the transport.
+            var sub_info: ?SubscribeInfo = null;
             const bytes: ?[]const u8 = switch (envelope.parse(arena, wire)) {
                 // Stage 1–3 faults are always emitted, even for an id-less message.
                 .fail => |f| envelope.errorBytes(arena, f.rid, f.code, f.message, null) catch null,
-                .fields => |fields| self.dispatchFields(arena, fields, session),
+                .fields => |fields| self.dispatchFields(arena, fields, session, &sub_info),
             };
 
             if (bytes) |b| {
                 const owned = reply_alloc.dupe(u8, b) catch return .none;
+                if (sub_info) |si| return .{
+                    .subscribe = .{
+                        .reply = owned,
+                        .sub_id = reply_alloc.dupe(u8, si.sub_id) catch return .none,
+                        .topic = si.topic, // the registered method name (long-lived; no dupe needed)
+                    },
+                };
                 return .{ .reply = owned };
             }
             return .none;
@@ -285,7 +337,7 @@ pub fn Protocol(comptime S: type) type {
 
         /// Stages 6/9/11/12 (lookup → decode → run → response). Returns the reply bytes (arena-owned)
         /// or null = nothing to send (a notification, whose side effects still run).
-        fn dispatchFields(self: *Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+        fn dispatchFields(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, subscribe_out: *?SubscribeInfo) ?[]const u8 {
             const note = !fields.has_id;
 
             // Stage 4 — CLOSED short-circuit (a closed session rejects everything, including `$/...`).
@@ -298,6 +350,12 @@ pub fn Protocol(comptime S: type) type {
 
             const m = self.methods.get(fields.method) orelse
                 return if (note) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+
+            // A subscribe (a `server_client` topic) is a request: it MUST carry an id so the client can
+            // receive the sub id (and later unsubscribe). A subscribe-as-notification is INVALID_REQUEST —
+            // emitted even though it has no id (mirroring `$/serverInfo`), BEFORE the gate (Python parity).
+            if (m.direction == .server_client and note)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
 
             // Stage 8 — session gate (active only when session-setup is configured).
             if (self.has_session_setup and !m.pre_auth and session.lifecycle != .established)
@@ -319,6 +377,12 @@ pub fn Protocol(comptime S: type) type {
                 }
             }
 
+            // Subscribe (`server_client`): no handler — mint a sub id + ack here; the transport registers
+            // the subscription (and captures routing) off the returned `.subscribe` directive. Mirrors the
+            // SERVER_CLIENT branch in Python's `_authorize_and_dispatch` (post-gate, post-decode, post-authz).
+            if (m.direction == .server_client)
+                return self.handleSubscribe(arena, m, fields, subscribe_out);
+
             // Stage 11 — run.
             var ctx: RequestCtx = .{ .arena = arena, .id = fields.rid, .sess = session };
             const ran = m.run(decoded, &ctx);
@@ -338,6 +402,24 @@ pub fn Protocol(comptime S: type) type {
             };
         }
 
+        /// Subscribe to a `server_client` topic (reached post-gate, post-decode, post-authorize): mint a
+        /// subscription id via the injected `IdGen`, build the ack, and hand the id + topic out through
+        /// `subscribe_out` so `dispatch` returns a `.subscribe` directive. The Io-aware transport registers
+        /// the subscription (and captures routing) off that directive; the lock-free core never holds the
+        /// registry. The ack `result` is the bare sub_id string (mirroring Python `{"result": sub_id}`).
+        fn handleSubscribe(self: *const Self, arena: std.mem.Allocator, m: Method, fields: envelope.Fields, subscribe_out: *?SubscribeInfo) ?[]const u8 {
+            const gen = self.idgen orelse
+                return envelope.errorBytes(arena, fields.rid, .internal_error, errors.msg.internal_error, null) catch null;
+            var buf: [idgen_mod.uuid_len]u8 = undefined;
+            const sub_id = gen.next(&buf);
+            const result_json = std.json.Stringify.valueAlloc(arena, std.json.Value{ .string = sub_id }, .{}) catch return null;
+            const ack = envelope.successBytesRaw(arena, fields.rid, result_json) catch return null;
+            // `sub_id` aliases the stack `buf`; dupe into the arena before it escapes via `subscribe_out`
+            // (dispatch re-dupes into `reply_alloc`). `m.name` is the long-lived registered topic name.
+            subscribe_out.* = .{ .sub_id = arena.dupe(u8, sub_id) catch return null, .topic = m.name };
+            return ack;
+        }
+
         /// What the audit record's `response` view is built from: `ok_result_bytes` are the success
         /// result bytes (redacted via the method's `Returns` plan); `err` is an error/denial (passed
         /// through — error envelopes carry no secret fields).
@@ -348,7 +430,7 @@ pub fn Protocol(comptime S: type) type {
 
         /// Emit one audit record iff the protocol has a sink and the method opted in (`audit = true`).
         /// Off the hot path: builds the redacted params + response Values and the assembled message.
-        fn maybeAudit(self: *Self, arena: std.mem.Allocator, m: Method, rid: ?[]const u8, decoded: *anyopaque, outcome: AuditOutcome, detail: ?[]const u8, session: *Session) void {
+        fn maybeAudit(self: *const Self, arena: std.mem.Allocator, m: Method, rid: ?[]const u8, decoded: *anyopaque, outcome: AuditOutcome, detail: ?[]const u8, session: *Session) void {
             const audit = self.audit_sink orelse return;
             if (!m.audit) return;
             const response_v: std.json.Value = switch (outcome) {
@@ -366,17 +448,31 @@ pub fn Protocol(comptime S: type) type {
             });
         }
 
-        fn handleControl(self: *Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+        /// Emit a control-op audit record (`$/sessionSetup`/`Continue`/`Close`): no per-method plans,
+        /// empty `roles`, null `message`; `params`/`response` are built by the caller.
+        fn emitControlAudit(audit: AuditSink, method_name: []const u8, rid: ?[]const u8, params: std.json.Value, response: std.json.Value, session: *Session) void {
+            audit.call(audit.ctx, .{
+                .method = method_name,
+                .id = rid,
+                .params = params,
+                .roles = &.{},
+                .response = response,
+                .message = null,
+                .session = session,
+            });
+        }
+
+        fn handleControl(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
             if (std.mem.eql(u8, fields.method, "$/serverInfo")) return self.handleServerInfo(arena, fields, session);
             if (std.mem.eql(u8, fields.method, "$/sessionSetup")) return self.handleSessionSetup(arena, fields, session);
             if (std.mem.eql(u8, fields.method, "$/sessionSetupContinue")) return self.handleSessionContinue(arena, fields, session);
-            if (std.mem.eql(u8, fields.method, "$/sessionClose")) return handleSessionClose(arena, fields, session);
+            if (std.mem.eql(u8, fields.method, "$/sessionClose")) return self.handleSessionClose(arena, fields, session);
             // Unknown `$/` control: METHOD_NOT_FOUND for a request, ignored for a notification.
             return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
         }
 
         /// `$/serverInfo` — unauthenticated, pre-gate, not audited; requires an id (never suppressed).
-        fn handleServerInfo(self: *Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+        fn handleServerInfo(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
             const hook = self.server_info orelse
                 return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
             if (!fields.has_id)
@@ -387,42 +483,53 @@ pub fn Protocol(comptime S: type) type {
 
         /// `$/sessionSetup` — the first auth step, valid only at lifecycle `none`. Requires an id.
         /// Bypasses authz (it *is* the auth step). (Audit of setup lands with the control-op audit.)
-        fn handleSessionSetup(self: *Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+        fn handleSessionSetup(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
             const hook = self.session_setup orelse
                 return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
             if (!fields.has_id)
                 return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
             if (session.lifecycle != .none)
                 return envelope.errorBytes(arena, fields.rid, .request_failed, errors.msg.request_failed, null) catch null;
-            return runSessionSetup(arena, hook, fields, session);
+            return self.runSessionSetup(arena, hook, fields, session, "$/sessionSetup");
         }
 
         /// `$/sessionSetupContinue` — a later auth step, valid only at lifecycle `init`. Requires an id.
-        fn handleSessionContinue(self: *Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+        fn handleSessionContinue(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
             const hook = self.session_setup_continue orelse
                 return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
             if (!fields.has_id)
                 return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
             if (session.lifecycle != .init)
                 return envelope.errorBytes(arena, fields.rid, .request_failed, errors.msg.request_failed, null) catch null;
-            return runSessionSetup(arena, hook, fields, session);
+            return self.runSessionSetup(arena, hook, fields, session, "$/sessionSetupContinue");
         }
 
-        fn runSessionSetup(arena: std.mem.Allocator, hook: SetupHook, fields: envelope.Fields, session: *Session) ?[]const u8 {
-            return switch (hook.run(hook.ctx, arena, fields.params, fields.rid, session)) {
-                .ok => |bytes| envelope.successBytesRaw(arena, fields.rid, bytes) catch null,
+        fn runSessionSetup(self: *const Self, arena: std.mem.Allocator, hook: SetupHook, fields: envelope.Fields, session: *Session, method_name: []const u8) ?[]const u8 {
+            const ran = hook.run(hook.ctx, arena, fields.params, fields.rid, session);
+            // Setup is ALWAYS audited (when a sink is set) on success + handler-error — creds redacted via
+            // the setup type's plan; not on invalid_params (decode failed, before the audit point).
+            if (self.audit_sink) |audit| switch (ran) {
+                .ok => |o| emitControlAudit(audit, method_name, fields.rid, o.audit_params, auditSuccessValue(arena, fields.rid, o.audit_result), session),
+                .rpc_error => |e| emitControlAudit(audit, method_name, fields.rid, e.audit_params, auditErrorValue(arena, fields.rid, e.err), session),
+                .invalid_params => {},
+            };
+            return switch (ran) {
+                .ok => |o| envelope.successBytesRaw(arena, fields.rid, o.result_bytes) catch null,
                 .invalid_params => envelope.errorBytes(arena, fields.rid, .invalid_params, errors.msg.invalid_params, null) catch null,
-                .rpc_error => |e| envelope.errorBytes(arena, fields.rid, e.code, e.message, e.data) catch null,
+                .rpc_error => |e| envelope.errorBytes(arena, fields.rid, e.err.code, e.err.message, e.err.data) catch null,
             };
         }
 
         /// `$/sessionClose` — client logout (`init`/`established` → `closed`). Requires an id; no authz.
-        fn handleSessionClose(arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+        /// Audited (when a sink is set) with no method plans: params = null, response = {result:true}.
+        fn handleSessionClose(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
             if (!fields.has_id)
                 return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
             if (session.lifecycle != .init and session.lifecycle != .established)
                 return envelope.errorBytes(arena, fields.rid, .request_failed, errors.msg.request_failed, null) catch null;
             session.lifecycle = .closed;
+            if (self.audit_sink) |audit|
+                emitControlAudit(audit, "$/sessionClose", fields.rid, .null, auditSuccessValue(arena, fields.rid, .{ .bool = true }), session);
             return envelope.successBytesRaw(arena, fields.rid, "true") catch null;
         }
     };
@@ -430,6 +537,15 @@ pub fn Protocol(comptime S: type) type {
 
 // Audit-view builders (module scope; independent of `S`). The audit response mirrors the wire envelope
 // but carries the *redacted* result, so secrets never reach the audit handler.
+
+/// Redacted audit view of a typed value: serialize, reparse (a throwaway tree), mask secrets via the
+/// comptime plan. Used for session-setup credentials (the per-method path uses `Method.auditParams`).
+fn redactedValue(comptime T: type, arena: std.mem.Allocator, value: T) std.json.Value {
+    const bytes = method_mod.serializeToBytes(arena, T, value) catch return .null;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch return .null;
+    return reflect.redactValue(T, v);
+}
+
 fn auditSuccessValue(arena: std.mem.Allocator, rid: ?[]const u8, result: std.json.Value) std.json.Value {
     var obj: std.json.ObjectMap = .empty;
     obj.put(arena, "jsonrpc", .{ .string = "2.0" }) catch return .null;
@@ -515,6 +631,7 @@ fn rj(proto: *Protocol(void), arena: std.mem.Allocator, wire: []const u8) !?std.
     switch (proto.dispatch(arena, wire, &sess)) {
         .none => return null,
         .reply => |bytes| return try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}),
+        .subscribe => |s| return try std.json.parseFromSliceLeaky(std.json.Value, arena, s.reply, .{}),
     }
 }
 
@@ -638,6 +755,7 @@ test "session lifecycle: gate, pre_auth bypass, setup→init→continue→establ
             return switch (p.dispatch(a, wire, s)) {
                 .none => null,
                 .reply => |bytes| try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}),
+                .subscribe => |sub| try std.json.parseFromSliceLeaky(std.json.Value, a, sub.reply, .{}),
             };
         }
     };
@@ -740,6 +858,80 @@ test "fromService: pub fns become methods, rpc renames + flags apply, opts wire 
     try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/serverInfo\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"v\":\"srv\"}}");
 }
 
+test "control-op audit: $/sessionSetup redacts creds + result; $/sessionClose has params=null" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const Secret = @import("meta.zig").Secret;
+    const Creds = struct { user: []const u8, password: Secret([]const u8) };
+    const Ack = struct { token: Secret([]const u8), stage: []const u8 };
+    const ContinueCreds = struct { otp: []const u8 };
+
+    const Svc = struct {
+        fn setup(_: *@This(), _: Creds, _: *session_mod.RequestCtx(void)) !types.SetupOutcome(Ack) {
+            return .{ .lifecycle = .init, .result = .{ .token = .{ .value = "t0p" }, .stage = "init" } };
+        }
+        fn cont(_: *@This(), _: ContinueCreds, _: *session_mod.RequestCtx(void)) !types.SetupOutcome(Ack) {
+            return .{ .lifecycle = .established, .result = .{ .token = .{ .value = "t1" }, .stage = "established" } };
+        }
+    };
+    const Capture = struct {
+        arena: std.mem.Allocator,
+        n: u32 = 0,
+        method: ?[]const u8 = null,
+        params: ?[]const u8 = null,
+        response: ?[]const u8 = null,
+        message: ?[]const u8 = null,
+        fn onAudit(self: *@This(), rec: sink_mod.AuditRecord(void)) void {
+            self.n += 1;
+            self.method = rec.method;
+            self.params = std.json.Stringify.valueAlloc(self.arena, rec.params, .{}) catch null;
+            self.response = std.json.Stringify.valueAlloc(self.arena, rec.response, .{}) catch null;
+            self.message = rec.message;
+        }
+    };
+
+    var svc = Svc{};
+    var cap = Capture{ .arena = arena };
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    b.sessionSetup(&svc, Svc.setup);
+    b.sessionSetupContinue(&svc, Svc.cont);
+    b.auditSink(&cap, Capture.onAudit);
+    var proto = b.build();
+    defer proto.deinit();
+
+    const id = "\"123e4567-e89b-12d3-a456-426614174000\"";
+    var sess = proto.newSession(null);
+
+    // $/sessionSetup: the WIRE keeps the real token; the AUDIT masks both the credential and the result token.
+    cap = .{ .arena = arena };
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}", &sess)) {
+        .reply => |bytes| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+            const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":{\"token\":\"t0p\",\"stage\":\"init\"}}", .{});
+            try testing.expect(json_eq.eql(v, exp));
+        },
+        .none, .subscribe => try testing.expect(false),
+    }
+    try testing.expectEqual(@as(u32, 1), cap.n);
+    try testing.expectEqualStrings("$/sessionSetup", cap.method.?);
+    try expectJsonStr(arena, cap.params.?, "{\"user\":\"bob\",\"password\":\"********\"}");
+    try expectJsonStr(arena, cap.response.?, "{\"jsonrpc\":\"2.0\",\"result\":{\"token\":\"********\",\"stage\":\"init\"},\"id\":" ++ id ++ "}");
+    try testing.expect(cap.message == null);
+    try testing.expectEqual(types.SessionLifecycle.init, sess.lifecycle);
+
+    // $/sessionClose at init: params null, response {result:true}, no message; method = the wire name.
+    cap = .{ .arena = arena };
+    _ = proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionClose\"}", &sess);
+    try testing.expectEqual(@as(u32, 1), cap.n);
+    try testing.expectEqualStrings("$/sessionClose", cap.method.?);
+    try expectJsonStr(arena, cap.params.?, "null");
+    try expectJsonStr(arena, cap.response.?, "{\"jsonrpc\":\"2.0\",\"result\":true,\"id\":" ++ id ++ "}");
+    try testing.expect(cap.message == null);
+    try testing.expectEqual(types.SessionLifecycle.closed, sess.lifecycle);
+}
+
 test "dispatch spine: happy / errors / notification" {
     var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena_state.deinit();
@@ -840,7 +1032,7 @@ test "control: $/serverInfo, unknown $/, CLOSED short-circuit" {
             const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32002,\"message\":\"Session is closed\"}}", .{});
             try testing.expect(json_eq.eql(v, exp));
         },
-        .none => try testing.expect(false),
+        .none, .subscribe => try testing.expect(false),
     }
 }
 
@@ -861,4 +1053,61 @@ test "builder rejects reserved prefixes and duplicates" {
     var proto = b.build();
     proto_built = true;
     proto.deinit();
+}
+
+test "subscribe: server_client topic mints a sub_id ack + .subscribe directive; id/params gating" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const SubArgs = struct { channel: []const u8 };
+
+    // A deterministic id source — a *consumer* concern (mirrors how the conformance suite owns its
+    // FixedIdGen), injected through the `IdGen` seam so the minted sub_id is reproducible.
+    const Seq = struct {
+        n: u64 = 0,
+        fn nextImpl(ctx: *anyopaque, buf: *[idgen_mod.uuid_len]u8) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.n += 1;
+            return std.fmt.bufPrint(buf, "00000000-0000-4000-8000-{d:0>12}", .{self.n}) catch unreachable;
+        }
+    };
+    var seq = Seq{};
+
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{});
+    try b.subscription("alerts.subscribe", SubArgs, .{});
+    b.idGen(.{ .ctx = @ptrCast(&seq), .nextFn = &Seq.nextImpl });
+    var proto = b.build();
+    defer proto.deinit();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+    var sess = proto.newSession(null);
+
+    // subscribe → a `.subscribe` directive: the ack's `result` is the bare minted sub_id string; the
+    // directive separately exposes sub_id + topic for the (Io-aware) transport's registry.
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}", &sess)) {
+        .subscribe => |s| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, s.reply, .{});
+            const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":\"00000000-0000-4000-8000-000000000001\"}", .{});
+            try testing.expect(json_eq.eql(v, exp));
+            try testing.expectEqualStrings("00000000-0000-4000-8000-000000000001", s.sub_id);
+            try testing.expectEqualStrings("alerts.subscribe", s.topic);
+        },
+        else => try testing.expect(false),
+    }
+
+    // subscribe-as-notification (no id) → INVALID_REQUEST: a reply (NOT suppressed) and NOT a directive.
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}", &sess)) {
+        .reply => |bytes| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+            const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}", .{});
+            try testing.expect(json_eq.eql(v, exp));
+        },
+        else => try testing.expect(false),
+    }
+
+    // subscribe with bad params → INVALID_PARAMS, a normal reply (no directive, decode precedes the mint).
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"alerts.subscribe\",\"params\":{}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}");
 }

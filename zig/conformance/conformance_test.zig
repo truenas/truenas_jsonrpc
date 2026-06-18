@@ -23,6 +23,7 @@ const AuditEntry = struct {
 const Step = struct {
     wire: []const u8,
     response: ?std.json.Value = null,
+    audits: []AuditEntry = &.{},
 };
 const Case = struct {
     name: []const u8,
@@ -50,6 +51,9 @@ fn dispatchToValue(proto: *trpc.Protocol(void), arena: std.mem.Allocator, sess: 
     return switch (proto.dispatch(arena, wire, sess)) {
         .none => null,
         .reply => |bytes| std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch null,
+        // A subscribe directive: the golden compares the ack reply (sub_id + topic routing are a
+        // transport concern, exercised in the M2b delivery suite, not in this response comparison).
+        .subscribe => |s| std.json.parseFromSliceLeaky(std.json.Value, arena, s.reply, .{}) catch null,
     };
 }
 
@@ -91,41 +95,70 @@ test "A/B differential against the Python oracle" {
     defer audit_proto.deinit();
     var gated_proto = try reference.buildGated(std.testing.allocator, &api);
     defer gated_proto.deinit();
+    // The SPEC-GENERATED `audit` protocol (built from rpc_gen.register). Every audit case is also run
+    // through this and must match the golden identically — proving generated == hand-written.
+    var gen_handlers = reference.GenHandlers{};
+    var gen_cap = reference.Capture{ .arena = arena };
+    var gen_proto = try reference.buildGenerated(std.testing.allocator, &gen_handlers, &gen_cap);
+    defer gen_proto.deinit();
+    // `gated_audit` — session-setup with secret creds + an audit sink, so the control-op audit records
+    // ($/sessionSetup / Continue / Close) are emitted; compared per-step for the setup→continue→close flow.
+    var gauth_cap = reference.Capture{ .arena = arena };
+    var gated_audit_proto = try reference.buildGatedAudit(std.testing.allocator, &api, &gauth_cap);
+    defer gated_audit_proto.deinit();
+    // `pubsub` — a SERVER_CLIENT topic; subscribe mints a sub_id via the consumer-owned FixedIdGen
+    // (reset per case so it counts from ...001, matching the Python oracle's pinned-uuid4 reset).
+    var idg = reference.FixedIdGen{};
+    var pubsub_proto = try reference.buildPubSub(std.testing.allocator, &idg);
+    defer pubsub_proto.deinit();
 
     var saw_audit = false; // anti-vacuity: at least one case actually emits an audit record
     var saw_steps = false; // anti-vacuity: at least one stateful multi-step sequence runs
+    var saw_generated = false; // anti-vacuity: the spec-generated path is actually exercised
     var failures: usize = 0;
     for (golden.cases) |case| {
         const is_audit = std.mem.eql(u8, case.protocol, "audit");
+        const is_gauth = std.mem.eql(u8, case.protocol, "gated_audit");
         const proto = if (is_audit)
             &audit_proto
+        else if (is_gauth)
+            &gated_audit_proto
         else if (std.mem.eql(u8, case.protocol, "authz"))
             &authz_proto
         else if (std.mem.eql(u8, case.protocol, "gated"))
             &gated_proto
+        else if (std.mem.eql(u8, case.protocol, "pubsub"))
+            &pubsub_proto
         else
             &open_proto;
+        // The capturing sink for this protocol (null when the protocol has no audit sink → no records).
+        const cap_for: ?*reference.Capture = if (is_audit) &cap else if (is_gauth) &gauth_cap else null;
+        // Reset the deterministic id source per pubsub case so each case's sub_ids count from ...001.
+        if (std.mem.eql(u8, case.protocol, "pubsub")) idg.reset();
 
-        // Stateful sequence: replay every step on ONE session (lifecycle carries forward).
+        // Stateful sequence: replay every step on ONE session (lifecycle + audits carry/capture per step).
         if (case.steps.len > 0) {
             saw_steps = true;
             var sess = proto.newSession(null);
             for (case.steps, 0..) |step, i| {
+                if (cap_for) |c| c.records.clearRetainingCapacity();
                 const got = dispatchToValue(proto, arena, &sess, step.wire);
-                if (!responseMatches(got, step.response)) {
+                const have: []const reference.AuditEntry = if (cap_for) |c| c.records.items else &.{};
+                if (step.audits.len > 0) saw_audit = true;
+                if (!responseMatches(got, step.response) or !auditsMatch(arena, step.audits, have)) {
                     failures += 1;
-                    std.debug.print("A/B step mismatch [{s} step {d}]\n  wire: {s}\n", .{ case.name, i, step.wire });
+                    std.debug.print("A/B step mismatch [{s} step {d}] (want {d} audits, have {d})\n  wire: {s}\n", .{ case.name, i, step.audits.len, have.len, step.wire });
                 }
             }
             continue;
         }
 
-        if (is_audit) cap.records.clearRetainingCapacity();
+        if (cap_for) |c| c.records.clearRetainingCapacity();
         var sess = proto.newSession(null);
         const got = dispatchToValue(proto, arena, &sess, case.wire);
         const resp_ok = responseMatches(got, case.response);
 
-        const have_audits: []const reference.AuditEntry = if (is_audit) cap.records.items else &.{};
+        const have_audits: []const reference.AuditEntry = if (cap_for) |c| c.records.items else &.{};
         const audits_ok = auditsMatch(arena, case.audits, have_audits);
         if (case.audits.len > 0) saw_audit = true;
 
@@ -133,8 +166,67 @@ test "A/B differential against the Python oracle" {
             failures += 1;
             std.debug.print("A/B mismatch [{s}] resp_ok={} audits_ok={} (want {d} audits, have {d})\n  wire: {s}\n", .{ case.name, resp_ok, audits_ok, case.audits.len, have_audits.len, case.wire });
         }
+
+        // Re-run audit cases through the spec-generated protocol; it must match the golden identically.
+        if (is_audit) {
+            saw_generated = true;
+            gen_cap.records.clearRetainingCapacity();
+            var gsess = gen_proto.newSession(null);
+            const ggot = dispatchToValue(&gen_proto, arena, &gsess, case.wire);
+            const gresp_ok = responseMatches(ggot, case.response);
+            const gaudits_ok = auditsMatch(arena, case.audits, gen_cap.records.items);
+            if (!gresp_ok or !gaudits_ok) {
+                failures += 1;
+                std.debug.print("A/B GENERATED mismatch [{s}] resp_ok={} audits_ok={}\n  wire: {s}\n", .{ case.name, gresp_ok, gaudits_ok, case.wire });
+            }
+        }
     }
     try std.testing.expectEqual(@as(usize, 0), failures);
     try std.testing.expect(saw_audit);
     try std.testing.expect(saw_steps);
+    try std.testing.expect(saw_generated);
+
+    // Directive teeth: the loop above compares only the ack *value* (`dispatchToValue` collapses the
+    // directive). Assert here that a subscribe actually yields a `.subscribe` DIRECTIVE carrying the
+    // minted sub_id + topic — the signal the (Io-aware) transport needs to register the subscription.
+    idg.reset();
+    var psess = pubsub_proto.newSession(null);
+    switch (pubsub_proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}", &psess)) {
+        .subscribe => |s| {
+            try std.testing.expectEqualStrings("00000000-0000-4000-8000-000000000001", s.sub_id);
+            try std.testing.expectEqualStrings("alerts.subscribe", s.topic);
+        },
+        else => try std.testing.expect(false),
+    }
+}
+
+const rpc_gen = @import("rpc_gen.zig");
+
+test "generated rpc_gen.Demo round-trips (optional, default, array, enum, nested $ref, secret)" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    // Decode via the engine's path (Value source → parseFromValue, which Secret's hook supports).
+    const full = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"name\":\"n\",\"count\":3,\"ratio\":2.5,\"tags\":[\"a\",\"b\"],\"color\":\"green\",\"inner\":{\"x\":9},\"api_key\":\"sekret\"}", .{});
+    const v = try std.json.parseFromValueLeaky(rpc_gen.Demo, arena, full, .{ .ignore_unknown_fields = true });
+    try std.testing.expectEqualStrings("n", v.name);
+    try std.testing.expectEqual(@as(i64, 3), v.count);
+    try std.testing.expectEqual(@as(f64, 2.5), v.ratio);
+    try std.testing.expect(v.note == null); // optional, absent
+    try std.testing.expect(v.tags != null and v.tags.?.len == 2);
+    try std.testing.expect(v.color == .green); // inline enum from a JSON string
+    try std.testing.expectEqual(@as(i64, 9), v.inner.x); // nested $ref
+    try std.testing.expectEqualStrings("sekret", v.api_key.value); // Secret unwrapped
+
+    // Omitted count/ratio fall back to the schema defaults; note stays null.
+    const min = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"name\":\"m\",\"color\":\"red\",\"inner\":{\"x\":1},\"api_key\":\"k\"}", .{});
+    const d = try std.json.parseFromValueLeaky(rpc_gen.Demo, arena, min, .{});
+    try std.testing.expectEqual(@as(i64, 0), d.count);
+    try std.testing.expectEqual(@as(f64, 1.5), d.ratio);
+    try std.testing.expect(d.color == .red);
+
+    // Secret is wire-transparent on encode (real value, not "********").
+    const bytes = try std.json.Stringify.valueAlloc(arena, v, .{});
+    try std.testing.expect(std.mem.indexOf(u8, bytes, "sekret") != null);
 }
