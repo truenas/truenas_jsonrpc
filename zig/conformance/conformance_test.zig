@@ -298,3 +298,27 @@ test "generated rpc_gen.Demo round-trips (optional, default, array, enum, nested
     const bytes = try std.json.Stringify.valueAlloc(arena, v, .{});
     try std.testing.expect(std.mem.indexOf(u8, bytes, "sekret") != null);
 }
+
+test "$/describe serves the generated OpenRPC document" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var proto = try reference.buildDescribe(std.testing.allocator);
+    defer proto.deinit();
+    var sess = proto.newSession(null);
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/describe\"}", &sess)) {
+        .reply => |bytes| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+            const result = v.object.get("result") orelse return error.NoResult;
+            // The result equals the embedded codegen doc (round-trip) and is a well-formed OpenRPC 1.3.2 doc.
+            const doc = try std.json.parseFromSliceLeaky(std.json.Value, arena, reference.openrpc_json, .{});
+            try std.testing.expect(trpc.testing.jsonEql(result, doc));
+            try std.testing.expectEqualStrings("1.3.2", result.object.get("openrpc").?.string);
+            try std.testing.expect(result.object.get("methods").? == .array);
+            try std.testing.expect(result.object.get("components").?.object.get("schemas") != null);
+            try std.testing.expect(result.object.get("components").?.object.get("errors") != null);
+        },
+        else => try std.testing.expect(false),
+    }
+}

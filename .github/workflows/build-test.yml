@@ -25,19 +25,24 @@ jobs:
           libssl-dev libidn-dev libbsd-dev \
           python3-msgspec python3-pytest python3-websockets python3-cryptography python3-jsonschema
 
-    # The Zig port has two committed, generated-from-source artifacts that must never silently drift:
+    # The Zig port has committed, generated-from-source artifacts that must never silently drift:
     #   1. zig/conformance/golden.json   — the A/B oracle, generated from THIS (normative Python) reference.
     #   2. zig/conformance/rpc_gen.zig   — the spec-first Zig method layer, generated from api-specs/*.json.
-    # Regenerate both here (msgspec + jsonschema already installed) and fail on any diff. Runs before the
-    # slow C-extension builds below (fast feedback); git diff only inspects the two generated files, so the
-    # Debian package build's artifacts don't affect it.
+    #   3. zig/conformance/openrpc.json — the OpenRPC doc (committed for tooling/docs; the library
+    #      @embedFiles it for $/describe), generated from the same spec.
+    # Regenerate all here (msgspec + jsonschema already installed) and fail on any diff; also A/B the
+    # OpenRPC against python/openrpc_gen.py. Runs before the slow C-extension builds (fast feedback); the
+    # git diff only inspects the generated files, so the Debian package build's artifacts don't affect it.
     - name: Zig conformance + codegen — drift check
       run: |
         git config --global --add safe.directory "$GITHUB_WORKSPACE"
         python3 zig/conformance/generate.py
         git diff --exit-code zig/conformance/golden.json
-        python3 api-specs/gen.py api-specs/sample.json --out zig/conformance/rpc_gen.zig
-        git diff --exit-code zig/conformance/rpc_gen.zig
+        python3 api-specs/gen.py api-specs/sample.json \
+          --out zig/conformance/rpc_gen.zig \
+          --openrpc-json zig/conformance/openrpc.json
+        git diff --exit-code zig/conformance/rpc_gen.zig zig/conformance/openrpc.json
+        python3 api-specs/openrpc_ab.py api-specs/sample.json zig/conformance/openrpc.json
 
     # SCRAM (RFC 5802) tests need the truenas_pyscram C extension. It is not in Debian, so
     # build it from source here; without it the SCRAM tests in tests/test_auth.py self-skip.

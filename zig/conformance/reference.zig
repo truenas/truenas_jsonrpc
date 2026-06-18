@@ -4,6 +4,9 @@
 const std = @import("std");
 const trpc = @import("truenas_jsonrpc");
 const rpc_gen = @import("rpc_gen.zig");
+/// The codegen-produced OpenRPC document, embedded at compile time (`api-specs/gen.py` → `openrpc.json`,
+/// next to this file so `@embedFile` can reach it). Re-exported for the conformance test + the $/describe payload.
+pub const openrpc_json = @embedFile("openrpc.json");
 
 pub const PoolCreateArgs = struct { name: []const u8 };
 pub const PoolCreateResult = struct { id: u32, name: []const u8 };
@@ -239,5 +242,14 @@ pub fn buildGenerated(gpa: std.mem.Allocator, handlers: *GenHandlers, cap: *Capt
     try rpc_gen.register(&b, handlers);
     b.authorizer(handlers, GenHandlers.authorize);
     b.auditSink(cap, Capture.onAudit);
+    return b.build();
+}
+
+/// `describe` — serves the codegen-produced OpenRPC document via `$/describe`. `@embedFile`-ing the
+/// generated `openrpc.json` proves it embeds + the library round-trips the doc (the bytes the spec-driven
+/// `gen.py` emitted, which the Python A/B confirms equal `openrpc_gen.py`'s output).
+pub fn buildDescribe(gpa: std.mem.Allocator) !trpc.Protocol(void) {
+    var b = trpc.Protocol(void).builder(gpa, "sample", "1.0.0");
+    b.describe(openrpc_json);
     return b.build();
 }

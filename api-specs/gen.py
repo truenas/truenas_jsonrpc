@@ -27,6 +27,57 @@ import tempfile
 
 ZIG_PRIMITIVES = {"string": "[]const u8", "integer": "i64", "number": "f64", "boolean": "bool"}
 
+# --- OpenRPC emission (mirrors python/openrpc_gen.py's format) -----------------------------------
+OPENRPC_VERSION = "1.3.2"
+_SCHEMAS_REF = "#/components/schemas/{name}"
+
+#: The protocol-wide error taxonomy as OpenRPC components.errors. Mirrors openrpc_gen._error_components()
+#: (and Zig errors.zig ErrorCode); keyed by the UPPER_SNAKE member name with a Title-Cased message. The
+#: OpenRPC A/B re-derives this from JSONRPCError and will fail if it ever drifts.
+_ERROR_CODES = {
+    "INVALID_JSON": -32700, "INVALID_REQUEST": -32600, "METHOD_NOT_FOUND": -32601,
+    "INVALID_PARAMS": -32602, "INTERNAL_ERROR": -32603, "NOT_AUTHORIZED": -32000,
+    "SESSION_NOT_ESTABLISHED": -32002, "REQUEST_CANCELLED": -32800, "REQUEST_FAILED": -32803,
+}
+
+#: Meta-schema for a user-provided api-spec: validate its SHAPE before generating code, so a malformed
+#: spec fails fast with a clear error instead of producing broken Zig (UB). Mirrors truenas_build's
+#: jsonschema.validate(TRUENAS_DATASETS, fhs.TRUENAS_DATASET_SCHEMA) pattern. (Per-$def schemas are checked
+#: separately against draft-2020-12 in validate(); here we only constrain the spec's own structure.)
+API_SPEC_SCHEMA = {
+    "type": "object",
+    "required": ["name", "version", "methods"],
+    "additionalProperties": False,
+    "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "version": {"type": "string", "minLength": 1},
+        "$schema": {"type": "string"},
+        "$comment": {"type": "string"},
+        "$defs": {"type": "object"},
+        "methods": {
+            "type": "object",
+            "additionalProperties": {
+                "type": "object",
+                "required": ["handler", "params"],
+                "additionalProperties": False,
+                "properties": {
+                    "handler": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]*$"},
+                    "summary": {"type": "string"},
+                    "params": {"type": "object"},
+                    "result": {"type": "object"},
+                    "notifies": {"type": "object"},
+                    "audit": {"type": "boolean"},
+                    "auditMessage": {"type": "string"},
+                    "preAuth": {"type": "boolean"},
+                    "cancellable": {"type": "boolean"},
+                    "roles": {"type": "array", "items": {"type": "string"}},
+                    "direction": {"enum": ["client_server", "server_client"]},
+                },
+            },
+        },
+    },
+}
+
 # Zig keywords that can't be a bare field/enum identifier (escaped as @"...").
 ZIG_KEYWORDS = {
     "addrspace", "align", "allowzero", "and", "anyframe", "anytype", "asm", "async", "await", "break",
@@ -155,14 +206,24 @@ def validate(spec: dict) -> None:
             die(f"spec is missing required top-level key {key!r}")
     defs = spec.get("$defs", {})
     try:
+        import jsonschema
         from jsonschema import Draft202012Validator
+    except ImportError:
+        print("gen.py: warning: jsonschema not installed; skipping schema validation", file=sys.stderr)
+    else:
+        # 1. Validate the SPEC'S OWN SHAPE first — fail fast before generating any code (avoid UB from a
+        #    malformed user-provided spec). Mirrors truenas_build's jsonschema.validate(data, SCHEMA).
+        try:
+            jsonschema.validate(spec, API_SPEC_SCHEMA)
+        except jsonschema.ValidationError as e:
+            where = "/".join(str(p) for p in e.absolute_path) or "<root>"
+            die(f"spec has invalid shape at {where}: {e.message}")
+        # 2. Each $def must itself be a valid draft-2020-12 schema.
         for name, schema in defs.items():
             try:
                 Draft202012Validator.check_schema(schema)
             except Exception as e:  # jsonschema.exceptions.SchemaError
                 die(f"$defs.{name} is not a valid draft-2020-12 schema: {e}")
-    except ImportError:
-        print("gen.py: warning: jsonschema not installed; skipping schema validation", file=sys.stderr)
     for wire, m in spec["methods"].items():
         if not isinstance(m, dict) or "handler" not in m:
             die(f"method {wire!r} must be an object with a 'handler'")
@@ -208,31 +269,170 @@ def generate(spec: dict, spec_basename: str) -> str:
     return "\n".join(out) + text
 
 
+# --- OpenRPC document (the same spec -> an OpenRPC 1.3.2 description) --------------------------------
+# Transforms the custom-dialect spec into the format python/openrpc_gen.py emits (verified by A/B), so a
+# client/doc dev (openrpc.json) and a `$/describe` request (the .zig static string) get a standard contract.
+
+
+def _error_components() -> "dict":
+    """components.errors — `{UPPER_NAME: {code, message: Title Case}}` (mirrors openrpc_gen)."""
+    return {n: {"code": c, "message": n.replace("_", " ").title()} for n, c in _ERROR_CODES.items()}
+
+
+def _ref_or_none(node: dict) -> "str | None":
+    return ref_name(node) if isinstance(node, dict) and "$ref" in node else None
+
+
+def _base_schema(node: dict, defs: dict) -> dict:
+    """A custom-dialect type node -> the msgspec-style JSON Schema for it (drops `secret`)."""
+    rn = _ref_or_none(node)
+    if rn is not None:
+        return {"$ref": _SCHEMAS_REF.format(name=rn)}
+    if "enum" in node:
+        return {"type": "string", "enum": list(node["enum"])}
+    t = node.get("type")
+    if t == "array":
+        return {"type": "array", "items": _base_schema(node["items"], defs)}
+    if t == "object":  # rare inline object (the dialect normally uses $ref)
+        return _component_body(None, node, defs)
+    if t in ("string", "integer", "number", "boolean"):
+        return {"type": t}
+    die(f"cannot map schema to OpenRPC: {node!r}")
+
+
+def _property_schema(pschema: dict, required: bool, defs: dict) -> dict:
+    """A property's schema as msgspec emits it: `default` inlined; an optional (not required, no default)
+    field as `{anyOf: [base, {type: null}], default: null}`; otherwise the bare base."""
+    base = _base_schema(pschema, defs)
+    if "default" in pschema:
+        return {**base, "default": pschema["default"]}
+    if not required:
+        return {"anyOf": [base, {"type": "null"}], "default": None}
+    return base
+
+
+def _component_body(name: "str | None", schema: dict, defs: dict) -> dict:
+    props = schema.get("properties", {})
+    required = set(schema.get("required", []))
+    body: dict = {}
+    if name is not None:
+        body["title"] = name
+    body["type"] = "object"
+    body["properties"] = {p: _property_schema(ps, p in required, defs) for p, ps in props.items()}
+    body["required"] = list(schema.get("required", []))
+    return body
+
+
+def _collect_component_names(public: dict, defs: dict) -> "list":
+    """Ordered, de-duplicated names of every $def referenced by `public` (params/result/notifies + nested),
+    in first-seen order — the OpenRPC components.schemas set (= msgspec.json.schema_components)."""
+    seen: "list" = []
+
+    def visit_refs(node: dict) -> None:
+        rn = _ref_or_none(node)
+        if rn is not None:
+            add(rn)
+        elif isinstance(node, dict) and node.get("type") == "array" and isinstance(node.get("items"), dict):
+            visit_refs(node["items"])
+
+    def add(name: str) -> None:
+        if name in seen:
+            return
+        seen.append(name)
+        for ps in defs.get(name, {}).get("properties", {}).values():
+            visit_refs(ps)
+
+    for m in public.values():
+        for slot in ("params", "result", "notifies"):
+            s = m.get(slot)
+            if isinstance(s, dict):
+                visit_refs(s)
+    return seen
+
+
+def _method_object(wire: str, m: dict, defs: dict) -> dict:
+    params_def = defs[ref_name(m["params"])]
+    required = set(params_def.get("required", []))
+    params = [{"name": p, "required": p in required, "schema": _property_schema(ps, p in required, defs)}
+              for p, ps in params_def.get("properties", {}).items()]
+    params.sort(key=lambda d: not d["required"])  # required params before optional (stable)
+
+    obj: dict = {"name": wire}
+    if m.get("summary"):
+        obj["summary"] = m["summary"]
+    obj["paramStructure"] = "by-name"
+    obj["params"] = params
+    direction = m.get("direction", "client_server")
+    if direction != "server_client" and isinstance(m.get("result"), dict):
+        rn = ref_name(m["result"])
+        obj["result"] = {"name": rn, "schema": {"$ref": _SCHEMAS_REF.format(name=rn)}}
+    obj["x-direction"] = direction
+    if direction == "server_client" and isinstance(m.get("notifies"), dict):
+        obj["x-notifies"] = {"$ref": _SCHEMAS_REF.format(name=ref_name(m["notifies"]))}
+    if m.get("roles"):
+        obj["x-roles"] = list(m["roles"])
+    return obj
+
+
+def generate_openrpc(spec: dict) -> dict:
+    """The spec as an OpenRPC 1.3.2 document (matching python/openrpc_gen.py). `$/` + `rpc.` methods are
+    skipped; methods are sorted; components.schemas is the shared, de-duplicated type set."""
+    defs = spec.get("$defs", {})
+    public = {w: m for w, m in sorted(spec["methods"].items())
+              if not (w.startswith("$/") or w.startswith("rpc."))}
+    schemas = {n: _component_body(n, defs[n], defs) for n in _collect_component_names(public, defs)}
+    return {
+        "openrpc": OPENRPC_VERSION,
+        "info": {"title": spec["name"], "version": spec["version"]},
+        "methods": [_method_object(w, m, defs) for w, m in public.items()],
+        "components": {"schemas": schemas, "errors": _error_components()},
+    }
+
+
+def _atomic_write(path: str, text: str, suffix: str) -> None:
+    """Write `text` to `path` atomically (temp + os.replace), mirroring python/openrpc_gen.py."""
+    out_dir = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=out_dir, suffix=suffix)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        os.unlink(tmp)
+        raise
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Generate rpc_gen.zig from a JSON-Schema API spec.")
+    ap = argparse.ArgumentParser(description="Generate rpc_gen.zig + OpenRPC artifacts from a JSON-Schema API spec.")
     ap.add_argument("spec", help="path to the api-specs/*.json spec")
-    ap.add_argument("--out", help="output .zig path (default: stdout)")
+    ap.add_argument("--out", help="output rpc_gen.zig path (default: stdout if no other output is requested)")
+    ap.add_argument("--openrpc-json", help="also write the OpenRPC 1.3.2 document to this .json path (the "
+                                           "library @embedFiles it for $/describe)")
     args = ap.parse_args()
 
     with open(args.spec) as f:
         spec = json.load(f)
     validate(spec)
-    text = generate(spec, os.path.basename(args.spec))
+    basename = os.path.basename(args.spec)
 
-    if not args.out:
-        sys.stdout.write(text)
-        return
-    # Atomic write (temp + replace), mirroring python/openrpc_gen.py.
-    out_dir = os.path.dirname(os.path.abspath(args.out))
-    fd, tmp = tempfile.mkstemp(dir=out_dir, suffix=".zig.tmp")
-    try:
-        with os.fdopen(fd, "w") as f:
-            f.write(text)
-        os.replace(tmp, args.out)
-    except BaseException:
-        os.unlink(tmp)
-        raise
-    print(f"wrote {len(spec.get('methods', {}))} methods, {len(spec.get('$defs', {}))} types to {args.out}")
+    # rpc_gen.zig: to --out, else stdout only when no other artifact was requested.
+    zig_text = generate(spec, basename)
+    if args.out:
+        _atomic_write(args.out, zig_text, ".zig.tmp")
+        print(f"wrote {len(spec.get('methods', {}))} methods, {len(spec.get('$defs', {}))} types to {args.out}")
+    elif not args.openrpc_json:
+        sys.stdout.write(zig_text)
+
+    if args.openrpc_json:
+        # The JSON IS the $/describe payload (the app @embedFiles it), so the "generated, don't edit"
+        # marker is a spec-valid `x-generated` extension (a top-level `$comment` would fail strict OpenRPC
+        # validators) — concise + harmless on the wire. The OpenRPC A/B strips it before comparing.
+        doc = generate_openrpc(spec)
+        marked = {"x-generated": f"Generated from api-specs/{basename} by api-specs/gen.py — do not edit by hand.",
+                  **doc}
+        text = json.dumps(marked, indent=2, ensure_ascii=False) + "\n"
+        _atomic_write(args.openrpc_json, text, ".json.tmp")
+        print(f"wrote OpenRPC ({len(doc['methods'])} methods) to {args.openrpc_json}")
 
 
 if __name__ == "__main__":

@@ -135,6 +135,9 @@ pub fn Protocol(comptime S: type) type {
         authorizer: ?Authorizer = null,
         cancellation_handler: ?CancellationHandler = null,
         server_info: ?ServerInfoHook = null,
+        /// The OpenRPC description served by `$/describe` (the app registers the codegen-produced static
+        /// JSON via `Builder.describe`; null = `$/describe` is METHOD_NOT_FOUND). Spliced raw into `result`.
+        describe_doc: ?[]const u8 = null,
         audit_sink: ?AuditSink = null,
         session_setup: ?SetupHook = null,
         session_setup_continue: ?SetupHook = null,
@@ -208,6 +211,13 @@ pub fn Protocol(comptime S: type) type {
                     }
                 };
                 b.proto.server_info = .{ .ctx = @ptrCast(instance), .call = &Wrap.call };
+            }
+
+            /// Enable `$/describe` by registering the service's OpenRPC document (`doc`, a long-lived JSON
+            /// string — typically the codegen-produced `openrpc.zig`'s `pub const json`). Returned verbatim
+            /// as the `$/describe` result; without it `$/describe` is METHOD_NOT_FOUND.
+            pub fn describe(b: *Builder, doc: []const u8) void {
+                b.proto.describe_doc = doc;
             }
 
             /// Register the audit sink (a closure over `instance`): `fn(*Inst, AuditRecord) void`, invoked
@@ -554,6 +564,7 @@ pub fn Protocol(comptime S: type) type {
 
         fn handleControl(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, tracker: ?Tracker) ?[]const u8 {
             if (std.mem.eql(u8, fields.method, "$/serverInfo")) return self.handleServerInfo(arena, fields, session);
+            if (std.mem.eql(u8, fields.method, "$/describe")) return self.handleDescribe(arena, fields);
             if (std.mem.eql(u8, fields.method, "$/sessionSetup")) return self.handleSessionSetup(arena, fields, session);
             if (std.mem.eql(u8, fields.method, "$/sessionSetupContinue")) return self.handleSessionContinue(arena, fields, session);
             if (std.mem.eql(u8, fields.method, "$/sessionClose")) return self.handleSessionClose(arena, fields, session);
@@ -570,6 +581,17 @@ pub fn Protocol(comptime S: type) type {
                 return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
             const result_json = hook.call(hook.ctx, arena, session);
             return envelope.successBytesRaw(arena, fields.rid, result_json) catch null;
+        }
+
+        /// `$/describe` — unauthenticated, pre-gate, not audited; requires an id. Returns the registered
+        /// OpenRPC document verbatim as `result` (METHOD_NOT_FOUND when none is registered). Like
+        /// `$/serverInfo`, but the payload is the static codegen-produced doc, spliced in raw.
+        fn handleDescribe(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields) ?[]const u8 {
+            const doc = self.describe_doc orelse
+                return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            return envelope.successBytesRaw(arena, fields.rid, doc) catch null;
         }
 
         /// `$/sessionSetup` — the first auth step, valid only at lifecycle `none`. Requires an id.
@@ -1180,6 +1202,36 @@ test "control: $/serverInfo, unknown $/, CLOSED short-circuit" {
         },
         .none, .subscribe => try testing.expect(false),
     }
+}
+
+test "describe: returns the registered OpenRPC doc; no-id INVALID_REQUEST; unset METHOD_NOT_FOUND" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+    const doc = "{\"openrpc\":\"1.3.2\",\"info\":{\"title\":\"t\",\"version\":\"1\"},\"methods\":[],\"components\":{\"schemas\":{},\"errors\":{}}}";
+
+    // a protocol with a registered describe doc
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{});
+    b.describe(doc);
+    var proto = b.build();
+    defer proto.deinit();
+
+    // $/describe → the doc spliced verbatim into `result`
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/describe\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":" ++ doc ++ "}");
+    // without an id → INVALID_REQUEST (never suppressed)
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"$/describe\"}"), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
+
+    // a protocol with NO describe doc → $/describe is METHOD_NOT_FOUND (request) / suppressed (notification)
+    var b2 = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b2.method("add", &api, Api.add, .{});
+    var proto2 = b2.build();
+    defer proto2.deinit();
+    try expectJson(arena, try rj(&proto2, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/describe\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}");
+    try testing.expect((try rj(&proto2, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"$/describe\"}")) == null);
 }
 
 test "builder rejects reserved prefixes and duplicates" {
