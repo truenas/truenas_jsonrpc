@@ -25,6 +25,14 @@ const Step = struct {
     response: ?std.json.Value = null,
     audits: []AuditEntry = &.{},
 };
+/// One server→client publish in a delivery case: a topic method + the payload to `sendNotification`.
+const Publish = struct { method: []const u8, payload: std.json.Value = .null };
+/// A delivery case: subscribe, publish each `publish`, then assert the drained outbound `notifications`.
+const Delivery = struct {
+    subscribe: []const u8,
+    publish: []Publish = &.{},
+    notifications: []std.json.Value = &.{},
+};
 const Case = struct {
     name: []const u8,
     protocol: []const u8,
@@ -32,6 +40,7 @@ const Case = struct {
     response: ?std.json.Value = null,
     audits: []AuditEntry = &.{},
     steps: []Step = &.{},
+    delivery: ?Delivery = null,
 };
 const Golden = struct { cases: []Case };
 
@@ -111,10 +120,15 @@ test "A/B differential against the Python oracle" {
     var idg = reference.FixedIdGen{};
     var pubsub_proto = try reference.buildPubSub(std.testing.allocator, &idg);
     defer pubsub_proto.deinit();
+    // A single-threaded Io backend drives the transport's (Io-aware) delivery in the delivery cases —
+    // all ops are non-blocking here, so single-threaded suffices (the blocking poll is unit-tested apart).
+    var iot: std.Io.Threaded = .init_single_threaded;
+    const io = iot.io();
 
     var saw_audit = false; // anti-vacuity: at least one case actually emits an audit record
     var saw_steps = false; // anti-vacuity: at least one stateful multi-step sequence runs
     var saw_generated = false; // anti-vacuity: the spec-generated path is actually exercised
+    var saw_delivery = false; // anti-vacuity: at least one pub/sub delivery (subscribe→publish→drain) runs
     var failures: usize = 0;
     for (golden.cases) |case| {
         const is_audit = std.mem.eql(u8, case.protocol, "audit");
@@ -135,6 +149,59 @@ test "A/B differential against the Python oracle" {
         const cap_for: ?*reference.Capture = if (is_audit) &cap else if (is_gauth) &gauth_cap else null;
         // Reset the deterministic id source per pubsub case so each case's sub_ids count from ...001.
         if (std.mem.eql(u8, case.protocol, "pubsub")) idg.reset();
+
+        // Delivery: subscribe → server publishes → drain the transport's outbound; compare the wire stream
+        // to the Python oracle's. Exercises the Io-aware Transport as a consumer (subscribe directive →
+        // applySubscribe → sendNotification → pollNotification), the M2b counterpart of the M2a ack A/B.
+        if (case.delivery) |d| {
+            saw_delivery = true;
+            var tr = trpc.Transport(void).init(std.testing.allocator, &pubsub_proto);
+            defer tr.deinit();
+            var dsess = pubsub_proto.newSession(null);
+            switch (pubsub_proto.dispatch(arena, d.subscribe, &dsess)) {
+                .subscribe => |dir| tr.applySubscribe(io, dir, &dsess) catch {
+                    failures += 1;
+                    std.debug.print("A/B delivery [{s}]: applySubscribe failed\n", .{case.name});
+                    continue;
+                },
+                else => {
+                    failures += 1;
+                    std.debug.print("A/B delivery [{s}]: subscribe yielded no directive\n", .{case.name});
+                    continue;
+                },
+            }
+            for (d.publish) |pm| {
+                // The conformance owns the topic's `Notifies` type (AlertEvent); parse the golden payload
+                // into it and publish — the transport re-validates + encodes the notification wire.
+                const payload = std.json.parseFromValueLeaky(reference.AlertEvent, arena, pm.payload, .{ .ignore_unknown_fields = true }) catch {
+                    failures += 1;
+                    continue;
+                };
+                tr.sendNotification(io, pm.method, payload) catch |e| {
+                    failures += 1;
+                    std.debug.print("A/B delivery [{s}]: sendNotification failed: {s}\n", .{ case.name, @errorName(e) });
+                };
+            }
+            for (d.notifications) |want| {
+                const p = tr.pollNotification(io, false) orelse {
+                    failures += 1;
+                    std.debug.print("A/B delivery [{s}]: missing a notification\n", .{case.name});
+                    break;
+                };
+                const v = std.json.parseFromSliceLeaky(std.json.Value, arena, p.data, .{}) catch .null;
+                if (!trpc.testing.jsonEql(v, want)) {
+                    failures += 1;
+                    std.debug.print("A/B delivery [{s}]: notification mismatch\n  wire: {s}\n", .{ case.name, p.data });
+                }
+                std.testing.allocator.free(p.data); // freed only after the comparison + any diagnostic
+            }
+            if (tr.pollNotification(io, false)) |extra| { // nothing should remain beyond the golden stream
+                std.testing.allocator.free(extra.data);
+                failures += 1;
+                std.debug.print("A/B delivery [{s}]: extra notification beyond golden\n", .{case.name});
+            }
+            continue;
+        }
 
         // Stateful sequence: replay every step on ONE session (lifecycle + audits carry/capture per step).
         if (case.steps.len > 0) {
@@ -185,6 +252,7 @@ test "A/B differential against the Python oracle" {
     try std.testing.expect(saw_audit);
     try std.testing.expect(saw_steps);
     try std.testing.expect(saw_generated);
+    try std.testing.expect(saw_delivery);
 
     // Directive teeth: the loop above compares only the ack *value* (`dispatchToValue` collapses the
     // directive). Assert here that a subscribe actually yields a `.subscribe` DIRECTIVE carrying the

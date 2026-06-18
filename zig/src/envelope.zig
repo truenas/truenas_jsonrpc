@@ -5,8 +5,12 @@
 const std = @import("std");
 const errors = @import("errors.zig");
 
-/// `str(uuid.UUID(v)) == v.lower()`: canonical 8-4-4-4-12 hex with hyphens at fixed positions,
-/// case-insensitive. Accepts uppercase (echoed verbatim); rejects URN/braced/integer forms.
+/// True iff `v` is a canonical hyphenated UUID: 8-4-4-4-12 hex, hyphens at fixed positions, case-
+/// insensitive (uppercase echoed verbatim; URN/braced/integer forms rejected). This *is* the Python
+/// contract's `_is_uuid` predicate inlined — equivalent to both `str(uuid.UUID(v)) == v.lower()` and the
+/// `_UUID_RE.fullmatch` micro-opt (`[0-9a-fA-F]{8}-{4}-{4}-{4}-{12}`), accepting the identical set. Runs on
+/// every request id → a direct length+char scan: no allocation, no UUID object, no regex engine (Zig std
+/// ships none) — exactly what that regex DFA compiles down to, minus the engine dispatch.
 pub fn isUuid(v: []const u8) bool {
     if (v.len != 36) return false;
     for (v, 0..) |c, i| {

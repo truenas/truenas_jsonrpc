@@ -24,6 +24,7 @@ pub const GAuthCreds = struct { user: []const u8, password: trpc.Secret([]const 
 pub const GAuthAck = struct { token: trpc.Secret([]const u8), stage: []const u8 };
 pub const GAuthContinue = struct { otp: []const u8 };
 pub const SubArgs = struct { channel: []const u8 };
+pub const AlertEvent = struct { level: []const u8, text: []const u8 }; // the topic's `notifies` payload
 
 const Ctx = trpc.RequestCtx(void);
 const Builder = trpc.Protocol(void).Builder;
@@ -201,7 +202,7 @@ pub const FixedIdGen = struct {
 /// authorizer, mirroring generate.py PROTO_PUBSUB.
 pub fn buildPubSub(gpa: std.mem.Allocator, idg: *FixedIdGen) !trpc.Protocol(void) {
     var b = trpc.Protocol(void).builder(gpa, "test", "1.0.0");
-    try b.subscription("alerts.subscribe", SubArgs, .{});
+    try b.subscription("alerts.subscribe", SubArgs, AlertEvent, .{});
     b.idGen(idg.idGen());
     return b.build();
 }

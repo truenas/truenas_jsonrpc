@@ -206,13 +206,14 @@ pub fn Protocol(comptime S: type) type {
             }
 
             /// Register a `server_client` subscription topic: a client subscribes by calling `name` (a
-            /// request → a `{result: sub_id}` ack); `Accepts` is the subscribe params. No handler — the
+            /// request → a `{result: sub_id}` ack); `Accepts` is the subscribe params, `Notifies` is the
+            /// published-payload schema (`send_notification` validates against it). No handler — the
             /// transport delivers the notifications. Same reserved-prefix/duplicate checks as `method`.
-            pub fn subscription(b: *Builder, name: []const u8, comptime Accepts: type, opts: method_mod.MethodOpts) errors.BuildError!void {
+            pub fn subscription(b: *Builder, name: []const u8, comptime Accepts: type, comptime Notifies: type, opts: method_mod.MethodOpts) errors.BuildError!void {
                 if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
                     return error.ReservedMethodName;
                 if (b.proto.methods.contains(name)) return error.DuplicateMethod;
-                try b.proto.methods.put(name, Method.defineTopic(Accepts, name, opts));
+                try b.proto.methods.put(name, Method.defineTopic(Accepts, Notifies, name, opts));
             }
 
             /// Inject the subscription-id generator (a real `UuidV4` in production; a `FixedIdGen` in
@@ -1061,6 +1062,7 @@ test "subscribe: server_client topic mints a sub_id ack + .subscribe directive; 
     const arena = arena_state.allocator();
 
     const SubArgs = struct { channel: []const u8 };
+    const AlertEvent = struct { level: []const u8, text: []const u8 };
 
     // A deterministic id source — a *consumer* concern (mirrors how the conformance suite owns its
     // FixedIdGen), injected through the `IdGen` seam so the minted sub_id is reproducible.
@@ -1077,7 +1079,7 @@ test "subscribe: server_client topic mints a sub_id ack + .subscribe directive; 
     var api = Api{};
     var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
     try b.method("add", &api, Api.add, .{});
-    try b.subscription("alerts.subscribe", SubArgs, .{});
+    try b.subscription("alerts.subscribe", SubArgs, AlertEvent, .{});
     b.idGen(.{ .ctx = @ptrCast(&seq), .nextFn = &Seq.nextImpl });
     var proto = b.build();
     defer proto.deinit();

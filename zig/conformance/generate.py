@@ -345,6 +345,15 @@ CASES = [
     ("subscribe_bad_params", "pubsub", '{"jsonrpc":"2.0","id":"%s","method":"alerts.subscribe","params":{}}' % UID),
 ]
 
+# Delivery cases: subscribe, then the SERVER publishes to the topic; the drained outbound notification
+# stream is the golden the Zig transport must reproduce. (name, protocol, subscribe_wire, [(method, payload)])
+DELIVERY_CASES = [
+    ("pubsub_delivery", "pubsub",
+     '{"jsonrpc":"2.0","id":"%s","method":"alerts.subscribe","params":{"channel":"pool"}}' % UID,
+     [("alerts.subscribe", {"level": "warn", "text": "pool degraded"}),
+      ("alerts.subscribe", {"level": "info", "text": "scrub done"})]),
+]
+
 # Stateful sequences dispatched on ONE session (lifecycle carries forward across steps).
 SEQ_CASES = [
     ("gated_full_flow", "gated", [
@@ -392,6 +401,25 @@ def main():
             steps.append({"wire": w, "response": response, "audits": list(_AUDIT_LOG)})
         records.append({"name": name, "protocol": protocol, "wire": "",
                         "response": None, "audits": [], "steps": steps})
+    for name, protocol, subscribe_wire, publishes in DELIVERY_CASES:
+        proto = PROTOS[protocol]
+        sess = proto.new_session()
+        _SEQ_UUID.reset()
+        proto.dispatch(subscribe_wire, sess)  # register the subscription
+        for method, payload in publishes:
+            proto.send_notification(method, payload)
+        notifications = []
+        while True:  # drain the outbound back-channel (the server's notification thread)
+            item = proto.poll_notification(block=False)
+            if item is None:
+                break
+            _session, wire = item
+            notifications.append(json.loads(wire))
+        records.append({"name": name, "protocol": protocol, "wire": "",
+                        "response": None, "audits": [], "steps": [],
+                        "delivery": {"subscribe": subscribe_wire,
+                                     "publish": [{"method": m, "payload": p} for m, p in publishes],
+                                     "notifications": notifications}})
 
     out_path = os.path.join(HERE, "golden.json")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)

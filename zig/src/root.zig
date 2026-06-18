@@ -34,6 +34,13 @@ const protocol = @import("protocol.zig");
 pub const Protocol = protocol.Protocol;
 pub const Dispatched = protocol.Dispatched;
 
+/// `Transport(S)` — the Io-aware pub/sub delivery layer (registry + `sendNotification` + `pollNotification`).
+/// It consumes the core's `Dispatched.subscribe` directive and owns the mutable, Io-synchronized state, so
+/// the `Protocol(S)` core stays sans-I/O and lock-free. Mirrors Python's `send_notification`/`poll_notification`.
+const transport = @import("transport.zig");
+pub const Transport = transport.Transport;
+pub const NotifyError = transport.NotifyError;
+
 const sink = @import("sink.zig");
 pub const AuditSink = sink.AuditSink;
 pub const AuditRecord = sink.AuditRecord;
@@ -66,5 +73,6 @@ test {
     _ = @import("envelope.zig");
     _ = @import("method.zig");
     _ = @import("protocol.zig");
+    _ = @import("transport.zig");
     // The A/B conformance suite is a separate consumer artifact (see zig/conformance/), not aggregated here.
 }

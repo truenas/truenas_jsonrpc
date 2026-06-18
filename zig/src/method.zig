@@ -54,6 +54,10 @@ pub fn Method(comptime S: type) type {
         // redact the decoded params, and redact a success result from its serialized bytes.
         audit_params_fn: *const fn (arena: std.mem.Allocator, decoded: *anyopaque) std.json.Value,
         audit_result_fn: *const fn (arena: std.mem.Allocator, result_bytes: []const u8) std.json.Value,
+        // server_client topics only: validate a notification `payload` against `Notifies` and build the
+        // `{jsonrpc, method, params}` wire (the transport's `sendNotification` calls this). A stub on
+        // client_server methods (never invoked — the transport direction-checks first).
+        notify_encode_fn: *const fn (arena: std.mem.Allocator, method_name: []const u8, payload: std.json.Value) ?[]const u8,
 
         pub fn decode(self: Self, arena: std.mem.Allocator, params: std.json.Value) Decoded {
             return self.decode_fn(arena, params);
@@ -68,6 +72,12 @@ pub fn Method(comptime S: type) type {
         /// Redacted audit view of a success result, from the bytes the run thunk produced.
         pub fn auditResult(self: Self, arena: std.mem.Allocator, result_bytes: []const u8) std.json.Value {
             return self.audit_result_fn(arena, result_bytes);
+        }
+        /// Validate `payload` against this topic's `Notifies` and produce the `{jsonrpc, method, params}`
+        /// notification wire bytes (arena-owned), or null if the payload doesn't match `Notifies`. Only
+        /// meaningful for a `server_client` topic (the transport checks `direction` before calling).
+        pub fn encodeNotification(self: Self, arena: std.mem.Allocator, payload: std.json.Value) ?[]const u8 {
+            return self.notify_encode_fn(arena, self.name, payload);
         }
 
         /// Monomorphize the thunks over `Service`/`Accepts`/`Returns`/`handler` (all comptime) and
@@ -126,14 +136,15 @@ pub fn Method(comptime S: type) type {
                 .run_fn = &Thunks.run,
                 .audit_params_fn = &Thunks.auditParams,
                 .audit_result_fn = &Thunks.auditResult,
+                .notify_encode_fn = &notifyEncodeStub, // a request method never notifies
             };
         }
 
-        /// A `server_client` subscribable topic: decodes the subscribe params (`Accepts`); it has no
-        /// handler, so dispatch routes it to the subscribe path (mint a sub id, ack) and `run`/audit are
-        /// never invoked — they point at stubs. (`notifies` typing for `send_notification` lands with the
-        /// transport, which owns delivery.)
-        pub fn defineTopic(comptime Accepts: type, name: []const u8, opts: MethodOpts) Self {
+        /// A `server_client` subscribable topic: `Accepts` is the subscribe-request params, `Notifies` is
+        /// the published-payload schema. It has no handler — dispatch routes it to the subscribe path
+        /// (mint a sub id, ack) so `run`/audit are stubs; the transport's `sendNotification` validates a
+        /// payload against `Notifies` + builds the notification wire via `encodeNotification`.
+        pub fn defineTopic(comptime Accepts: type, comptime Notifies: type, name: []const u8, opts: MethodOpts) Self {
             const Thunks = struct {
                 fn decode(arena: std.mem.Allocator, params: std.json.Value) Decoded {
                     const boxed = arena.create(Accepts) catch return .invalid_params;
@@ -143,6 +154,17 @@ pub fn Method(comptime S: type) type {
                         boxed.validate() catch return .invalid_params;
                     }
                     return .{ .ok = boxed };
+                }
+                // Validate+coerce `payload` to `Notifies` (drop unknown fields, like Python's
+                // msgspec.convert), then splice the re-encoded params into the notification envelope.
+                fn notifyEncode(arena: std.mem.Allocator, method_name: []const u8, payload: std.json.Value) ?[]const u8 {
+                    const validated = std.json.parseFromValueLeaky(Notifies, arena, payload, .{ .ignore_unknown_fields = true }) catch return null;
+                    if (@hasDecl(Notifies, "validate")) {
+                        validated.validate() catch return null;
+                    }
+                    const params_bytes = serializeToBytes(arena, Notifies, validated) catch return null;
+                    const method_json = std.json.Stringify.valueAlloc(arena, std.json.Value{ .string = method_name }, .{}) catch return null;
+                    return std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"method\":{s},\"params\":{s}}}", .{ method_json, params_bytes }) catch null;
                 }
             };
             return .{
@@ -158,6 +180,7 @@ pub fn Method(comptime S: type) type {
                 .run_fn = &topicRunStub,
                 .audit_params_fn = &topicValueStub,
                 .audit_result_fn = &topicBytesStub,
+                .notify_encode_fn = &Thunks.notifyEncode,
             };
         }
 
@@ -171,6 +194,10 @@ pub fn Method(comptime S: type) type {
         }
         fn topicBytesStub(_: std.mem.Allocator, _: []const u8) std.json.Value {
             return .null;
+        }
+        // A client_server method is never published; the transport never calls this (direction-checked).
+        fn notifyEncodeStub(_: std.mem.Allocator, _: []const u8, _: std.json.Value) ?[]const u8 {
+            return null;
         }
     };
 }

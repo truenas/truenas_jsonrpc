@@ -777,6 +777,51 @@
         }
       ],
       "wire": ""
+    },
+    {
+      "audits": [],
+      "delivery": {
+        "notifications": [
+          {
+            "jsonrpc": "2.0",
+            "method": "alerts.subscribe",
+            "params": {
+              "level": "warn",
+              "text": "pool degraded"
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "alerts.subscribe",
+            "params": {
+              "level": "info",
+              "text": "scrub done"
+            }
+          }
+        ],
+        "publish": [
+          {
+            "method": "alerts.subscribe",
+            "payload": {
+              "level": "warn",
+              "text": "pool degraded"
+            }
+          },
+          {
+            "method": "alerts.subscribe",
+            "payload": {
+              "level": "info",
+              "text": "scrub done"
+            }
+          }
+        ],
+        "subscribe": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}"
+      },
+      "name": "pubsub_delivery",
+      "protocol": "pubsub",
+      "response": null,
+      "steps": [],
+      "wire": ""
     }
   ]
 }
