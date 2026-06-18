@@ -151,7 +151,9 @@ def secret_op(request, session_state, request_state):
     return AddResult(sum=request.a + request.b)
 
 
-def authorize(request, session_state):
+def authorize(request, session_state, target=None):  # cancel passes target= (None here, no registry)
+    if request.method == "$/cancelRequest":
+        return AuthorizationResponse(authorized=False, message="cannot cancel")
     if request.method == "secret_op":
         return AuthorizationResponse(authorized=False, message="nope")
     return AuthorizationResponse(authorized=True)
@@ -214,7 +216,7 @@ def gauth_continue(request, session_state):
     return (SessionLifecycle.ESTABLISHED, GAuthAck(token="t1", stage="established"))
 
 
-def audit_authorize(request, session_state):
+def audit_authorize(request, session_state, target=None):  # cancel passes target= (allowed here)
     # request.params is the decoded struct; deny `login` for a specific user.
     if request.method == "login" and getattr(request.params, "user", None) == "denyme":
         return AuthorizationResponse(authorized=False, message="denied")
@@ -297,6 +299,7 @@ PROTOS = {"open": PROTO_OPEN, "authz": PROTO_AUTHZ, "audit": PROTO_AUDIT,
 
 UID = "123e4567-e89b-12d3-a456-426614174000"
 UID_UPPER = UID.upper()
+TARGET = "00000000-0000-4000-8000-0000000000aa"  # a $/cancelRequest target id (never in flight here)
 
 # (name, protocol, wire)
 CASES = [
@@ -343,6 +346,12 @@ CASES = [
     ("subscribe_ok", "pubsub", '{"jsonrpc":"2.0","id":"%s","method":"alerts.subscribe","params":{"channel":"pool"}}' % UID),
     ("subscribe_no_id", "pubsub", '{"jsonrpc":"2.0","method":"alerts.subscribe","params":{"channel":"pool"}}'),
     ("subscribe_bad_params", "pubsub", '{"jsonrpc":"2.0","id":"%s","method":"alerts.subscribe","params":{}}' % UID),
+    # $/cancelRequest — the sans-I/O control op (envelope checks, authz, audit; no registry → target not
+    # found → REQUEST_FAILED). Target resolution + the cooperative cancel land with the transport.
+    ("cancel_no_id", "open", '{"jsonrpc":"2.0","method":"$/cancelRequest","params":{"target_id":"%s"}}' % TARGET),
+    ("cancel_bad_params", "open", '{"jsonrpc":"2.0","id":"%s","method":"$/cancelRequest","params":{}}' % UID),
+    ("cancel_denied", "authz", '{"jsonrpc":"2.0","id":"%s","method":"$/cancelRequest","params":{"target_id":"%s"}}' % (UID, TARGET)),
+    ("cancel_unknown_target", "audit", '{"jsonrpc":"2.0","id":"%s","method":"$/cancelRequest","params":{"target_id":"%s"}}' % (UID, TARGET)),
 ]
 
 # Delivery cases: subscribe, then the SERVER publishes to the topic; the drained outbound notification

@@ -613,6 +613,84 @@
     },
     {
       "audits": [],
+      "name": "cancel_no_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"target_id\":\"00000000-0000-4000-8000-0000000000aa\"}}"
+    },
+    {
+      "audits": [],
+      "name": "cancel_bad_params",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/cancelRequest\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "cancel_denied",
+      "protocol": "authz",
+      "response": {
+        "error": {
+          "code": -32000,
+          "message": "cannot cancel"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/cancelRequest\",\"params\":{\"target_id\":\"00000000-0000-4000-8000-0000000000aa\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": null,
+          "method": "$/cancelRequest",
+          "params": {
+            "target_id": "00000000-0000-4000-8000-0000000000aa"
+          },
+          "response": {
+            "error": {
+              "code": -32803,
+              "message": "Request failed"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "roles": []
+        }
+      ],
+      "name": "cancel_unknown_target",
+      "protocol": "audit",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "Request failed"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/cancelRequest\",\"params\":{\"target_id\":\"00000000-0000-4000-8000-0000000000aa\"}}"
+    },
+    {
+      "audits": [],
       "name": "gated_full_flow",
       "protocol": "gated",
       "response": null,

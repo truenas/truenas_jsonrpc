@@ -45,7 +45,8 @@ pub const Api = struct {
     fn secretOp(_: *Api, args: AddArgs, _: *Ctx) !AddResult {
         return .{ .sum = args.a + args.b };
     }
-    fn authorize(_: *Api, request: trpc.RequestInfo, _: *trpc.Session(void)) trpc.AuthorizationResponse {
+    fn authorize(_: *Api, request: trpc.RequestInfo, _: *trpc.Session(void), _: ?*trpc.Session(void)) trpc.AuthorizationResponse {
+        if (std.mem.eql(u8, request.method, "$/cancelRequest")) return .{ .authorized = false, .message = "cannot cancel" };
         if (std.mem.eql(u8, request.method, "secret_op")) return .{ .authorized = false, .message = "nope" };
         return .{ .authorized = true };
     }
@@ -62,7 +63,7 @@ pub const Api = struct {
     fn crash(_: *Api, _: NoArgs, _: *Ctx) !PingResult {
         return error.Kaboom;
     }
-    fn auditAuthorize(_: *Api, request: trpc.RequestInfo, _: *trpc.Session(void)) trpc.AuthorizationResponse {
+    fn auditAuthorize(_: *Api, request: trpc.RequestInfo, _: *trpc.Session(void), _: ?*trpc.Session(void)) trpc.AuthorizationResponse {
         if (request.params == .object) if (request.params.object.get("user")) |u| {
             if (u == .string and std.mem.eql(u8, u.string, "denyme")) return .{ .authorized = false, .message = "denied" };
         };
@@ -222,7 +223,7 @@ pub const GenHandlers = struct {
         return error.Kaboom;
     }
     // Not a method (3 params but `*Session`, no error union) — wired as the authorizer hook, not collected.
-    pub fn authorize(_: *@This(), request: trpc.RequestInfo, _: *trpc.Session(void)) trpc.AuthorizationResponse {
+    pub fn authorize(_: *@This(), request: trpc.RequestInfo, _: *trpc.Session(void), _: ?*trpc.Session(void)) trpc.AuthorizationResponse {
         if (request.params == .object) if (request.params.object.get("user")) |u| {
             if (u == .string and std.mem.eql(u8, u.string, "denyme")) return .{ .authorized = false, .message = "denied" };
         };

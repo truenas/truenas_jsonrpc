@@ -42,6 +42,29 @@ pub fn SetupOutcome(comptime R: type) type {
     };
 }
 
+/// The handler-facing args to `ctx.updateProgress` (Python `update_progress(percent, description, extra)`).
+/// All optional; the engine adds the correlating `id`, and an absent field is omitted from the wire `params`.
+pub const ProgressUpdate = struct {
+    percent: ?f64 = null,
+    description: ?[]const u8 = null,
+    extra: ?std.json.Value = null,
+};
+
+/// The per-request `$/progress` back-channel a handler emits through. Set by the Io-aware transport when it
+/// drives dispatch; null on the sans-I/O path → `updateProgress` is a no-op. Type-erased over the transport
+/// and carries the `io` it needs to enqueue — the core holds it opaquely and never calls `io` itself.
+pub const ProgressSink = struct {
+    ctx: *anyopaque,
+    io: std.Io,
+    /// Enqueue a progress notification for `rid`; returns true iff it was enqueued (false = the request
+    /// already completed → dropped, mirroring Python `_update_progress`'s in-flight check).
+    emit_fn: *const fn (ctx: *anyopaque, io: std.Io, rid: []const u8, update: ProgressUpdate) bool,
+
+    pub fn emit(self: ProgressSink, rid: []const u8, update: ProgressUpdate) bool {
+        return self.emit_fn(self.ctx, self.io, rid, update);
+    }
+};
+
 test "lifecycle / direction enums are distinct" {
     try std.testing.expect(@as(SessionLifecycle, .none) != .established);
     try std.testing.expect(@as(MessageDirection, .client_server) != .server_client);

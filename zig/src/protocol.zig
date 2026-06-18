@@ -38,6 +38,46 @@ pub const Dispatched = union(enum) {
 /// returned normally; this side-channel adds the minted id + topic so `dispatch` can build the directive.
 const SubscribeInfo = struct { sub_id: []const u8, topic: []const u8 };
 
+/// The in-flight + `$/progress` hooks the Io-aware transport supplies to `dispatchWith` (null on the
+/// sans-I/O path). The core calls `begin` just before running an id-bearing request (register it; obtain
+/// its progress sink) and `end` after it completes (purge queued progress + drop from in-flight) —
+/// mirroring Python's `_inflight[rid] = ...` / `finally: _complete(...)` bracket. Held opaquely by the
+/// core (carries `io`, never calls it); `session` is passed type-erased (the transport casts it back).
+pub const Tracker = struct {
+    ctx: *anyopaque,
+    io: std.Io,
+    /// Register an id-bearing request in-flight (passing whether its method is `cancellable`) and return
+    /// its per-request handles (the progress sink + the shared cooperative-cancel flag).
+    begin_fn: *const fn (ctx: *anyopaque, io: std.Io, rid: []const u8, session: *anyopaque, cancellable: bool) Tracked,
+    end_fn: *const fn (ctx: *anyopaque, io: std.Io, rid: []const u8) void,
+    /// Resolve a `$/cancelRequest` `target_id` to the target's OWNING session (type-erased) for the
+    /// session-scoped authorization — or null if no in-flight request/subscription has that id. Does not
+    /// act (Python resolves under the lock, then authorizes WITH the target, then acts).
+    resolve_fn: *const fn (ctx: *anyopaque, io: std.Io, target_id: []const u8) ?*anyopaque,
+    /// Act on the (now-authorized) target: set a cancellable request's cooperative flag (then run the
+    /// optional cancellation callback with `canceller`), or drop a subscription. Re-resolves under the lock
+    /// (the target may have completed since `resolve`); `canceller` is the cancelling session (type-erased).
+    act_fn: *const fn (ctx: *anyopaque, io: std.Io, target_id: []const u8, canceller: *anyopaque) CancelOutcome,
+};
+
+/// The per-request handles the transport wires into `RequestCtx` at `begin`.
+pub const Tracked = struct {
+    progress: types.ProgressSink,
+    /// The cooperative-cancel event a `$/cancelRequest` sets (null = the method is not `cancellable`).
+    cancel: ?*std.Io.Event,
+};
+
+/// The result of resolving + acting on a `$/cancelRequest` target (drives the response the core builds).
+pub const CancelOutcome = enum {
+    ok, // cancelled an in-flight request (flag set) or dropped a subscription → `{result: true}`
+    not_found, // no request or subscription with that id → REQUEST_FAILED
+    not_cancellable, // an in-flight request whose method is not `cancellable` → REQUEST_FAILED
+    handler_error, // the cancellation callback raised → INTERNAL_ERROR (the flag is still set)
+};
+
+/// `$/cancelRequest` params: the id of the request-in-flight or subscription to cancel (Python `_CancelParams`).
+const CancelParams = struct { target_id: []const u8 };
+
 pub fn Protocol(comptime S: type) type {
     const Method = method_mod.Method(S);
     const Session = session_mod.Session(S);
@@ -48,16 +88,28 @@ pub fn Protocol(comptime S: type) type {
     return struct {
         const Self = @This();
 
-        /// Authorization hook (mirrors Python `authorization_handler`) — a closure over an app object.
+        /// Authorization hook (mirrors Python `authorization_handler`) — a closure over an app object. The
+        /// `target` is non-null only for a `$/cancelRequest`: the owning session of the request/subscription
+        /// being cancelled (null = not found, or a normal method dispatch), so a handler can enforce
+        /// session-scoped cancellation (compare the canceller's `session` against the target's).
         pub const Authorizer = struct {
             ctx: *anyopaque,
-            call: *const fn (ctx: *anyopaque, request: types.RequestInfo, session: *Session) types.AuthorizationResponse,
+            call: *const fn (ctx: *anyopaque, request: types.RequestInfo, session: *Session, target: ?*Session) types.AuthorizationResponse,
         };
 
         /// `$/serverInfo` hook — an unauthenticated, infallible server-identity getter (closure over an app object).
         pub const ServerInfoHook = struct {
             ctx: *anyopaque,
             call: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, session: *Session) []const u8,
+        };
+
+        /// Cancellation hook (Python `cancellation_handler`) — the optional *active-abort* callback run when
+        /// a `$/cancelRequest` cancels a cancellable in-flight request, AFTER its cooperative flag is set.
+        /// Gets the `target_id` + the cancelling `session`; a handler that raises → INTERNAL_ERROR (the
+        /// `call` wrapper reports it as `false`). Not invoked for a subscription or a non-cancellable target.
+        pub const CancellationHandler = struct {
+            ctx: *anyopaque,
+            call: *const fn (ctx: *anyopaque, target_id: []const u8, session: *Session) bool, // false = the callback errored
         };
 
         /// Outcome of running a session-setup handler: the result serialized to bytes (lifecycle +
@@ -81,6 +133,7 @@ pub fn Protocol(comptime S: type) type {
         version: []const u8,
         methods: std.StringHashMap(Method),
         authorizer: ?Authorizer = null,
+        cancellation_handler: ?CancellationHandler = null,
         server_info: ?ServerInfoHook = null,
         audit_sink: ?AuditSink = null,
         session_setup: ?SetupHook = null,
@@ -120,12 +173,27 @@ pub fn Protocol(comptime S: type) type {
             pub fn authorizer(b: *Builder, instance: anytype, comptime f: anytype) void {
                 const Inst = @typeInfo(@TypeOf(instance)).pointer.child;
                 const Wrap = struct {
-                    fn call(ctx: *anyopaque, request: types.RequestInfo, session: *Session) types.AuthorizationResponse {
+                    fn call(ctx: *anyopaque, request: types.RequestInfo, session: *Session, target: ?*Session) types.AuthorizationResponse {
                         const self: *Inst = @ptrCast(@alignCast(ctx));
-                        return f(self, request, session);
+                        return f(self, request, session, target);
                     }
                 };
                 b.proto.authorizer = .{ .ctx = @ptrCast(instance), .call = &Wrap.call };
+            }
+
+            /// Register the cancellation hook (Python `register_cancellation_handler`): a callback
+            /// `fn(*Inst, target_id, *Session(S)) !void` run when a `$/cancelRequest` cancels a cancellable
+            /// in-flight request (after its flag is set). A handler that returns an error → INTERNAL_ERROR.
+            pub fn cancellationHandler(b: *Builder, instance: anytype, comptime f: anytype) void {
+                const Inst = @typeInfo(@TypeOf(instance)).pointer.child;
+                const Wrap = struct {
+                    fn call(ctx: *anyopaque, target_id: []const u8, session: *Session) bool {
+                        const self: *Inst = @ptrCast(@alignCast(ctx));
+                        f(self, target_id, session) catch return false;
+                        return true;
+                    }
+                };
+                b.proto.cancellation_handler = .{ .ctx = @ptrCast(instance), .call = &Wrap.call };
             }
 
             /// Enable `$/serverInfo` with an infallible getter `fn(*Inst, *Session(S)) Returns`.
@@ -308,7 +376,16 @@ pub fn Protocol(comptime S: type) type {
             };
         }
 
+        /// The sans-I/O dispatch entry (no in-flight tracking, no `$/progress`): a pure bytes-in →
+        /// `Dispatched` function. The transport calls `dispatchWith` instead to thread its tracker.
         pub fn dispatch(self: *const Self, reply_alloc: std.mem.Allocator, wire: []const u8, session: *Session) Dispatched {
+            return self.dispatchWith(reply_alloc, wire, session, null);
+        }
+
+        /// Like `dispatch`, but with an optional `Tracker` (the Io-aware transport's in-flight registry +
+        /// `$/progress` back-channel). `tracker = null` is the pure path, so all A/B conformance — which
+        /// calls `dispatch` — exercises the identical pipeline.
+        pub fn dispatchWith(self: *const Self, reply_alloc: std.mem.Allocator, wire: []const u8, session: *Session, tracker: ?Tracker) Dispatched {
             var arena_state = std.heap.ArenaAllocator.init(self.gpa);
             defer arena_state.deinit();
             const arena = arena_state.allocator();
@@ -319,7 +396,7 @@ pub fn Protocol(comptime S: type) type {
             const bytes: ?[]const u8 = switch (envelope.parse(arena, wire)) {
                 // Stage 1–3 faults are always emitted, even for an id-less message.
                 .fail => |f| envelope.errorBytes(arena, f.rid, f.code, f.message, null) catch null,
-                .fields => |fields| self.dispatchFields(arena, fields, session, &sub_info),
+                .fields => |fields| self.dispatchFields(arena, fields, session, &sub_info, tracker),
             };
 
             if (bytes) |b| {
@@ -338,7 +415,7 @@ pub fn Protocol(comptime S: type) type {
 
         /// Stages 6/9/11/12 (lookup → decode → run → response). Returns the reply bytes (arena-owned)
         /// or null = nothing to send (a notification, whose side effects still run).
-        fn dispatchFields(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, subscribe_out: *?SubscribeInfo) ?[]const u8 {
+        fn dispatchFields(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, subscribe_out: *?SubscribeInfo, tracker: ?Tracker) ?[]const u8 {
             const note = !fields.has_id;
 
             // Stage 4 — CLOSED short-circuit (a closed session rejects everything, including `$/...`).
@@ -347,7 +424,7 @@ pub fn Protocol(comptime S: type) type {
 
             // Stage 5 — control-message interception (`$/...`).
             if (std.mem.startsWith(u8, fields.method, "$/"))
-                return self.handleControl(arena, fields, session);
+                return self.handleControl(arena, fields, session, tracker);
 
             const m = self.methods.get(fields.method) orelse
                 return if (note) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
@@ -371,7 +448,7 @@ pub fn Protocol(comptime S: type) type {
             // Stage 10 — authorize. A denial is still audited (success/error/denial each audit once).
             if (self.authorizer) |authz| {
                 const info: types.RequestInfo = .{ .method = fields.method, .id = fields.rid, .params = fields.params, .roles = m.roles };
-                const verdict = authz.call(authz.ctx, info, session);
+                const verdict = authz.call(authz.ctx, info, session, null); // no cancel target for a method dispatch
                 if (!verdict.authorized) {
                     self.maybeAudit(arena, m, fields.rid, decoded, .{ .err = .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data } }, null, session);
                     return if (note) null else (envelope.errorBytes(arena, fields.rid, .not_authorized, verdict.message, verdict.data) catch null);
@@ -384,9 +461,21 @@ pub fn Protocol(comptime S: type) type {
             if (m.direction == .server_client)
                 return self.handleSubscribe(arena, m, fields, subscribe_out);
 
-            // Stage 11 — run.
+            // Stage 11 — run. For an id-bearing request with a tracker, register it in-flight and wire the
+            // `$/progress` sink so the handler can emit; deregister + purge stale progress once it completes
+            // (the begin/end bracket = Python's `_inflight[rid]=...` / `finally: _complete(...)`). Notifications
+            // (no id) and subscribes never reach here with an id-less tracker entry.
             var ctx: RequestCtx = .{ .arena = arena, .id = fields.rid, .sess = session };
+            if (tracker) |tk| {
+                ctx.io = tk.io; // the app's Io (for handler I/O + the blocking waitForCancel)
+                if (fields.rid) |rid| {
+                    const tracked = tk.begin_fn(tk.ctx, tk.io, rid, @ptrCast(session), m.cancellable);
+                    ctx.progress = tracked.progress;
+                    ctx.cancel = tracked.cancel;
+                }
+            }
             const ran = m.run(decoded, &ctx);
+            if (tracker) |tk| if (fields.rid) |rid| tk.end_fn(tk.ctx, tk.io, rid);
 
             // Stage 12 — audit (success or handler-error, carrying the handler's runtime detail). Fires
             // even for a notification, whose response is built for the audit view but not sent (Python parity).
@@ -463,11 +552,12 @@ pub fn Protocol(comptime S: type) type {
             });
         }
 
-        fn handleControl(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+        fn handleControl(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, tracker: ?Tracker) ?[]const u8 {
             if (std.mem.eql(u8, fields.method, "$/serverInfo")) return self.handleServerInfo(arena, fields, session);
             if (std.mem.eql(u8, fields.method, "$/sessionSetup")) return self.handleSessionSetup(arena, fields, session);
             if (std.mem.eql(u8, fields.method, "$/sessionSetupContinue")) return self.handleSessionContinue(arena, fields, session);
             if (std.mem.eql(u8, fields.method, "$/sessionClose")) return self.handleSessionClose(arena, fields, session);
+            if (std.mem.eql(u8, fields.method, "$/cancelRequest")) return self.handleCancel(arena, fields, session, tracker);
             // Unknown `$/` control: METHOD_NOT_FOUND for a request, ignored for a notification.
             return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
         }
@@ -532,6 +622,61 @@ pub fn Protocol(comptime S: type) type {
             if (self.audit_sink) |audit|
                 emitControlAudit(audit, "$/sessionClose", fields.rid, .null, auditSuccessValue(arena, fields.rid, .{ .bool = true }), session);
             return envelope.successBytesRaw(arena, fields.rid, "true") catch null;
+        }
+
+        /// `$/cancelRequest` — cancel an in-flight request or drop a subscription by `target_id`. A control
+        /// op that (uniquely) runs the authorizer and is audited; it requires an id. Resolution + action
+        /// live in the Io-aware transport (it owns the registries): the core authorizes, then delegates to
+        /// `tracker.cancel_fn`. With no tracker (the sans-I/O path) no target resolves → REQUEST_FAILED.
+        /// (The target-aware, session-scoped authorization is a follow-up.)
+        fn handleCancel(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, tracker: ?Tracker) ?[]const u8 {
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            const params = std.json.parseFromValueLeaky(CancelParams, arena, fields.params, .{ .ignore_unknown_fields = true }) catch
+                return envelope.errorBytes(arena, fields.rid, .invalid_params, errors.msg.invalid_params, null) catch null;
+
+            // Resolve the target's session (for session-scoped authz), authorize WITH it, then act —
+            // mirroring Python's `_authorize_and_cancel` (resolve → authorize(target) → act). Authorizing
+            // before the existence check means an unauthorized caller is denied without learning whether
+            // the target exists. A denial / unknown / non-cancellable target all error; only an applied
+            // cancel or unsubscribe succeeds.
+            const Result = union(enum) { ok, err: errors.JsonRpcError };
+            const result: Result = blk: {
+                const target: ?*Session = if (tracker) |tk|
+                    (if (tk.resolve_fn(tk.ctx, tk.io, params.target_id)) |s| @ptrCast(@alignCast(s)) else null)
+                else
+                    null;
+                if (self.authorizer) |authz| {
+                    const info: types.RequestInfo = .{ .method = "$/cancelRequest", .id = fields.rid, .params = fields.params, .roles = &.{} };
+                    const verdict = authz.call(authz.ctx, info, session, target);
+                    if (!verdict.authorized)
+                        break :blk .{ .err = .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data } };
+                }
+                const outcome = if (tracker) |tk| tk.act_fn(tk.ctx, tk.io, params.target_id, @ptrCast(session)) else .not_found;
+                break :blk switch (outcome) {
+                    .ok => .ok,
+                    // not_found / not_cancellable both → REQUEST_FAILED (Python differs only in the detail
+                    // `data` string, which the A/B strips to the code + message).
+                    .not_found, .not_cancellable => .{ .err = .{ .code = .request_failed, .message = errors.msg.request_failed, .data = null } },
+                    // the cancellation callback raised → INTERNAL_ERROR (the request's flag is still set).
+                    .handler_error => .{ .err = .{ .code = .internal_error, .message = errors.msg.internal_error, .data = null } },
+                };
+            };
+
+            // Control-op audit (when a sink is set): method "$/cancelRequest", params {target_id}, the response.
+            if (self.audit_sink) |audit| {
+                var pobj: std.json.ObjectMap = .empty;
+                pobj.put(arena, "target_id", .{ .string = params.target_id }) catch {};
+                const resp_v = switch (result) {
+                    .ok => auditSuccessValue(arena, fields.rid, .{ .bool = true }),
+                    .err => |e| auditErrorValue(arena, fields.rid, e),
+                };
+                emitControlAudit(audit, "$/cancelRequest", fields.rid, .{ .object = pobj }, resp_v, session);
+            }
+            return switch (result) {
+                .ok => envelope.successBytesRaw(arena, fields.rid, "true") catch null,
+                .err => |e| envelope.errorBytes(arena, fields.rid, e.code, e.message, e.data) catch null,
+            };
         }
     };
 }
@@ -608,7 +753,7 @@ const Api = struct {
     fn secretOp(_: *Api, args: AddArgs, _: *session_mod.RequestCtx(void)) !AddResult {
         return .{ .sum = args.a + args.b };
     }
-    fn authorize(_: *Api, request: types.RequestInfo, _: *session_mod.Session(void)) types.AuthorizationResponse {
+    fn authorize(_: *Api, request: types.RequestInfo, _: *session_mod.Session(void), _: ?*session_mod.Session(void)) types.AuthorizationResponse {
         if (std.mem.eql(u8, request.method, "secret_op")) return .{ .authorized = false, .message = "nope" };
         return .{ .authorized = true };
     }
@@ -667,7 +812,7 @@ test "audit: redacts params+result, joins message, audits denial w/o detail, ski
         fn ping(_: *@This(), _: PingArgs, _: *session_mod.RequestCtx(void)) !PingResult {
             return .{ .pong = true };
         }
-        fn authorize(_: *@This(), info: types.RequestInfo, _: *session_mod.Session(void)) types.AuthorizationResponse {
+        fn authorize(_: *@This(), info: types.RequestInfo, _: *session_mod.Session(void), _: ?*session_mod.Session(void)) types.AuthorizationResponse {
             if (info.params == .object) if (info.params.object.get("user")) |u| {
                 if (u == .string and std.mem.eql(u8, u.string, "denyme")) return .{ .authorized = false, .message = "denied" };
             };

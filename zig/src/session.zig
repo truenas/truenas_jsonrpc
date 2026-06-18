@@ -28,8 +28,19 @@ pub fn RequestCtx(comptime S: type) type {
         arena: std.mem.Allocator,
         id: ?[]const u8,
         sess: *Session(S),
-        /// Count of `$/progress` notifications emitted (M2 back-channel).
+        /// The app's `Io` (set by the transport that drives dispatch; null on the sans-I/O path). Lets a
+        /// handler do real I/O on the app's chosen backend + powers the blocking `waitForCancel`.
+        io: ?std.Io = null,
+        /// Count of `$/progress` notifications actually enqueued for this request (Python `count`).
         count: u32 = 0,
+        /// The `$/progress` back-channel (set by the transport that drives dispatch; null on the sans-I/O
+        /// path → `updateProgress` is a no-op). Mirrors Python `RequestState._protocol`.
+        progress: ?types.ProgressSink = null,
+        /// The shared cooperative-cancel event (Python `RequestState._cancel_event`): set by a
+        /// `$/cancelRequest` targeting this request, polled by `cancelled()` / blocked on by
+        /// `waitForCancel`. The transport allocates it at dispatch start for a `cancellable` method; null
+        /// otherwise (and on the sans-I/O path). An `Io.Event` so polling is Io-free but a wait can block.
+        cancel: ?*std.Io.Event = null,
         cancelled_flag: bool = false,
         /// Runtime audit detail (last call wins); not redacted — keep secrets out.
         audit_message: ?[]const u8 = null,
@@ -44,8 +55,23 @@ pub fn RequestCtx(comptime S: type) type {
             self.audit_message = msg;
         }
 
+        /// True once a `$/cancelRequest` has targeted this (cancellable) request — polls the shared event
+        /// the transport set (Io-free), falling back to the local flag (the sans-I/O path / direct tests).
         pub fn cancelled(self: *const Self) bool {
+            if (self.cancel) |ev| return ev.isSet();
             return self.cancelled_flag;
+        }
+
+        /// Block until this request is cancelled (→ true) or `timeout` elapses (→ false) — the responsive
+        /// alternative to polling `cancelled()` in a loop (Python `RequestState.wait_for_cancel`). Returns
+        /// false immediately for a non-cancellable request (no event) or without an `Io` to block on. Pass
+        /// `.none` to wait indefinitely; a duration via `.{ .duration = .{ .clock = .awake, .raw = ... } }`.
+        pub fn waitForCancel(self: *Self, timeout: std.Io.Timeout) bool {
+            const ev = self.cancel orelse return false;
+            if (ev.isSet()) return true;
+            const io = self.io orelse return false;
+            ev.waitTimeout(io, timeout) catch return false; // error.Timeout / error.Canceled → false
+            return true;
         }
 
         /// Choose a JSON-RPC error: `return ctx.fail(.request_failed, "…", null);`. Stashes the
@@ -56,7 +82,7 @@ pub fn RequestCtx(comptime S: type) type {
         }
 
         pub fn raiseIfCancelled(self: *Self) error{JsonRpc}!void {
-            if (self.cancelled_flag) return self.fail(.request_cancelled, "Request cancelled", null);
+            if (self.cancelled()) return self.fail(.request_cancelled, "Request cancelled", null);
         }
 
         /// Map a returned error → a `JsonRpcError`: the `JsonRpc` sentinel yields the stashed payload;
@@ -67,7 +93,15 @@ pub fn RequestCtx(comptime S: type) type {
             }
             return .{ .code = .internal_error, .message = "Internal error" };
         }
-        // updateProgress(...) — M2, once the Outbound sink lands.
+
+        /// Emit a `$/progress` notification correlated to this request (Python
+        /// `RequestState.update_progress`). A no-op for a notification (no id) or once the request has
+        /// completed (the sink drops it); `count` counts only the notifications actually enqueued.
+        pub fn updateProgress(self: *Self, update: types.ProgressUpdate) void {
+            const rid = self.id orelse return;
+            const sink = self.progress orelse return;
+            if (sink.emit(rid, update)) self.count += 1;
+        }
     };
 }
 
