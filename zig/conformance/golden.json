@@ -691,6 +691,781 @@
     },
     {
       "audits": [],
+      "name": "filter_all",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_eq",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\",\"alpha\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_ci_eq",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"C=\",\"alpha\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_gt_float",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"ratio\",\">\",1.5]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_ge_int",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"id\",\">=\",4]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_in",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"id\",\"in\",[1,4]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_nin",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"id\",\"nin\",[1,4]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_startswith",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"^\",\"al\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_endswith",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"$\",\"ha\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_rin",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"rin\",\"ph\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_bool",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"active\",\"=\",true]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_null_eq",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"note\",\"=\",null]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_null_ne",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"note\",\"!=\",null]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_implicit_and",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\",\"alpha\"],[\"active\",\"=\",true]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_or",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"OR\",[[\"id\",\"=\",1],[\"id\",\"=\",4]]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_and_group_in_or",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"OR\",[[[\"name\",\"=\",\"alpha\"],[\"active\",\"=\",true]],[\"id\",\"=\",4]]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_count",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": 2
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\",\"alpha\"]],\"query-options\":{\"count\":true}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_count_ignores_paging",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": 5
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"count\":true,\"offset\":1,\"limit\":2}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_desc",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"-ratio\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_paging",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"id\"],\"offset\":1,\"limit\":2}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_multi",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"name\",\"-id\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_nulls_first",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"nulls_first:note\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_nulls_last",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"nulls_last:note\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_invalid_op",
+      "protocol": "filter",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"??\",\"a\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_invalid_arity",
+      "protocol": "filter",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\"]]}}"
+    },
+    {
+      "audits": [],
       "name": "gated_full_flow",
       "protocol": "gated",
       "response": null,
@@ -900,6 +1675,89 @@
       "response": null,
       "steps": [],
       "wire": ""
+    }
+  ],
+  "transfer_cases": [
+    {
+      "final": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "ok",
+          "sent": 2048
+        }
+      },
+      "name": "transfer_download",
+      "ready": {
+        "jsonrpc": "2.0",
+        "method": "$/transferReady",
+        "params": {
+          "direction": "download",
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "result": {
+            "size": 2048
+          }
+        }
+      },
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"file.download\",\"params\":{\"size\":2048}}"
+    },
+    {
+      "final": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "ok": true,
+          "received": 4096
+        }
+      },
+      "name": "transfer_upload",
+      "ready": {
+        "jsonrpc": "2.0",
+        "method": "$/transferReady",
+        "params": {
+          "direction": "upload",
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "result": true
+        }
+      },
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"file.upload\",\"params\":{\"size\":4096}}"
+    }
+  ],
+  "xdr_cases": [
+    {
+      "name": "xdr_add",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000005000000026f6b0000",
+      "request": "5458445200000001000003e900000001123e4567e89b12d3a4564266141740000000000200000003"
+    },
+    {
+      "name": "xdr_echo",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000300000001000000020000000300000001000000026869000000000001",
+      "request": "5458445200000001000003ea00000001123e4567e89b12d3a4564266141740000000000300000001000000020000000300000001000000026869000000000001"
+    },
+    {
+      "name": "xdr_echo_empty",
+      "reply": "545844520000000100000001123e4567e89b12d3a45642661417400000000000000000000000000000000000",
+      "request": "5458445200000001000003ea00000001123e4567e89b12d3a456426614174000000000000000000000000000"
+    },
+    {
+      "name": "xdr_unknown_proc",
+      "reply": "545844520000000100000001123e4567e89b12d3a45642661417400000000001ffff80a70000002c7b22636f6465223a2d33323630312c226d657373616765223a224d6574686f64206e6f7420666f756e64227d",
+      "request": "54584452000000010000270f00000001123e4567e89b12d3a456426614174000"
+    },
+    {
+      "name": "xdr_filter_eq",
+      "reply": "545844520000000100000001123e4567e89b12d3a4564266141740000000000000000002000000000000000100000005616c7068610000003fe000000000000000000001000000010000000178000000000000000000000300000005616c7068610000003ff80000000000000000000100000000",
+      "request": "5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000000000000000000000000000000000000000000000000000165b5b226e616d65222c223d222c22616c706861225d5d0000"
+    },
+    {
+      "name": "xdr_filter_count",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000002",
+      "request": "5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000010000000000000000000000000000000000000000000000165b5b226e616d65222c223d222c22616c706861225d5d0000"
+    },
+    {
+      "name": "xdr_filter_order_desc",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000500000000000000040000000567616d6d61000000400c000000000000000000000000000100000001790000000000000000000002000000046265746140040000000000000000000000000000000000000000000300000005616c7068610000003ff80000000000000000000100000000000000000000000100000005616c7068610000003fe000000000000000000001000000010000000178000000000000000000000500000005416c7068610000003fd00000000000000000000100000001000000017a000000",
+      "request": "5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000000000000100000001000000062d726174696f000000000000000000000000000000000000000000025b5d0000"
     }
   ]
 }

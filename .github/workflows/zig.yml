@@ -37,7 +37,7 @@ jobs:
       # Formatting gate first (cheap, fails fast).
       - name: zig fmt --check
         working-directory: zig
-        run: zig fmt --check src conformance bench build.zig
+        run: zig fmt --check src xdr conformance bench build.zig
 
       # Library unit tests + the A/B differential conformance suite (against the committed golden).
       - name: zig build test

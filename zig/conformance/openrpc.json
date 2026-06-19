@@ -59,6 +59,70 @@
         }
       },
       "x-direction": "client_server"
+    },
+    {
+      "name": "x.query",
+      "summary": "Filterable query over a collection of entries.",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "query-filters",
+          "required": false,
+          "schema": {
+            "type": "array",
+            "items": {
+              "type": "array"
+            },
+            "default": []
+          }
+        },
+        {
+          "name": "query-options",
+          "required": false,
+          "schema": {
+            "type": "object",
+            "properties": {
+              "count": {
+                "type": "boolean",
+                "default": false
+              },
+              "order_by": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null
+              },
+              "offset": {
+                "type": "integer",
+                "default": 0
+              },
+              "limit": {
+                "type": "integer",
+                "default": 0
+              }
+            }
+          }
+        }
+      ],
+      "result": {
+        "name": "Entry",
+        "schema": {
+          "type": "array",
+          "items": {
+            "$ref": "#/components/schemas/Entry"
+          }
+        }
+      },
+      "x-query": true,
+      "x-direction": "client_server"
     }
   ],
   "components": {
@@ -118,6 +182,47 @@
         "type": "object",
         "properties": {},
         "required": []
+      },
+      "QueryArgs": {
+        "title": "QueryArgs",
+        "type": "object",
+        "properties": {},
+        "required": []
+      },
+      "Entry": {
+        "title": "Entry",
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "ratio": {
+            "type": "number"
+          },
+          "active": {
+            "type": "boolean"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "ratio",
+          "active"
+        ]
       }
     },
     "errors": {

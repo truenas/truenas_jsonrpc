@@ -9,12 +9,24 @@ const std = @import("std");
 const errors = @import("errors.zig");
 const types = @import("types.zig");
 const envelope = @import("envelope.zig");
+const xdr_frame = @import("xdr_frame.zig");
+const xdr = @import("xdr"); // the generic codec (used by the XDR dispatch tests below)
 const method_mod = @import("method.zig");
+const transfer_mod = @import("transfer.zig");
 const session_mod = @import("session.zig");
 const sink_mod = @import("sink.zig");
 const reflect = @import("reflect.zig");
 const idgen_mod = @import("idgen.zig");
 const IdGen = idgen_mod.IdGen;
+
+/// First application XDR proc-id, just above the reserved control band (0..=1000). The binary-wire op-table
+/// is a flat slot array indexed by `proc_id - xdr_first_proc`, so application proc-ids should be assigned
+/// densely from here up.
+const xdr_first_proc: u32 = xdr_frame.reserved_proc_max + 1;
+/// Upper bound on the slot-table span (so a typo'd huge `xdr_id` can't balloon the array to gigabytes). A
+/// proc-id at/above `xdr_first_proc + this` is a build-time `XdrProcIdTooLarge`. 65536 application ids
+/// (≈8 MiB of slots worst case) dwarfs any real API surface.
+const xdr_max_slots: u32 = 1 << 16;
 
 pub const Dispatched = union(enum) {
     /// Reply bytes owned by the caller's `reply_alloc` — caller frees.
@@ -26,6 +38,13 @@ pub const Dispatched = union(enum) {
     /// mints the id (via the injected `IdGen`) + builds the ack here — mirroring Python's `Transfer`
     /// directive (delivery + the registry are transport concerns, never the lock-free core's).
     subscribe: Subscribe,
+    /// A raw-fd transfer request. The (Io-aware) transport sends `directive.ready` (the `$/transferReady`
+    /// envelope), runs the wire handshake for `directive.direction`, builds a concrete `FileTransfer` from
+    /// the connection's fd, then calls `directive.complete(arena, &ft)` → the final response bytes. The
+    /// sans-I/O core only authorizes + negotiates + builds the directive; the fd handoff is the transport's
+    /// (mirrors Python's `Transfer`). The directive's completion state is `reply_alloc`-owned (it outlives
+    /// the per-dispatch arena) — caller frees `ready` + the directive.
+    transfer: transfer_mod.Transfer,
 
     pub const Subscribe = struct {
         reply: []u8, // the `{result: sub_id, id}` ack bytes — caller frees
@@ -132,6 +151,13 @@ pub fn Protocol(comptime S: type) type {
         name: []const u8,
         version: []const u8,
         methods: std.StringHashMap(Method),
+        /// The XDR binary-wire op-table as a flat SLOT array (not a hashmap): `xdr_slots[xdr_id -
+        /// xdr_first_proc]` is the method for that proc-id. Application proc-ids start just above the
+        /// reserved band, so the proc-id IS the slot index — `dispatchXdr` is a bounds check + indexed
+        /// load, no hashing/probing. Gaps (unassigned ids in range) are `null`; a registered method is a
+        /// value copy (the same `Method` also lives in `methods` by name, at no extra cost). Grown at
+        /// registration, where slot occupancy doubles as the duplicate-id check; sized to the max proc-id.
+        xdr_slots: std.ArrayList(?Method) = .empty,
         authorizer: ?Authorizer = null,
         cancellation_handler: ?CancellationHandler = null,
         server_info: ?ServerInfoHook = null,
@@ -168,6 +194,7 @@ pub fn Protocol(comptime S: type) type {
                 const Returns = @typeInfo(fn_info.return_type.?).error_union.payload;
                 const m = Method.define(Service, Accepts, Returns, instance, handler, name, opts);
                 try b.proto.methods.put(name, m);
+                try b.registerXdr(m, opts);
             }
 
             /// Register the authorization hook (a closure over `instance`): a function
@@ -294,6 +321,75 @@ pub fn Protocol(comptime S: type) type {
                 try b.proto.methods.put(name, Method.defineTopic(Accepts, Notifies, name, opts));
             }
 
+            /// Register a `filterable` query method: a handler `fn(*Service, BaseAccepts, *RequestCtx(S),
+            /// *FilterSink(Entry)) !void` that streams its records into the sink (rather than returning a
+            /// value). The framework augments the request with `query-filters`/`query-options`, compiles the
+            /// filters against `Entry`, and applies count/order_by/offset/limit on the fly — serializing only
+            /// matches. `Service`/`BaseAccepts` are inferred from the handler; `Entry` (the per-record element
+            /// type) is explicit. Same reserved-prefix/duplicate checks as `method`. Codegen emits this for a
+            /// spec method marked `filterable`.
+            pub fn filterableMethod(
+                b: *Builder,
+                name: []const u8,
+                instance: anytype,
+                comptime handler: anytype,
+                comptime Entry: type,
+                opts: method_mod.MethodOpts,
+            ) errors.BuildError!void {
+                if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
+                    return error.ReservedMethodName;
+                if (b.proto.methods.contains(name)) return error.DuplicateMethod;
+
+                const Service = @typeInfo(@TypeOf(instance)).pointer.child;
+                const fn_info = @typeInfo(@TypeOf(handler)).@"fn";
+                const BaseAccepts = fn_info.params[1].type.?;
+                const m = Method.defineFilterable(Service, BaseAccepts, Entry, instance, handler, name, opts);
+                try b.proto.methods.put(name, m);
+                try b.registerXdr(m, opts);
+            }
+
+            /// Register a raw-fd transfer method. `negotiate` (`fn(*Inst, Accepts, *RequestCtx(S)) !Interim`)
+            /// validates + returns the `$/transferReady` interim; `transfer` (`fn(*Inst, Accepts,
+            /// *const FileTransfer, *RequestCtx(S)) !Returns`) does the bulk stream over the connection's fd
+            /// and returns the final result. `Accepts`/`Interim`/`Returns` are inferred from the signatures.
+            pub fn transferMethod(b: *Builder, name: []const u8, instance: anytype, comptime negotiate: anytype, comptime transfer: anytype, direction: transfer_mod.TransferDirection, opts: method_mod.MethodOpts) errors.BuildError!void {
+                return b.transferImpl(name, instance, negotiate, transfer, direction, false, opts);
+            }
+
+            /// Like `transferMethod`, but the `transfer` callback passes/receives open fds via `SCM_RIGHTS`
+            /// (AF_UNIX only — the transport restricts it to an AF_UNIX connection).
+            pub fn fdPassMethod(b: *Builder, name: []const u8, instance: anytype, comptime negotiate: anytype, comptime transfer: anytype, direction: transfer_mod.TransferDirection, opts: method_mod.MethodOpts) errors.BuildError!void {
+                return b.transferImpl(name, instance, negotiate, transfer, direction, true, opts);
+            }
+
+            fn transferImpl(b: *Builder, name: []const u8, instance: anytype, comptime negotiate: anytype, comptime transfer: anytype, direction: transfer_mod.TransferDirection, af_unix: bool, opts: method_mod.MethodOpts) errors.BuildError!void {
+                if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
+                    return error.ReservedMethodName;
+                if (b.proto.methods.contains(name)) return error.DuplicateMethod;
+
+                const Service = @typeInfo(@TypeOf(instance)).pointer.child;
+                const neg_info = @typeInfo(@TypeOf(negotiate)).@"fn";
+                const Accepts = neg_info.params[1].type.?;
+                const Interim = @typeInfo(neg_info.return_type.?).error_union.payload;
+                const Returns = @typeInfo(@typeInfo(@TypeOf(transfer)).@"fn".return_type.?).error_union.payload;
+                const m = Method.defineTransfer(Service, Accepts, Interim, Returns, instance, negotiate, transfer, direction, af_unix, name, opts);
+                try b.proto.methods.put(name, m);
+            }
+
+            /// When a method opts into XDR, place it in the proc-id slot table at `xdr_id - xdr_first_proc`
+            /// (growing the array, gaps filled with `null`). An already-occupied slot is a `DuplicateXdrId`;
+            /// the reserved 0..=1000 band is a `ReservedXdrProcId`; a proc-id too far above the base is an
+            /// `XdrProcIdTooLarge` (the slot table is sized to the max id). gen.py enforces all three too.
+            fn registerXdr(b: *Builder, m: Method, opts: method_mod.MethodOpts) errors.BuildError!void {
+                if (!opts.xdr) return;
+                if (opts.xdr_id <= xdr_frame.reserved_proc_max) return error.ReservedXdrProcId;
+                const idx = opts.xdr_id - xdr_first_proc;
+                if (idx >= xdr_max_slots) return error.XdrProcIdTooLarge;
+                while (b.proto.xdr_slots.items.len <= idx) try b.proto.xdr_slots.append(b.proto.gpa, null);
+                if (b.proto.xdr_slots.items[idx] != null) return error.DuplicateXdrId;
+                b.proto.xdr_slots.items[idx] = m;
+            }
+
             /// Inject the subscription-id generator (a real `UuidV4` in production; a `FixedIdGen` in
             /// tests/conformance for a reproducible golden). Required once any topic is registered.
             pub fn idGen(b: *Builder, gen: IdGen) void {
@@ -374,6 +470,7 @@ pub fn Protocol(comptime S: type) type {
 
         pub fn deinit(self: *Self) void {
             self.methods.deinit();
+            self.xdr_slots.deinit(self.gpa);
         }
 
         /// session_uuid is a fixed placeholder for now (never appears in a response). The injectable
@@ -400,13 +497,21 @@ pub fn Protocol(comptime S: type) type {
             defer arena_state.deinit();
             const arena = arena_state.allocator();
 
+            // XDR binary frame? (magic prefix) — route to the binary path BEFORE the JSON parse (the lone
+            // `envelope.parse` site below). It builds its own reply bytes.
+            if (xdr_frame.isXdr(wire)) {
+                const xb = self.dispatchXdr(arena, wire, session, tracker) orelse return .none;
+                return .{ .reply = reply_alloc.dupe(u8, xb) catch return .none };
+            }
+
             // Set by `dispatchFields` only on a successful subscribe (a `server_client` topic): the side
             // channel that promotes the normal reply into a `.subscribe` directive for the transport.
             var sub_info: ?SubscribeInfo = null;
+            var transfer_info: ?TransferInfo = null;
             const bytes: ?[]const u8 = switch (envelope.parse(arena, wire)) {
                 // Stage 1–3 faults are always emitted, even for an id-less message.
                 .fail => |f| envelope.errorBytes(arena, f.rid, f.code, f.message, null) catch null,
-                .fields => |fields| self.dispatchFields(arena, fields, session, &sub_info, tracker),
+                .fields => |fields| self.dispatchFields(arena, fields, session, &sub_info, &transfer_info, tracker),
             };
 
             if (bytes) |b| {
@@ -418,6 +523,27 @@ pub fn Protocol(comptime S: type) type {
                         .topic = si.topic, // the registered method name (long-lived; no dupe needed)
                     },
                 };
+                // Promote a successful negotiate into a `.transfer` directive: the completion state lives in
+                // `reply_alloc` (it outlives this arena — the transport calls `complete` post-handshake).
+                if (transfer_info) |ti| {
+                    const rid_owned = reply_alloc.dupe(u8, ti.rid) catch return .none;
+                    const tc = reply_alloc.create(TransferComplete) catch return .none;
+                    tc.* = .{
+                        .self = self,
+                        .method = ti.method,
+                        .session = session,
+                        .rid = rid_owned,
+                        .params_json = reply_alloc.dupe(u8, ti.params_json) catch return .none,
+                    };
+                    return .{ .transfer = .{
+                        .rid = rid_owned,
+                        .direction = ti.method.transfer_direction.?,
+                        .af_unix = ti.method.transfer_af_unix,
+                        .ready = owned,
+                        .complete_ctx = @ptrCast(tc),
+                        .complete_fn = &transferCompleteThunk,
+                    } };
+                }
                 return .{ .reply = owned };
             }
             return .none;
@@ -425,7 +551,7 @@ pub fn Protocol(comptime S: type) type {
 
         /// Stages 6/9/11/12 (lookup → decode → run → response). Returns the reply bytes (arena-owned)
         /// or null = nothing to send (a notification, whose side effects still run).
-        fn dispatchFields(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, subscribe_out: *?SubscribeInfo, tracker: ?Tracker) ?[]const u8 {
+        fn dispatchFields(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, subscribe_out: *?SubscribeInfo, transfer_out: *?TransferInfo, tracker: ?Tracker) ?[]const u8 {
             const note = !fields.has_id;
 
             // Stage 4 — CLOSED short-circuit (a closed session rejects everything, including `$/...`).
@@ -443,6 +569,10 @@ pub fn Protocol(comptime S: type) type {
             // receive the sub id (and later unsubscribe). A subscribe-as-notification is INVALID_REQUEST —
             // emitted even though it has no id (mirroring `$/serverInfo`), BEFORE the gate (Python parity).
             if (m.direction == .server_client and note)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            // A transfer request likewise MUST carry an id (the server echoes it through `$/transferReady`,
+            // `$/transferGo`, and the final response) — a transfer-as-notification is INVALID_REQUEST.
+            if (m.transfer_direction != null and note)
                 return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
 
             // Stage 8 — session gate (active only when session-setup is configured).
@@ -470,6 +600,11 @@ pub fn Protocol(comptime S: type) type {
             // SERVER_CLIENT branch in Python's `_authorize_and_dispatch` (post-gate, post-decode, post-authz).
             if (m.direction == .server_client)
                 return self.handleSubscribe(arena, m, fields, subscribe_out);
+
+            // Raw-fd transfer: no normal `run` — negotiate + emit a `Transfer` directive (the transport
+            // drives the handshake + fd handoff). Post-gate/decode/authz, mirroring Python `_begin_transfer`.
+            if (m.transfer_direction != null)
+                return self.handleTransfer(arena, m, decoded, fields, transfer_out, session);
 
             // Stage 11 — run. For an id-bearing request with a tracker, register it in-flight and wire the
             // `$/progress` sink so the handler can emit; deregister + purge stale progress once it completes
@@ -502,6 +637,89 @@ pub fn Protocol(comptime S: type) type {
             };
         }
 
+        /// The XDR binary-wire dispatch (the analog of `dispatchFields`): parse the frame, look up by
+        /// proc-id, then REUSE the wire-independent stages — closed/gate, authorize, run (+tracker), audit —
+        /// swapping only the codec (`xdr_decode_fn`/`xdr_run_fn`) and the envelope (`xdr_frame`). Control
+        /// messages + subscribe stay JSON, so an XDR frame is always a method call. Returns the reply-frame
+        /// bytes (arena-owned), or null (a notification, or a fault on a notification). Audit's result view
+        /// degrades to null for XDR (the binary result isn't JSON-reparseable) — params + errors audit fine.
+        fn dispatchXdr(self: *const Self, arena: std.mem.Allocator, wire: []const u8, session: *Session, tracker: ?Tracker) ?[]const u8 {
+            const xerr = struct {
+                fn f(a: std.mem.Allocator, rid: ?[16]u8, is_note: bool, e: errors.JsonRpcError) ?[]const u8 {
+                    return if (is_note) null else (xdr_frame.errorFrame(a, rid, e) catch null);
+                }
+            }.f;
+
+            const req = xdr_frame.parseRequest(arena, wire) catch
+                return xdr_frame.errorFrame(arena, null, .{ .code = .invalid_request, .message = errors.msg.invalid_request }) catch null;
+            const note = req.rid_bytes == null;
+
+            if (req.version != xdr_frame.VERSION)
+                return xerr(arena, req.rid_bytes, note, .{ .code = .invalid_request, .message = errors.msg.invalid_request });
+            if (session.lifecycle == .closed)
+                return xerr(arena, req.rid_bytes, note, .{ .code = .session_not_established, .message = errors.msg.session_closed });
+
+            // Slot-table lookup: the proc-id IS the index (offset by the reserved base). Wrapping subtract
+            // sends a reserved/under-range id to a huge index → caught by the same bounds check as an
+            // over-range id. No hashing — a bounds check + one indexed load.
+            const slot = req.proc_id -% xdr_first_proc;
+            const m = (if (slot < self.xdr_slots.items.len) self.xdr_slots.items[slot] else null) orelse
+                return xerr(arena, req.rid_bytes, note, .{ .code = .method_not_found, .message = errors.msg.method_not_found });
+
+            // Session gate (active only when session-setup is configured).
+            if (self.has_session_setup and !m.pre_auth and session.lifecycle != .established)
+                return xerr(arena, req.rid_bytes, note, .{ .code = .session_not_established, .message = errors.msg.session_not_established });
+
+            // The id rides into the reply as raw bytes (no allocation — the hot path). It is canonicalized
+            // to the UUID string that the string-keyed shared machinery (authz info / in-flight tracker /
+            // audit) expects ONLY when one of those is actually engaged, so a plain method call never
+            // touches the allocator for the id at all.
+            const rid_str: ?[]const u8 = if (req.rid_bytes) |b|
+                (if (self.authorizer != null or m.audit or tracker != null) (xdr_frame.bytesToUuid(arena, b) catch null) else null)
+            else
+                null;
+
+            // Decode (before authorize, so INVALID_PARAMS precedes NOT_AUTHORIZED).
+            const decoded = switch (m.xdr_decode_fn(arena, req.params)) {
+                .ok => |p| p,
+                .invalid_params => return xerr(arena, req.rid_bytes, note, .{ .code = .invalid_params, .message = errors.msg.invalid_params }),
+            };
+
+            // Authorize (a denial is still audited).
+            if (self.authorizer) |authz| {
+                const info: types.RequestInfo = .{ .method = m.name, .id = rid_str, .params = .null, .roles = m.roles };
+                const verdict = authz.call(authz.ctx, info, session, null);
+                if (!verdict.authorized) {
+                    self.maybeAudit(arena, m, rid_str, decoded, .{ .err = .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data } }, null, session);
+                    return xerr(arena, req.rid_bytes, note, .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data });
+                }
+            }
+
+            // Run (with the in-flight/progress/cancel tracker, like the JSON path).
+            var ctx: RequestCtx = .{ .arena = arena, .id = rid_str, .sess = session };
+            if (tracker) |tk| {
+                ctx.io = tk.io;
+                if (rid_str) |rid| {
+                    const tracked = tk.begin_fn(tk.ctx, tk.io, rid, @ptrCast(session), m.cancellable);
+                    ctx.progress = tracked.progress;
+                    ctx.cancel = tracked.cancel;
+                }
+            }
+            const ran = m.xdr_run_fn(m.instance, decoded, &ctx);
+            if (tracker) |tk| if (rid_str) |rid| tk.end_fn(tk.ctx, tk.io, rid);
+
+            self.maybeAudit(arena, m, rid_str, decoded, switch (ran) {
+                .ok_bytes => |bytes| .{ .ok_result_bytes = bytes },
+                .rpc_error => |e| .{ .err = e },
+            }, ctx.audit_message, session);
+
+            if (note) return null;
+            return switch (ran) {
+                .ok_bytes => |bytes| xdr_frame.replyBytes(arena, req.rid_bytes, bytes) catch null,
+                .rpc_error => |e| xdr_frame.errorFrame(arena, req.rid_bytes, e) catch null,
+            };
+        }
+
         /// Subscribe to a `server_client` topic (reached post-gate, post-decode, post-authorize): mint a
         /// subscription id via the injected `IdGen`, build the ack, and hand the id + topic out through
         /// `subscribe_out` so `dispatch` returns a `.subscribe` directive. The Io-aware transport registers
@@ -518,6 +736,79 @@ pub fn Protocol(comptime S: type) type {
             // (dispatch re-dupes into `reply_alloc`). `m.name` is the long-lived registered topic name.
             subscribe_out.* = .{ .sub_id = arena.dupe(u8, sub_id) catch return null, .topic = m.name };
             return ack;
+        }
+
+        // ── raw-fd transfer ─────────────────────────────────────────────────────
+        /// Side-channel set by `dispatchFields` on a successful negotiate (a transfer method): what
+        /// `dispatch` needs to promote the `$/transferReady` reply into a `.transfer` directive +
+        /// build the `reply_alloc`-owned completion state. `direction`/`af_unix` come off `method`.
+        const TransferInfo = struct {
+            method: Method,
+            rid: []const u8, // arena — dispatch re-dupes into reply_alloc
+            params_json: []const u8, // the original params, serialized — arena; re-decoded at complete()
+        };
+
+        /// The `reply_alloc`-owned completion state behind a `.transfer` directive's `complete` thunk. It
+        /// must outlive the per-dispatch arena (the transport calls `complete` AFTER the handshake), so the
+        /// params travel as self-contained JSON, re-decoded into the transport's arena at complete time.
+        const TransferComplete = struct {
+            self: *const Self, // long-lived (the audit sink + maybeAudit)
+            method: Method, // value type: instance + decode + transfer_run_fn + audit thunks (stable refs)
+            session: *Session, // the connection's session (transport-owned; valid through the transfer)
+            rid: []const u8, // reply_alloc
+            params_json: []const u8, // reply_alloc
+        };
+
+        /// The erased `complete` thunk (transfer.zig `Transfer.complete_fn`): re-decode the params, run the
+        /// `transfer` callback over `ft`, audit the completion (Python `_run_transfer`), and build the final
+        /// response. Runs in the TRANSPORT, post-handshake, with the transport's `arena`.
+        fn transferCompleteThunk(ctx_ptr: *anyopaque, arena: std.mem.Allocator, ft: *const transfer_mod.FileTransfer) ?[]const u8 {
+            const tc: *TransferComplete = @ptrCast(@alignCast(ctx_ptr));
+            const value = std.json.parseFromSliceLeaky(std.json.Value, arena, tc.params_json, .{}) catch
+                return envelope.errorBytes(arena, tc.rid, .internal_error, errors.msg.internal_error, null) catch null;
+            const decoded = switch (tc.method.decode(arena, value)) {
+                .ok => |p| p,
+                .invalid_params => return envelope.errorBytes(arena, tc.rid, .invalid_params, errors.msg.invalid_params, null) catch null,
+            };
+            var ctx: RequestCtx = .{ .arena = arena, .id = tc.rid, .sess = tc.session };
+            const ran = tc.method.transfer_run_fn(tc.method.instance, decoded, ft, &ctx);
+            tc.self.maybeAudit(arena, tc.method, tc.rid, decoded, switch (ran) {
+                .ok_bytes => |b| .{ .ok_result_bytes = b },
+                .rpc_error => |e| .{ .err = e },
+            }, ctx.audit_message, tc.session);
+            return switch (ran) {
+                .ok_bytes => |b| envelope.successBytesRaw(arena, tc.rid, b) catch null,
+                .rpc_error => |e| envelope.errorBytes(arena, tc.rid, e.code, e.message, e.data) catch null,
+            };
+        }
+
+        /// The `$/transferReady` envelope: `{jsonrpc, method, params:{id, direction, result:<interim>}}` —
+        /// byte-for-byte Python's `msgspec.json.encode` (compact; key order id→direction→result). `rid` (a
+        /// canonical UUID) + `direction.wire()` are quote-safe; `interim_json` is spliced raw.
+        fn buildTransferReady(arena: std.mem.Allocator, rid: []const u8, direction: transfer_mod.TransferDirection, interim_json: []const u8) ![]u8 {
+            return std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"method\":\"$/transferReady\",\"params\":{{\"id\":\"{s}\",\"direction\":\"{s}\",\"result\":{s}}}}}", .{ rid, direction.wire(), interim_json });
+        }
+
+        /// A transfer method (reached post-gate/decode/authz, like `handleSubscribe`): run `negotiate` — on
+        /// error, audit + return the error reply; on success, build the `$/transferReady` envelope, set the
+        /// side-channel (so `dispatch` builds the directive), and return the envelope. Mirrors Python's
+        /// `_begin_transfer` (authz already ran in the shared step above).
+        fn handleTransfer(self: *const Self, arena: std.mem.Allocator, m: Method, decoded: *anyopaque, fields: envelope.Fields, transfer_out: *?TransferInfo, session: *Session) ?[]const u8 {
+            const rid = fields.rid.?; // a transfer requires an id (checked before the gate)
+            var ctx: RequestCtx = .{ .arena = arena, .id = rid, .sess = session };
+            const interim_json = switch (m.negotiate_fn(m.instance, decoded, &ctx)) {
+                .ok_interim_json => |j| j,
+                .rpc_error => |e| {
+                    self.maybeAudit(arena, m, rid, decoded, .{ .err = e }, ctx.audit_message, session);
+                    return envelope.errorBytes(arena, rid, e.code, e.message, e.data) catch null;
+                },
+            };
+            const ready = buildTransferReady(arena, rid, m.transfer_direction.?, interim_json) catch return null;
+            // Serialize the ORIGINAL params (self-contained JSON) so the completion state — built into
+            // reply_alloc by dispatch — can re-decode them at complete() time, past this arena's lifetime.
+            const params_json = std.json.Stringify.valueAlloc(arena, fields.params, .{}) catch return null;
+            transfer_out.* = .{ .method = m, .rid = rid, .params_json = params_json };
+            return ready;
         }
 
         /// What the audit record's `response` view is built from: `ok_result_bytes` are the success
@@ -800,6 +1091,7 @@ fn rj(proto: *Protocol(void), arena: std.mem.Allocator, wire: []const u8) !?std.
         .none => return null,
         .reply => |bytes| return try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}),
         .subscribe => |s| return try std.json.parseFromSliceLeaky(std.json.Value, arena, s.reply, .{}),
+        .transfer => |t| return try std.json.parseFromSliceLeaky(std.json.Value, arena, t.ready, .{}),
     }
 }
 
@@ -924,6 +1216,7 @@ test "session lifecycle: gate, pre_auth bypass, setup→init→continue→establ
                 .none => null,
                 .reply => |bytes| try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}),
                 .subscribe => |sub| try std.json.parseFromSliceLeaky(std.json.Value, a, sub.reply, .{}),
+                .transfer => |t| try std.json.parseFromSliceLeaky(std.json.Value, a, t.ready, .{}),
             };
         }
     };
@@ -1080,7 +1373,7 @@ test "control-op audit: $/sessionSetup redacts creds + result; $/sessionClose ha
             const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":{\"token\":\"t0p\",\"stage\":\"init\"}}", .{});
             try testing.expect(json_eq.eql(v, exp));
         },
-        .none, .subscribe => try testing.expect(false),
+        .none, .subscribe, .transfer => try testing.expect(false),
     }
     try testing.expectEqual(@as(u32, 1), cap.n);
     try testing.expectEqualStrings("$/sessionSetup", cap.method.?);
@@ -1200,7 +1493,7 @@ test "control: $/serverInfo, unknown $/, CLOSED short-circuit" {
             const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32002,\"message\":\"Session is closed\"}}", .{});
             try testing.expect(json_eq.eql(v, exp));
         },
-        .none, .subscribe => try testing.expect(false),
+        .none, .subscribe, .transfer => try testing.expect(false),
     }
 }
 
@@ -1309,4 +1602,140 @@ test "subscribe: server_client topic mints a sub_id ack + .subscribe directive; 
 
     // subscribe with bad params → INVALID_PARAMS, a normal reply (no directive, decode precedes the mint).
     try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"alerts.subscribe\",\"params\":{}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}");
+}
+
+// ── XDR binary-wire dispatch ──────────────────────────────────────────────────
+const idb16: [16]u8 = .{ 0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40, 0x00 };
+
+fn xdrReq(arena: std.mem.Allocator, proc_id: u32, id: ?[16]u8, params: anytype) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try aw.writer.writeInt(u32, xdr_frame.MAGIC, .big);
+    try xdr.encode(&aw.writer, xdr_frame.RequestEnvelope{ .version = xdr_frame.VERSION, .proc_id = proc_id, .id = id });
+    try xdr.encode(&aw.writer, params);
+    return aw.writer.buffered();
+}
+
+test "XDR wire: typed request/reply round-trip, dual-wire with JSON, unknown-proc error" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{ .xdr = true, .xdr_id = 1001 });
+    var proto = b.build();
+    defer proto.deinit();
+    var sess = proto.newSession(null);
+
+    // success: encode a typed XDR request, dispatch, decode the typed reply
+    {
+        const d = proto.dispatch(arena, try xdrReq(arena, 1001, idb16, AddArgs{ .a = 2, .b = 3 }), &sess);
+        try testing.expect(d == .reply);
+        try testing.expect(xdr_frame.isXdr(d.reply));
+        var r = std.Io.Reader.fixed(d.reply);
+        _ = try r.takeArray(4); // magic
+        const env = try xdr.decode(xdr_frame.ReplyEnvelope, arena, &r);
+        try testing.expectEqual(@as(u32, 0), env.status); // ok
+        try testing.expectEqual(idb16, env.id.?); // id echoed
+        try testing.expectEqual(@as(i64, 5), (try xdr.decode(AddResult, arena, &r)).sum);
+    }
+
+    // the SAME method still answers JSON (dual-wire)
+    {
+        const jr = proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":4,\"b\":5}}", &sess);
+        try testing.expect(jr == .reply);
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, jr.reply, .{});
+        try testing.expectEqual(@as(i64, 9), v.object.get("result").?.object.get("sum").?.integer);
+    }
+
+    // unknown proc-id → an XDR error frame (method_not_found = -32601)
+    {
+        const d = proto.dispatch(arena, try xdrReq(arena, 9999, idb16, AddArgs{ .a = 0, .b = 0 }), &sess);
+        try testing.expect(d == .reply);
+        var r = std.Io.Reader.fixed(d.reply);
+        _ = try r.takeArray(4);
+        const env = try xdr.decode(xdr_frame.ReplyEnvelope, arena, &r);
+        try testing.expectEqual(@as(u32, 1), env.status); // err
+        try testing.expectEqual(@as(i32, -32601), (try xdr.decode(xdr_frame.XdrErrorPayload, arena, &r)).code);
+    }
+}
+
+test "XDR: a duplicate xdr_id is a build-time DuplicateXdrId (the slot is already occupied)" {
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{ .xdr = true, .xdr_id = 1007 });
+    try testing.expectError(error.DuplicateXdrId, b.method("add2", &api, Api.add, .{ .xdr = true, .xdr_id = 1007 }));
+    var proto = b.build();
+    proto.deinit();
+}
+
+test "XDR: an xdr_id in the reserved 0..=1000 band is a build-time ReservedXdrProcId" {
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    // 0..=1000 are reserved for protocol control messages; an application method must use >= 1001.
+    try testing.expectError(error.ReservedXdrProcId, b.method("add", &api, Api.add, .{ .xdr = true, .xdr_id = 1000 }));
+    try b.method("ok", &api, Api.add, .{ .xdr = true, .xdr_id = 1001 }); // the first application id is fine
+    var proto = b.build();
+    proto.deinit();
+}
+
+test "XDR: a proc-id too far above the base is XdrProcIdTooLarge (the slot table stays bounded)" {
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    // 1001 + 65536 = 66537 is one past the slot-table cap → rejected (a typo can't balloon the array);
+    // a dense pair (1001, 1002) builds a 2-slot table and dispatches fine (covered above).
+    try testing.expectError(error.XdrProcIdTooLarge, b.method("big", &api, Api.add, .{ .xdr = true, .xdr_id = 66537 }));
+    var proto = b.build();
+    proto.deinit();
+}
+
+const XfArgs = struct { size: i64 };
+const XfInterim = struct { size: i64 };
+const XfResult = struct { sent: i64, label: []const u8 };
+const XfApi = struct {
+    fn negotiate(_: *XfApi, args: XfArgs, _: *session_mod.RequestCtx(void)) !XfInterim {
+        return .{ .size = args.size };
+    }
+    fn transfer(_: *XfApi, args: XfArgs, ft: *const transfer_mod.FileTransfer, _: *session_mod.RequestCtx(void)) !XfResult {
+        _ = ft; // a real DOWNLOAD sendfiles on ft.fileno(); the test returns a canned result
+        return .{ .sent = args.size, .label = "ok" };
+    }
+};
+
+test "transfer: dispatch → a .transfer directive ($/transferReady); complete() over a mock fd → final response" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+    var api = XfApi{};
+    var b = Protocol(void).builder(testing.allocator, "t", "1.0.0");
+    try b.transferMethod("file.download", &api, XfApi.negotiate, XfApi.transfer, .download, .{});
+    var proto = b.build();
+    defer proto.deinit();
+    var sess = proto.newSession(null);
+
+    // Use `arena` as reply_alloc so the directive's completion state is arena-owned (freed at deinit).
+    const wire = "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"file.download\",\"params\":{\"size\":2048}}";
+    const d = proto.dispatch(arena, wire, &sess);
+    try testing.expect(d == .transfer);
+    try testing.expect(d.transfer.direction == .download);
+    try testing.expect(!d.transfer.af_unix);
+
+    // the $/transferReady envelope the transport sends before the handshake
+    const ready = try std.json.parseFromSliceLeaky(std.json.Value, arena, d.transfer.ready, .{});
+    try testing.expectEqualStrings("$/transferReady", ready.object.get("method").?.string);
+    const rp = ready.object.get("params").?.object;
+    try testing.expectEqualStrings(uid, rp.get("id").?.string);
+    try testing.expectEqualStrings("download", rp.get("direction").?.string);
+    try testing.expectEqual(@as(i64, 2048), rp.get("result").?.object.get("size").?.integer);
+
+    // complete() over a mock FileTransfer (no real fd) → the final response (params re-decoded from JSON)
+    const ft: transfer_mod.FileTransfer = .{ .fd = -1, .direction = .download, .af_unix = false, .result_json = "{}" };
+    const final = d.transfer.complete(arena, &ft).?;
+    const fv = try std.json.parseFromSliceLeaky(std.json.Value, arena, final, .{});
+    try testing.expectEqualStrings(uid, fv.object.get("id").?.string);
+    const result = fv.object.get("result").?.object;
+    try testing.expectEqual(@as(i64, 2048), result.get("sent").?.integer);
+    try testing.expectEqualStrings("ok", result.get("label").?.string);
 }

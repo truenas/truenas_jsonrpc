@@ -25,6 +25,9 @@ import msgspec  # noqa: E402
 from truenas_pyjsonrpc import (  # noqa: E402
     JSONRPCProtocol,
     JSONRPCMethod,
+    FilterableJSONRPCMethod,
+    JSONRPCFdTransferMethod,
+    TransferDirection,
     JsonRpcError,
     JSONRPCError,
     AuthorizationResponse,
@@ -32,6 +35,9 @@ from truenas_pyjsonrpc import (  # noqa: E402
     SessionLifecycle,
     SECRET,
 )
+from truenas_pyjsonrpc.transfer import FileTransfer  # noqa: E402
+from truenas_pyfilter import tnfilter  # noqa: E402  (the normative C filter engine — the `filter` oracle)
+from truenas_pyjsonrpc import xdr  # noqa: E402  (the normative XDR codec — emits the byte-exact `xdr` golden)
 
 
 # Deterministic subscription ids: pin uuid4 to a counter so the pub/sub golden's sub_id is reproducible
@@ -223,9 +229,45 @@ def audit_authorize(request, session_state, target=None):  # cancel passes targe
     return AuthorizationResponse(authorized=True)
 
 
+# --- filter protocol: a filterable query method; the handler push-downs through the normative C engine ---
+class FQueryArgs(msgspec.Struct):  # the (empty) base accepts — augmented with query-filters/query-options
+    pass
+
+
+class FEntry(msgspec.Struct):  # the per-record element type (drives codegen/openrpc; not used at runtime)
+    id: xdr.Hyper  # i64 on both wires: JSON ignores the marker; XDR encodes a hyper (matches Zig Entry.id)
+    name: str
+    ratio: float
+    active: bool
+    note: str | None = None
+
+
+# Byte-for-byte the same records as reference.zig's `filter_data`, so the Zig engine and this oracle agree.
+_FDATA = [
+    {"id": 1, "name": "alpha", "ratio": 0.5, "active": True, "note": "x"},
+    {"id": 2, "name": "beta", "ratio": 2.5, "active": False, "note": None},
+    {"id": 3, "name": "alpha", "ratio": 1.5, "active": True, "note": None},
+    {"id": 4, "name": "gamma", "ratio": 3.5, "active": False, "note": "y"},
+    {"id": 5, "name": "Alpha", "ratio": 0.25, "active": True, "note": "z"},
+]
+
+
+def fquery(request, session_state, request_state, filters, options):
+    # Push-down: stream the source through the compiled query (the C engine applies
+    # filters/order_by/offset/limit/count). The framework's finalize then unwraps count→int.
+    return tnfilter(_FDATA, filters=filters, options=options)
+
+
 def _strip_error_data(obj):
     if isinstance(obj, dict) and isinstance(obj.get("error"), dict):
-        obj["error"].pop("data", None)
+        err = obj["error"]
+        err.pop("data", None)  # strip impl-specific detail
+        # A filterable compile error's MESSAGE embeds the C engine's internal wording
+        # (query.py raises `f"invalid query: {e}"`) — an impl-specific detail like `data`.
+        # The asserted contract is INVALID_PARAMS with the canonical message; the Zig port
+        # returns that rather than replicate the C engine's text, so normalize it here.
+        if isinstance(err.get("message"), str) and err["message"].startswith("invalid query:"):
+            err["message"] = "Invalid params"
     return obj
 
 
@@ -294,12 +336,22 @@ PROTO_PUBSUB = JSONRPCProtocol(
     name="test",
     version="1.0.0",
 )
+PROTO_FILTER = JSONRPCProtocol(
+    [FilterableJSONRPCMethod("x.query", accepts=FQueryArgs, entry=FEntry, handler=fquery)],
+    name="test",
+    version="1.0.0",
+)
 PROTOS = {"open": PROTO_OPEN, "authz": PROTO_AUTHZ, "audit": PROTO_AUDIT,
-          "gated": PROTO_GATED, "gated_audit": PROTO_GATED_AUDIT, "pubsub": PROTO_PUBSUB}
+          "gated": PROTO_GATED, "gated_audit": PROTO_GATED_AUDIT, "pubsub": PROTO_PUBSUB,
+          "filter": PROTO_FILTER}
 
 UID = "123e4567-e89b-12d3-a456-426614174000"
 UID_UPPER = UID.upper()
 TARGET = "00000000-0000-4000-8000-0000000000aa"  # a $/cancelRequest target id (never in flight here)
+
+
+def _fq(params_json):  # a filterable `x.query` request wire with the given params
+    return '{"jsonrpc":"2.0","id":"%s","method":"x.query","params":%s}' % (UID, params_json)
 
 # (name, protocol, wire)
 CASES = [
@@ -352,6 +404,37 @@ CASES = [
     ("cancel_bad_params", "open", '{"jsonrpc":"2.0","id":"%s","method":"$/cancelRequest","params":{}}' % UID),
     ("cancel_denied", "authz", '{"jsonrpc":"2.0","id":"%s","method":"$/cancelRequest","params":{"target_id":"%s"}}' % (UID, TARGET)),
     ("cancel_unknown_target", "audit", '{"jsonrpc":"2.0","id":"%s","method":"$/cancelRequest","params":{"target_id":"%s"}}' % (UID, TARGET)),
+    # filter protocol — a filterable query method (x.query), filtered/ordered/counted by the normative C
+    # engine. Only cross-engine-safe inputs: every filter names a real field with a type-correct literal, so
+    # the typed Zig port (which is STRICTER — unknown field / type mismatch / dropped `~` are INVALID_PARAMS
+    # there but a silent no-match / regex-match in the dict-based C engine) agrees on the result. Those
+    # divergent inputs are Zig-only unit tests, not A/B cases. Result arrays compare order-sensitively, so
+    # record ordering is part of the asserted contract.
+    ("filter_all", "filter", _fq("{}")),
+    ("filter_eq", "filter", _fq('{"query-filters":[["name","=","alpha"]]}')),
+    ("filter_ci_eq", "filter", _fq('{"query-filters":[["name","C=","alpha"]]}')),
+    ("filter_gt_float", "filter", _fq('{"query-filters":[["ratio",">",1.5]]}')),
+    ("filter_ge_int", "filter", _fq('{"query-filters":[["id",">=",4]]}')),
+    ("filter_in", "filter", _fq('{"query-filters":[["id","in",[1,4]]]}')),
+    ("filter_nin", "filter", _fq('{"query-filters":[["id","nin",[1,4]]]}')),
+    ("filter_startswith", "filter", _fq('{"query-filters":[["name","^","al"]]}')),
+    ("filter_endswith", "filter", _fq('{"query-filters":[["name","$","ha"]]}')),
+    ("filter_rin", "filter", _fq('{"query-filters":[["name","rin","ph"]]}')),
+    ("filter_bool", "filter", _fq('{"query-filters":[["active","=",true]]}')),
+    ("filter_null_eq", "filter", _fq('{"query-filters":[["note","=",null]]}')),
+    ("filter_null_ne", "filter", _fq('{"query-filters":[["note","!=",null]]}')),
+    ("filter_implicit_and", "filter", _fq('{"query-filters":[["name","=","alpha"],["active","=",true]]}')),
+    ("filter_or", "filter", _fq('{"query-filters":[["OR",[["id","=",1],["id","=",4]]]]}')),
+    ("filter_and_group_in_or", "filter", _fq('{"query-filters":[["OR",[[["name","=","alpha"],["active","=",true]],["id","=",4]]]]}')),
+    ("filter_count", "filter", _fq('{"query-filters":[["name","=","alpha"]],"query-options":{"count":true}}')),
+    ("filter_count_ignores_paging", "filter", _fq('{"query-filters":[],"query-options":{"count":true,"offset":1,"limit":2}}')),
+    ("filter_order_desc", "filter", _fq('{"query-filters":[],"query-options":{"order_by":["-ratio"]}}')),
+    ("filter_order_paging", "filter", _fq('{"query-filters":[],"query-options":{"order_by":["id"],"offset":1,"limit":2}}')),
+    ("filter_order_multi", "filter", _fq('{"query-filters":[],"query-options":{"order_by":["name","-id"]}}')),
+    ("filter_order_nulls_first", "filter", _fq('{"query-filters":[],"query-options":{"order_by":["nulls_first:note"]}}')),
+    ("filter_order_nulls_last", "filter", _fq('{"query-filters":[],"query-options":{"order_by":["nulls_last:note"]}}')),
+    ("filter_invalid_op", "filter", _fq('{"query-filters":[["name","??","a"]]}')),
+    ("filter_invalid_arity", "filter", _fq('{"query-filters":[["name","="]]}')),
 ]
 
 # Delivery cases: subscribe, then the SERVER publishes to the topic; the drained outbound notification
@@ -383,10 +466,165 @@ SEQ_CASES = [
 
 
 def _resp(out):
-    response = None if out is None else json.loads(out)
-    if isinstance(response, dict) and isinstance(response.get("error"), dict):
-        response["error"].pop("data", None)  # strip impl-specific detail
-    return response
+    return None if out is None else _strip_error_data(json.loads(out))
+
+
+# --- xdr protocol: the byte-exact binary-wire golden, NORMATIVELY produced by the Python
+#     JSONRPCProtocol's XDR dispatch (truenas_pyjsonrpc.xdr is the codec). The request frame is
+#     built with xdr.py, then DISPATCHED through the reference server's binary path, so the golden
+#     reply is exactly what the server emits — the Zig binary wire must reproduce these bytes. ---
+class XdrAddArgs(msgspec.Struct):
+    a: xdr.Int32
+    b: xdr.Int32
+
+
+class XdrAddResult(msgspec.Struct):
+    sum: xdr.Hyper
+    label: str
+
+
+class XdrEcho(msgspec.Struct):
+    items: list[xdr.Int32]
+    note: str | None
+    flag: bool
+
+
+def xdr_add(request, session_state, request_state):
+    return XdrAddResult(sum=request.a + request.b, label="ok")
+
+
+def xdr_echo(request, session_state, request_state):
+    return XdrEcho(items=request.items, note=request.note, flag=request.flag)
+
+
+# proc-ids 1001/1002 mirror reference.zig's buildXdr (xdr.add → 1001, xdr.echo → 1002; 0..=1000 are
+# reserved for protocol control messages).
+PROTO_XDR = JSONRPCProtocol(
+    [JSONRPCMethod("xdr.add", accepts=XdrAddArgs, returns=XdrAddResult, handler=xdr_add,
+                   xdr=True, xdr_id=1001),
+     JSONRPCMethod("xdr.echo", accepts=XdrEcho, returns=XdrEcho, handler=xdr_echo,
+                   xdr=True, xdr_id=1002),
+     # Filterable over XDR (proc 1003): same FEntry + tnfilter as the JSON filter A/B, binary wire.
+     FilterableJSONRPCMethod("xdr.query", accepts=FQueryArgs, entry=FEntry, handler=fquery,
+                             xdr=True, xdr_id=1003)],
+    name="test", version="1.0.0")
+
+_XDR_UID = bytes.fromhex("123e4567e89b12d3a456426614174000")
+
+
+def _xdr_cases():
+    """Byte-exact request/reply frame pairs the Zig XDR dispatch must reproduce. Each request is
+    encoded with the normative xdr.py codec and then dispatched through PROTO_XDR's binary-wire
+    path, so the golden reply is what the reference server actually emits (not a hand-assembled
+    frame). The Zig A/B decodes the request, runs the matching handler, re-encodes, and asserts
+    the wire equals these bytes."""
+    cases = []
+
+    def case(name, proc_id, args, args_t):
+        req = xdr.request_frame(proc_id, _XDR_UID, xdr.encode(args, args_t))
+        reply = PROTO_XDR.dispatch(req, PROTO_XDR.new_session())
+        cases.append({"name": name, "request": req.hex(), "reply": reply.hex()})
+
+    case("xdr_add", 1001, XdrAddArgs(a=2, b=3), XdrAddArgs)
+    case("xdr_echo", 1002, XdrEcho(items=[1, 2, 3], note="hi", flag=True), XdrEcho)
+    case("xdr_echo_empty", 1002, XdrEcho(items=[], note=None, flag=False), XdrEcho)
+    # An error reply: an unknown proc-id → a METHOD_NOT_FOUND frame (status=1, int code + the
+    # JSON {code,message} detail). Proves the Zig binary error frame matches byte-for-byte too.
+    unknown = xdr.request_frame(9999, _XDR_UID, b"")
+    cases.append({"name": "xdr_unknown_proc", "request": unknown.hex(),
+                  "reply": PROTO_XDR.dispatch(unknown, PROTO_XDR.new_session()).hex()})
+
+    # Filterable over XDR (xdr.query, proc 1003): the augmented accepts ride as XDR<base> +
+    # XDR<XdrQueryOptions> + XDR<query-filters as JSON text>; the result is XDR<list[entry]> or a
+    # XDR<hyper> (count). The C `tnfilter` engine is the same normative oracle as the JSON filter A/B.
+    def qcase(name, opts, filters_json):
+        params = (xdr.encode(FQueryArgs(), FQueryArgs)
+                  + xdr.encode(opts, xdr.XdrQueryOptions)
+                  + xdr.encode(filters_json, str))
+        req = xdr.request_frame(1003, _XDR_UID, params)
+        reply = PROTO_XDR.dispatch(req, PROTO_XDR.new_session())
+        cases.append({"name": name, "request": req.hex(), "reply": reply.hex()})
+
+    qcase("xdr_filter_eq", xdr.XdrQueryOptions(), '[["name","=","alpha"]]')          # → list of 2 (ids 1,3)
+    qcase("xdr_filter_count", xdr.XdrQueryOptions(count=True), '[["name","=","alpha"]]')  # → hyper 2
+    qcase("xdr_filter_order_desc", xdr.XdrQueryOptions(order_by=["-ratio"]), "[]")    # → all 5, ratio desc
+    return cases
+
+
+# --- transfer protocol: raw-fd transfer methods. The sans-I/O dispatch returns a `Transfer` directive (the
+#     `$/transferReady` envelope + a complete() thunk); the actual fd handoff is the server's, exercised
+#     end-to-end in tests/test_transfer.py. Here the oracle drives the directive over a MOCK FileTransfer
+#     (no real fd) so the Zig dispatch can reproduce the ready envelope + the complete() final response. ---
+class TDlArgs(msgspec.Struct):
+    size: int
+
+
+class TDlInterim(msgspec.Struct):
+    size: int
+
+
+class TDlResult(msgspec.Struct):
+    sent: int
+    label: str
+
+
+class TUlArgs(msgspec.Struct):
+    size: int
+
+
+class TUlResult(msgspec.Struct):
+    received: int
+    ok: bool
+
+
+def t_dl_negotiate(request, session_state):
+    return TDlInterim(size=request.size)
+
+
+def t_dl_transfer(ft):
+    # A real DOWNLOAD os.sendfiles on ft.fileno(); the oracle returns a deterministic canned result.
+    return TDlResult(sent=ft.params.size, label="ok")
+
+
+def t_ul_negotiate(request, session_state):
+    return True  # the upload interim is a bare bool (ready to receive)
+
+
+def t_ul_transfer(ft):
+    return TUlResult(received=ft.params.size, ok=True)
+
+
+class _MockFT(FileTransfer):
+    def fileno(self):
+        return -1
+
+
+PROTO_TRANSFER = JSONRPCProtocol([
+    JSONRPCFdTransferMethod("file.download", accepts=TDlArgs, returns=TDlResult,
+                            direction=TransferDirection.DOWNLOAD,
+                            negotiate=t_dl_negotiate, transfer=t_dl_transfer, pre_auth=True),
+    JSONRPCFdTransferMethod("file.upload", accepts=TUlArgs, returns=TUlResult,
+                            direction=TransferDirection.UPLOAD,
+                            negotiate=t_ul_negotiate, transfer=t_ul_transfer, pre_auth=True),
+], name="test", version="1.0.0")
+
+
+def _transfer_cases():
+    """For each transfer method: dispatch → the `$/transferReady` envelope + the complete() final response
+    (over a mock FileTransfer). The Zig dispatch must reproduce both `ready` and `final` structurally."""
+    cases = []
+
+    def case(name, wire):
+        d = PROTO_TRANSFER.dispatch(wire, PROTO_TRANSFER.new_session())
+        ft = _MockFT(d.direction, d.params, d.session_state, result=d.ready["params"]["result"])
+        # `final`'s `result` is a msgspec Struct; to_builtins it (the ready dict is already plain).
+        cases.append({"name": name, "wire": wire,
+                      "ready": msgspec.to_builtins(d.ready),
+                      "final": msgspec.to_builtins(d.complete(ft))})
+
+    case("transfer_download", '{"jsonrpc":"2.0","id":"%s","method":"file.download","params":{"size":2048}}' % UID)
+    case("transfer_upload", '{"jsonrpc":"2.0","id":"%s","method":"file.upload","params":{"size":4096}}' % UID)
+    return cases
 
 
 def main():
@@ -432,10 +670,14 @@ def main():
 
     out_path = os.path.join(HERE, "golden.json")
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
+    xdr_cases = _xdr_cases()
+    transfer_cases = _transfer_cases()
     with open(out_path, "w") as f:
-        json.dump({"cases": records}, f, indent=2, sort_keys=True)
+        json.dump({"cases": records, "xdr_cases": xdr_cases, "transfer_cases": transfer_cases},
+                  f, indent=2, sort_keys=True)
         f.write("\n")
-    print(f"wrote {len(records)} cases to {os.path.relpath(out_path)}")
+    print(f"wrote {len(records)} cases + {len(xdr_cases)} xdr + {len(transfer_cases)} transfer "
+          f"cases to {os.path.relpath(out_path)}")
 
 
 if __name__ == "__main__":

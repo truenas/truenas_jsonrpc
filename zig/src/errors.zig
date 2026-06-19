@@ -35,6 +35,15 @@ pub const BuildError = error{
     ReservedMethodName,
     SessionSetupNotClientServer,
     SessionSetupMissingReturns,
+    /// Two XDR-enabled methods share an `xdr_id` proc-id — its dispatch slot is already occupied (also
+    /// caught at codegen by `gen.py`).
+    DuplicateXdrId,
+    /// An `xdr_id` falls in the reserved 0..=1000 band (kept for protocol control messages over the
+    /// binary wire); an application method must use a proc-id >= 1001. (Also caught by `gen.py`.)
+    ReservedXdrProcId,
+    /// An `xdr_id` so far above the application base (1001) that the dispatch slot table — sized to the
+    /// max proc-id so lookup is a bare array index — would balloon. Keep proc-ids dense near 1001.
+    XdrProcIdTooLarge,
     OutOfMemory,
 };
 

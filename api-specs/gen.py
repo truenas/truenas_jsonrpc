@@ -72,7 +72,30 @@ API_SPEC_SCHEMA = {
                     "cancellable": {"type": "boolean"},
                     "roles": {"type": "array", "items": {"type": "string"}},
                     "direction": {"enum": ["client_server", "server_client"]},
+                    # A filterable (query) method: codegen emits `b.filterableMethod` and the result is the
+                    # `entry` element type streamed through a FilterSink (no `result` — it is array-of-entry).
+                    "filterable": {"type": "boolean"},
+                    "entry": {"type": "object"},
+                    # XDR binary-wire opt-in: the method is ALSO reachable over the RFC-4506 wire,
+                    # addressed by a spec-assigned proc-id (u32). `xdr` ⇒ `xdr_id` required (allOf below)
+                    # and unique across the spec (validate()). Proc-ids 0..=1000 are RESERVED for
+                    # protocol control messages (the `$/` namespace over the binary wire), so an
+                    # application method must use `xdr_id` >= 1001.
+                    "xdr": {"type": "boolean"},
+                    "xdr_id": {"type": "integer", "minimum": 1001},
                 },
+                # filterable ⇒ `entry` is required and `result` is forbidden (the result shape is derived);
+                # xdr ⇒ xdr_id is required (the proc-id that addresses the method on the binary wire).
+                "allOf": [
+                    {
+                        "if": {"required": ["filterable"], "properties": {"filterable": {"const": True}}},
+                        "then": {"required": ["entry"], "not": {"required": ["result"]}},
+                    },
+                    {
+                        "if": {"required": ["xdr"], "properties": {"xdr": {"const": True}}},
+                        "then": {"required": ["xdr_id"]},
+                    },
+                ],
             },
         },
     },
@@ -197,6 +220,9 @@ def emit_opts(m: dict) -> str:
         parts.append(f".audit_message = {zstr(m['auditMessage'])}")
     if m.get("roles"):
         parts.append(".roles = &.{ " + ", ".join(zstr(r) for r in m["roles"]) + " }")
+    if m.get("xdr"):
+        parts.append(".xdr = true")
+        parts.append(f".xdr_id = {int(m['xdr_id'])}")
     return ".{}" if not parts else ".{ " + ", ".join(parts) + " }"
 
 
@@ -231,12 +257,29 @@ def validate(spec: dict) -> None:
             die(f"method {wire!r} handler {m['handler']!r} is not a valid Zig identifier")
         if "params" not in m:
             die(f"method {wire!r} must declare 'params' (use an empty-object $def for no params)")
-        for slot in ("params", "result"):
+        for slot in ("params", "result", "entry"):
             s = m.get(slot)
             if isinstance(s, dict) and "$ref" in s:
                 rn = ref_name(s)
                 if rn not in defs:
                     die(f"method {wire!r} {slot} $ref to unknown $defs type: {rn!r}")
+    # XDR proc-ids are the binary wire's addressing; they MUST be unique across xdr-enabled methods. A
+    # duplicate would collide in the runtime slot table (proc-id → method, indexed by proc-id; caught
+    # there as error.DuplicateXdrId), but failing here gives a spec-level diagnostic before codegen.
+    seen_ids: dict = {}
+    for wire, m in spec["methods"].items():
+        if not m.get("xdr"):
+            continue
+        xid = m.get("xdr_id")
+        # 0..=1000 are reserved for protocol control messages (the `$/` namespace over the binary
+        # wire); an application method must use a proc-id above that band. (Also enforced by the
+        # meta-schema `minimum`, but repeated here for the no-jsonschema path + a clearer message.)
+        if isinstance(xid, int) and xid <= 1000:
+            die(f"method {wire!r} xdr_id {xid} is reserved (0..=1000 are for protocol control "
+                f"messages); use an id >= 1001")
+        if xid in seen_ids:
+            die(f"method {wire!r} xdr_id {xid} collides with method {seen_ids[xid]!r}")
+        seen_ids[xid] = wire
 
 
 def generate(spec: dict, spec_basename: str) -> str:
@@ -258,7 +301,12 @@ def generate(spec: dict, spec_basename: str) -> str:
     body.append("pub fn register(b: anytype, handlers: anytype) !void {")
     body.append("    const H = @TypeOf(handlers.*);")
     for wire, m in spec["methods"].items():
-        body.append(f"    try b.method({zstr(wire)}, handlers, H.{m['handler']}, {emit_opts(m)});")
+        if m.get("filterable"):
+            # A filterable method threads its `entry` element type (a $def emitted above) explicitly.
+            entry = ref_name(m["entry"])
+            body.append(f"    try b.filterableMethod({zstr(wire)}, handlers, H.{m['handler']}, {entry}, {emit_opts(m)});")
+        else:
+            body.append(f"    try b.method({zstr(wire)}, handlers, H.{m['handler']}, {emit_opts(m)});")
     body.append("}")
 
     text = "\n".join(body) + "\n"
@@ -343,11 +391,31 @@ def _collect_component_names(public: dict, defs: dict) -> "list":
             visit_refs(ps)
 
     for m in public.values():
-        for slot in ("params", "result", "notifies"):
+        for slot in ("params", "result", "notifies", "entry"):
             s = m.get(slot)
             if isinstance(s, dict):
                 visit_refs(s)
     return seen
+
+
+def _query_param_descriptors() -> list:
+    """The two augmented content descriptors a filterable request carries — the Zig port's REDUCED query
+    surface (get + select dropped). Both optional. (Filterable methods are scoped out of the openrpc_gen.py
+    A/B precisely because this differs from Python's full QueryOptions; see openrpc_ab.py.)"""
+    return [
+        {"name": "query-filters", "required": False,
+         "schema": {"type": "array", "items": {"type": "array"}, "default": []}},
+        {"name": "query-options", "required": False, "schema": {
+            "type": "object",
+            "properties": {
+                "count": {"type": "boolean", "default": False},
+                "order_by": {"anyOf": [{"type": "array", "items": {"type": "string"}}, {"type": "null"}],
+                             "default": None},
+                "offset": {"type": "integer", "default": 0},
+                "limit": {"type": "integer", "default": 0},
+            },
+        }},
+    ]
 
 
 def _method_object(wire: str, m: dict, defs: dict) -> dict:
@@ -356,6 +424,9 @@ def _method_object(wire: str, m: dict, defs: dict) -> dict:
     params = [{"name": p, "required": p in required, "schema": _property_schema(ps, p in required, defs)}
               for p, ps in params_def.get("properties", {}).items()]
     params.sort(key=lambda d: not d["required"])  # required params before optional (stable)
+    filterable = bool(m.get("filterable"))
+    if filterable:  # the framework augments the request with the query fields (appended after the base params)
+        params = params + _query_param_descriptors()
 
     obj: dict = {"name": wire}
     if m.get("summary"):
@@ -363,7 +434,12 @@ def _method_object(wire: str, m: dict, defs: dict) -> dict:
     obj["paramStructure"] = "by-name"
     obj["params"] = params
     direction = m.get("direction", "client_server")
-    if direction != "server_client" and isinstance(m.get("result"), dict):
+    if filterable:  # result is array-of-entry (the count→int / no-match variants are flagged via x-query)
+        entry_rn = ref_name(m["entry"])
+        obj["result"] = {"name": entry_rn,
+                         "schema": {"type": "array", "items": {"$ref": _SCHEMAS_REF.format(name=entry_rn)}}}
+        obj["x-query"] = True
+    elif direction != "server_client" and isinstance(m.get("result"), dict):
         rn = ref_name(m["result"])
         obj["result"] = {"name": rn, "schema": {"$ref": _SCHEMAS_REF.format(name=rn)}}
     obj["x-direction"] = direction

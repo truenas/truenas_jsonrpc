@@ -28,6 +28,32 @@ pub const GAuthAck = struct { token: trpc.Secret([]const u8), stage: []const u8 
 pub const GAuthContinue = struct { otp: []const u8 };
 pub const SubArgs = struct { channel: []const u8 };
 pub const AlertEvent = struct { level: []const u8, text: []const u8 }; // the topic's `notifies` payload
+// `filter` protocol — a filterable query method. `QueryArgs` is the (empty) base accepts; `Entry` is the
+// per-record element type (flat scalars + an optional, to exercise every operator and the null guards).
+pub const QueryArgs = struct {};
+pub const Entry = struct { id: i64, name: []const u8, ratio: f64, active: bool, note: ?[]const u8 = null };
+// `xdr` protocol — the byte-exact binary-wire methods. Types mirror generate.py's Xdr* Structs (i32, hyper,
+// str=opaque, list=array, optional); both wires emit canonical XDR, the A/B compares exact bytes.
+pub const XdrAddArgs = struct { a: i32, b: i32 };
+pub const XdrAddResult = struct { sum: i64, label: []const u8 };
+pub const XdrEcho = struct { items: []const i32, note: ?[]const u8, flag: bool };
+// `transfer` protocol — raw-fd transfer methods; types mirror generate.py's T* Structs. The transfer
+// handler returns a canned result (the A/B exercises the directive + complete(), not the fd I/O).
+pub const TDlArgs = struct { size: i64 };
+pub const TDlInterim = struct { size: i64 };
+pub const TDlResult = struct { sent: i64, label: []const u8 };
+pub const TUlArgs = struct { size: i64 };
+pub const TUlResult = struct { received: i64, ok: bool };
+
+/// The fixed dataset the streaming `query` handler pushes through the sink — byte-for-byte the same records
+/// as generate.py's `_FDATA`, so the Python+C oracle and the Zig engine produce identical filtered output.
+const filter_data = [_]Entry{
+    .{ .id = 1, .name = "alpha", .ratio = 0.5, .active = true, .note = "x" },
+    .{ .id = 2, .name = "beta", .ratio = 2.5, .active = false, .note = null },
+    .{ .id = 3, .name = "alpha", .ratio = 1.5, .active = true, .note = null },
+    .{ .id = 4, .name = "gamma", .ratio = 3.5, .active = false, .note = "y" },
+    .{ .id = 5, .name = "Alpha", .ratio = 0.25, .active = true, .note = "z" },
+};
 
 const Ctx = trpc.RequestCtx(void);
 const Builder = trpc.Protocol(void).Builder;
@@ -89,6 +115,38 @@ pub const Api = struct {
     }
     fn gauthContinue(_: *Api, _: GAuthContinue, _: *Ctx) !trpc.SetupOutcome(GAuthAck) {
         return .{ .lifecycle = .established, .result = .{ .token = .{ .value = "t1" }, .stage = "established" } };
+    }
+    // A streaming filterable handler (mirrors generate.py's `fquery`, which push-downs through tnfilter):
+    // emit each record; the sink tests-then-serializes only matches and stops early once a limit is hit.
+    fn query(_: *Api, _: QueryArgs, _: *Ctx, sink: *trpc.FilterSink(Entry)) !void {
+        for (filter_data) |e| {
+            if (!sink.wantMore()) break;
+            try sink.emit(e);
+        }
+    }
+    // XDR binary-wire handlers (typed Accepts/Returns; the same handler shape as any method).
+    fn xdrAdd(_: *Api, args: XdrAddArgs, _: *Ctx) !XdrAddResult {
+        return .{ .sum = @as(i64, args.a) + args.b, .label = "ok" };
+    }
+    fn xdrEcho(_: *Api, args: XdrEcho, _: *Ctx) !XdrEcho {
+        return args; // echo — re-encodes the decoded struct
+    }
+    // Raw-fd transfer handlers — negotiate returns the $/transferReady interim; transfer returns a canned
+    // result (a real one would sendfile/recvfile on ft.fileno()). Match generate.py's t_* handlers.
+    fn tDlNegotiate(_: *Api, args: TDlArgs, _: *Ctx) !TDlInterim {
+        return .{ .size = args.size };
+    }
+    fn tDlTransfer(_: *Api, args: TDlArgs, ft: *const trpc.FileTransfer, _: *Ctx) !TDlResult {
+        _ = ft;
+        return .{ .sent = args.size, .label = "ok" };
+    }
+    fn tUlNegotiate(_: *Api, args: TUlArgs, _: *Ctx) !bool {
+        _ = args;
+        return true; // the upload interim is a bare bool
+    }
+    fn tUlTransfer(_: *Api, args: TUlArgs, ft: *const trpc.FileTransfer, _: *Ctx) !TUlResult {
+        _ = ft;
+        return .{ .received = args.size, .ok = true };
     }
 };
 
@@ -211,6 +269,37 @@ pub fn buildPubSub(gpa: std.mem.Allocator, idg: *FixedIdGen) !trpc.Protocol(void
     return b.build();
 }
 
+/// `filter` — a single filterable query method (`x.query`) whose handler streams `filter_data` through the
+/// `FilterSink`. The golden for these cases is produced by driving the normative Python+C `tnfilter` engine
+/// over the identical dataset (generate.py PROTO_FILTER), so the filtered/ordered/counted output must match.
+pub fn buildFilter(gpa: std.mem.Allocator, api: *Api) !trpc.Protocol(void) {
+    var b = trpc.Protocol(void).builder(gpa, "test", "1.0.0");
+    try b.filterableMethod("x.query", api, Api.query, Entry, .{});
+    return b.build();
+}
+
+/// `xdr` — the binary-wire methods (xdr.add proc 1001, xdr.echo proc 1002; 0..=1000 are reserved for
+/// protocol control messages). Proven against generate.py's byte-exact golden, where the Python
+/// `xdr.py` codec is the normative reference.
+pub fn buildXdr(gpa: std.mem.Allocator, api: *Api) !trpc.Protocol(void) {
+    var b = trpc.Protocol(void).builder(gpa, "test", "1.0.0");
+    try b.method("xdr.add", api, Api.xdrAdd, .{ .xdr = true, .xdr_id = 1001 });
+    try b.method("xdr.echo", api, Api.xdrEcho, .{ .xdr = true, .xdr_id = 1002 });
+    // Filterable over the binary wire (proc 1003): streams the same `filter_data` through the FilterSink,
+    // emitting the XDR result. Byte-exact against generate.py's `tnfilter`-driven golden.
+    try b.filterableMethod("xdr.query", api, Api.query, Entry, .{ .xdr = true, .xdr_id = 1003 });
+    return b.build();
+}
+
+/// `transfer` — raw-fd transfer methods (download + upload). Proven against generate.py's directive golden:
+/// the Zig dispatch must reproduce the `$/transferReady` envelope + the `complete()` final response.
+pub fn buildTransfer(gpa: std.mem.Allocator, api: *Api) !trpc.Protocol(void) {
+    var b = trpc.Protocol(void).builder(gpa, "test", "1.0.0");
+    try b.transferMethod("file.download", api, Api.tDlNegotiate, Api.tDlTransfer, .download, .{ .pre_auth = true });
+    try b.transferMethod("file.upload", api, Api.tUlNegotiate, Api.tUlTransfer, .upload, .{ .pre_auth = true });
+    return b.build();
+}
+
 /// Hand-written handler bodies for the SPEC-GENERATED `audit` methods — note the param/return types are
 /// the GENERATED `rpc_gen.*` structs, and the bodies match `Api.login`/`ping`/`crash` exactly. `pub` so
 /// the generated `rpc_gen.register` can bind `H.<handler>` across the module boundary.
@@ -224,6 +313,15 @@ pub const GenHandlers = struct {
     }
     pub fn crash(_: *@This(), _: rpc_gen.CrashArgs, _: *Ctx) !rpc_gen.PingResult {
         return error.Kaboom;
+    }
+    // The SPEC-GENERATED filterable handler — streams the same `filter_data`, converted to the generated
+    // `rpc_gen.Entry` (identical shape). Routing the filter A/B cases through this proves the codegen-emitted
+    // `b.filterableMethod` registration behaves identically to the hand-written `buildFilter`.
+    pub fn query(_: *@This(), _: rpc_gen.QueryArgs, _: *Ctx, sink: *trpc.FilterSink(rpc_gen.Entry)) !void {
+        for (filter_data) |e| {
+            if (!sink.wantMore()) break;
+            try sink.emit(.{ .id = e.id, .name = e.name, .ratio = e.ratio, .active = e.active, .note = e.note });
+        }
     }
     // Not a method (3 params but `*Session`, no error union) — wired as the authorizer hook, not collected.
     pub fn authorize(_: *@This(), request: trpc.RequestInfo, _: *trpc.Session(void), _: ?*trpc.Session(void)) trpc.AuthorizationResponse {

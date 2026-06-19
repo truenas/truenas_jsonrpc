@@ -42,7 +42,12 @@ const Case = struct {
     steps: []Step = &.{},
     delivery: ?Delivery = null,
 };
-const Golden = struct { cases: []Case };
+/// One byte-exact XDR case: a request frame + the reply frame the Zig dispatch must reproduce (both hex).
+const XdrCase = struct { name: []const u8, request: []const u8, reply: []const u8 };
+/// One transfer case: a request wire + the `$/transferReady` envelope (`ready`) the directive carries and
+/// the `complete()` final response (`final`) — both compared structurally to the Zig dispatch's output.
+const TransferCase = struct { name: []const u8, wire: []const u8, ready: std.json.Value, final: std.json.Value };
+const Golden = struct { cases: []Case, xdr_cases: []XdrCase = &.{}, transfer_cases: []TransferCase = &.{} };
 
 fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
     if (a == null and b == null) return true;
@@ -63,6 +68,9 @@ fn dispatchToValue(proto: *trpc.Protocol(void), arena: std.mem.Allocator, sess: 
         // A subscribe directive: the golden compares the ack reply (sub_id + topic routing are a
         // transport concern, exercised in the M2b delivery suite, not in this response comparison).
         .subscribe => |s| std.json.parseFromSliceLeaky(std.json.Value, arena, s.reply, .{}) catch null,
+        // A transfer directive: the `$/transferReady` envelope is the "response" here (the handshake +
+        // complete() are exercised by the dedicated transfer A/B below).
+        .transfer => |t| std.json.parseFromSliceLeaky(std.json.Value, arena, t.ready, .{}) catch null,
     };
 }
 
@@ -120,6 +128,10 @@ test "A/B differential against the Python oracle" {
     var idg = reference.FixedIdGen{};
     var pubsub_proto = try reference.buildPubSub(std.testing.allocator, &idg);
     defer pubsub_proto.deinit();
+    // `filter` — a filterable query method whose handler streams a fixed dataset through the FilterSink;
+    // the golden is the normative Python+C `tnfilter` output over the identical data.
+    var filter_proto = try reference.buildFilter(std.testing.allocator, &api);
+    defer filter_proto.deinit();
     // A single-threaded Io backend drives the transport's (Io-aware) delivery in the delivery cases —
     // all ops are non-blocking here, so single-threaded suffices (the blocking poll is unit-tested apart).
     var iot: std.Io.Threaded = .init_single_threaded;
@@ -129,8 +141,10 @@ test "A/B differential against the Python oracle" {
     var saw_steps = false; // anti-vacuity: at least one stateful multi-step sequence runs
     var saw_generated = false; // anti-vacuity: the spec-generated path is actually exercised
     var saw_delivery = false; // anti-vacuity: at least one pub/sub delivery (subscribe→publish→drain) runs
+    var saw_filter = false; // anti-vacuity: at least one filterable (x.query) case runs
     var failures: usize = 0;
     for (golden.cases) |case| {
+        if (std.mem.eql(u8, case.protocol, "filter")) saw_filter = true;
         const is_audit = std.mem.eql(u8, case.protocol, "audit");
         const is_gauth = std.mem.eql(u8, case.protocol, "gated_audit");
         const proto = if (is_audit)
@@ -143,6 +157,8 @@ test "A/B differential against the Python oracle" {
             &gated_proto
         else if (std.mem.eql(u8, case.protocol, "pubsub"))
             &pubsub_proto
+        else if (std.mem.eql(u8, case.protocol, "filter"))
+            &filter_proto
         else
             &open_proto;
         // The capturing sink for this protocol (null when the protocol has no audit sink → no records).
@@ -234,8 +250,9 @@ test "A/B differential against the Python oracle" {
             std.debug.print("A/B mismatch [{s}] resp_ok={} audits_ok={} (want {d} audits, have {d})\n  wire: {s}\n", .{ case.name, resp_ok, audits_ok, case.audits.len, have_audits.len, case.wire });
         }
 
-        // Re-run audit cases through the spec-generated protocol; it must match the golden identically.
-        if (is_audit) {
+        // Re-run audit AND filter cases through the spec-generated protocol; it must match the golden
+        // identically — proving the codegen-emitted `b.method` / `b.filterableMethod` == hand-written.
+        if (is_audit or std.mem.eql(u8, case.protocol, "filter")) {
             saw_generated = true;
             gen_cap.records.clearRetainingCapacity();
             var gsess = gen_proto.newSession(null);
@@ -253,6 +270,7 @@ test "A/B differential against the Python oracle" {
     try std.testing.expect(saw_steps);
     try std.testing.expect(saw_generated);
     try std.testing.expect(saw_delivery);
+    try std.testing.expect(saw_filter);
 
     // Directive teeth: the loop above compares only the ack *value* (`dispatchToValue` collapses the
     // directive). Assert here that a subscribe actually yields a `.subscribe` DIRECTIVE carrying the
@@ -318,7 +336,140 @@ test "$/describe serves the generated OpenRPC document" {
             try std.testing.expect(result.object.get("methods").? == .array);
             try std.testing.expect(result.object.get("components").?.object.get("schemas") != null);
             try std.testing.expect(result.object.get("components").?.object.get("errors") != null);
+
+            // Focused filterable-shape proof (these methods are scoped out of the openrpc_gen.py A/B, so
+            // assert their contract here): x.query is `x-query:true`, result is an array of `Entry`, and its
+            // query-options lists EXACTLY the four kept options (get + select dropped).
+            var xq: ?std.json.Value = null;
+            for (result.object.get("methods").?.array.items) |mv| {
+                if (std.mem.eql(u8, mv.object.get("name").?.string, "x.query")) xq = mv;
+            }
+            try std.testing.expect(xq != null);
+            try std.testing.expect(xq.?.object.get("x-query").?.bool);
+            const res_schema = xq.?.object.get("result").?.object.get("schema").?.object;
+            try std.testing.expectEqualStrings("array", res_schema.get("type").?.string);
+            try std.testing.expectEqualStrings("#/components/schemas/Entry", res_schema.get("items").?.object.get("$ref").?.string);
+            var qopts: ?std.json.Value = null;
+            for (xq.?.object.get("params").?.array.items) |pv| {
+                if (std.mem.eql(u8, pv.object.get("name").?.string, "query-options")) qopts = pv.object.get("schema");
+            }
+            const qprops = qopts.?.object.get("properties").?.object;
+            try std.testing.expectEqual(@as(usize, 4), qprops.count());
+            inline for (.{ "count", "order_by", "offset", "limit" }) |k|
+                try std.testing.expect(qprops.get(k) != null);
         },
         else => try std.testing.expect(false),
     }
+}
+
+test "XDR A/B: Zig binary-wire dispatch reproduces the Python byte-exact frames" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const golden = try std.json.parseFromSliceLeaky(Golden, arena, golden_json, .{ .ignore_unknown_fields = true });
+    try std.testing.expect(golden.xdr_cases.len >= 3); // anti-vacuity
+
+    var api = reference.Api{};
+    var proto = try reference.buildXdr(std.testing.allocator, &api);
+    defer proto.deinit();
+
+    var failures: usize = 0;
+    for (golden.xdr_cases) |c| {
+        const req = try arena.alloc(u8, c.request.len / 2);
+        _ = try std.fmt.hexToBytes(req, c.request);
+        const exp = try arena.alloc(u8, c.reply.len / 2);
+        _ = try std.fmt.hexToBytes(exp, c.reply);
+
+        var sess = proto.newSession(null);
+        switch (proto.dispatch(arena, req, &sess)) {
+            .reply => |got| if (!std.mem.eql(u8, got, exp)) {
+                failures += 1;
+                std.debug.print("XDR A/B [{s}]: reply bytes differ (want {d}, got {d})\n", .{ c.name, exp.len, got.len });
+            },
+            else => {
+                failures += 1;
+                std.debug.print("XDR A/B [{s}]: no reply\n", .{c.name});
+            },
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
+}
+
+test "XDR codegen: the spec-emitted `.xdr`/`.xdr_id` opt-in yields a working binary-wire method (generated ping, proc 1001)" {
+    // Closes the codegen loop: `ping` carries `"xdr": true, "xdr_id": 1001` in sample.json, so gen.py emits
+    // `b.method("ping", …, .{ .xdr = true, .xdr_id = 1001 })`. Dispatch the generated method over the binary
+    // wire and byte-compare the reply — proving the emitted opts produce a real XDR method, not just compile.
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var gen_handlers = reference.GenHandlers{};
+    var gen_cap = reference.Capture{ .arena = arena };
+    var proto = try reference.buildGenerated(std.testing.allocator, &gen_handlers, &gen_cap);
+    defer proto.deinit();
+
+    // Request: magic + RequestEnvelope{version=1, proc_id=1001, id present} + params (PingArgs is empty → 0 bytes).
+    const req_hex = "54584452" ++ "00000001" ++ "000003e9" ++ "00000001" ++ "123e4567e89b12d3a456426614174000";
+    // Reply: magic + ReplyEnvelope{version=1, id, status=0} + PingResult{pong=true} (bool → u32 1).
+    const rep_hex = "54584452" ++ "00000001" ++ "00000001" ++ "123e4567e89b12d3a456426614174000" ++ "00000000" ++ "00000001";
+
+    const req = try arena.alloc(u8, req_hex.len / 2);
+    _ = try std.fmt.hexToBytes(req, req_hex);
+    const exp = try arena.alloc(u8, rep_hex.len / 2);
+    _ = try std.fmt.hexToBytes(exp, rep_hex);
+
+    var sess = proto.newSession(null);
+    switch (proto.dispatch(arena, req, &sess)) {
+        .reply => |got| try std.testing.expectEqualSlices(u8, exp, got),
+        else => try std.testing.expect(false),
+    }
+}
+
+test "transfer A/B: dispatch reproduces the Python $/transferReady envelope + complete() final response" {
+    var arena_state = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const golden = try std.json.parseFromSliceLeaky(Golden, arena, golden_json, .{ .ignore_unknown_fields = true });
+    try std.testing.expect(golden.transfer_cases.len >= 2); // anti-vacuity
+
+    var api = reference.Api{};
+    var proto = try reference.buildTransfer(std.testing.allocator, &api);
+    defer proto.deinit();
+
+    var failures: usize = 0;
+    for (golden.transfer_cases) |c| {
+        var sess = proto.newSession(null);
+        const d = proto.dispatch(arena, c.wire, &sess);
+        if (d != .transfer) {
+            failures += 1;
+            std.debug.print("transfer A/B [{s}]: not a transfer directive\n", .{c.name});
+            continue;
+        }
+        // The $/transferReady envelope the directive carries.
+        const ready = std.json.parseFromSliceLeaky(std.json.Value, arena, d.transfer.ready, .{}) catch {
+            failures += 1;
+            continue;
+        };
+        if (!trpc.testing.jsonEql(ready, c.ready)) {
+            failures += 1;
+            std.debug.print("transfer A/B [{s}]: $/transferReady mismatch\n", .{c.name});
+        }
+        // complete() over a mock FileTransfer (no real fd) → the final response.
+        const ft: trpc.FileTransfer = .{ .fd = -1, .direction = d.transfer.direction, .af_unix = d.transfer.af_unix, .result_json = "{}" };
+        const final = d.transfer.complete(arena, &ft) orelse {
+            failures += 1;
+            continue;
+        };
+        const final_v = std.json.parseFromSliceLeaky(std.json.Value, arena, final, .{}) catch {
+            failures += 1;
+            continue;
+        };
+        if (!trpc.testing.jsonEql(final_v, c.final)) {
+            failures += 1;
+            std.debug.print("transfer A/B [{s}]: complete() final mismatch\n", .{c.name});
+        }
+    }
+    try std.testing.expectEqual(@as(usize, 0), failures);
 }

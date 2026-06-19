@@ -30,6 +30,21 @@ pub const Secret = @import("meta.zig").Secret;
 const method = @import("method.zig");
 pub const MethodOpts = method.MethodOpts;
 
+/// The filterable-query layer: the regex-free filter engine + the streaming `FilterSink(Entry)` a
+/// filterable handler pushes its records through (a method becomes filterable via `Builder.filterableMethod`,
+/// which codegen emits for a spec method marked `filterable`). Consumers reach the value/option types as
+/// `trpc.filter.FilterValue` etc.; the two most-used names are re-exported directly.
+pub const filter = @import("filter.zig");
+pub const FilterSink = filter.FilterSink;
+pub const QueryOptions = filter.QueryOptions;
+
+/// Raw-fd transfer (the sans-I/O contract): `TransferDirection`, the `FileTransfer` handle the transport
+/// supplies, and the `Transfer` directive `dispatch` returns. The actual fd I/O is the transport's.
+const transfer = @import("transfer.zig");
+pub const TransferDirection = transfer.TransferDirection;
+pub const FileTransfer = transfer.FileTransfer;
+pub const Transfer = transfer.Transfer;
+
 const protocol = @import("protocol.zig");
 pub const Protocol = protocol.Protocol;
 pub const Dispatched = protocol.Dispatched;
@@ -71,6 +86,9 @@ test {
     _ = @import("sink.zig");
     _ = @import("idgen.zig");
     _ = @import("envelope.zig");
+    _ = @import("xdr_frame.zig");
+    _ = @import("filter.zig");
+    _ = @import("transfer.zig");
     _ = @import("method.zig");
     _ = @import("protocol.zig");
     _ = @import("transport.zig");

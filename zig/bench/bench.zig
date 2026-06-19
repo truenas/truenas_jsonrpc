@@ -34,6 +34,23 @@ const Api = struct {
 const Case = struct { name: []const u8, wire: []const u8 };
 
 const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+// Hand-assembled XDR request frames for the SAME add/create methods over the binary wire. The bench is a
+// consumer and the internal frame builder isn't exported, so the fixed frames are spelled out as hex. They
+// have NO Python mirror — they isolate the binary-wire speedup WITHIN the Zig engine (XDR vs JSON dispatch
+// of the identical method: no text parse, no Value tree, ~no allocation). Frame layout:
+//   magic 'TXDR'(54584452) · version(1) · proc_id · id{flag(1) + 16 bytes} · XDR<params>
+const xdr_uid_hex = "123e4567e89b12d3a456426614174000";
+fn hexBytes(comptime s: []const u8) [s.len / 2]u8 {
+    var out: [s.len / 2]u8 = undefined;
+    _ = std.fmt.hexToBytes(&out, s) catch unreachable;
+    return out;
+}
+// add over XDR (proc 1001): AddArgs{a:i64=2, b:i64=3} → two 8-byte hypers.
+const add_xdr = hexBytes("54584452" ++ "00000001" ++ "000003e9" ++ "00000001" ++ xdr_uid_hex ++ "0000000000000002" ++ "0000000000000003");
+// create over XDR (proc 1002): PoolCreateArgs{name:"tank"} → string<> (u32 len 4 + 'tank', already aligned).
+const create_xdr = hexBytes("54584452" ++ "00000001" ++ "000003ea" ++ "00000001" ++ xdr_uid_hex ++ "00000004" ++ "74616e6b");
+
 const CASES = [_]Case{
     // The bread-and-butter request: parse + decode 2 ints + run + encode 1 int + serialize.
     .{ .name = "add", .wire = "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"add\",\"params\":{\"a\":2,\"b\":3}}" },
@@ -47,6 +64,9 @@ const CASES = [_]Case{
     .{ .name = "notification", .wire = "{\"jsonrpc\":\"2.0\",\"method\":\"add\",\"params\":{\"a\":2,\"b\":3}}" },
     // Earliest exit: malformed JSON → invalid_json.
     .{ .name = "parse_error", .wire = "{not json" },
+    // The SAME add/create methods over the XDR binary wire — compare directly against `add`/`create` above.
+    .{ .name = "add_xdr", .wire = &add_xdr },
+    .{ .name = "create_xdr", .wire = &create_xdr },
 };
 
 const WARMUP: u64 = 50_000;
@@ -76,6 +96,11 @@ inline fn consume(d: trpc.Dispatched, reply_alloc: std.mem.Allocator) u64 {
             reply_alloc.free(s.sub_id);
             return n;
         },
+        // The bench corpus dispatches no transfer methods; the arm keeps the switch exhaustive.
+        .transfer => |t| {
+            reply_alloc.free(t.ready);
+            return t.ready.len;
+        },
     }
 }
 
@@ -84,8 +109,9 @@ pub fn main() !void {
 
     var api = Api{};
     var b = trpc.Protocol(void).builder(gpa, "bench", "1.0.0");
-    try b.method("add", &api, Api.add, .{});
-    try b.method("pool.create", &api, Api.create, .{});
+    // Dual-wire: each method answers JSON and (via .xdr/.xdr_id, proc >= 1001) the binary wire.
+    try b.method("add", &api, Api.add, .{ .xdr = true, .xdr_id = 1001 });
+    try b.method("pool.create", &api, Api.create, .{ .xdr = true, .xdr_id = 1002 });
     var proto = b.build();
     defer proto.deinit();
 

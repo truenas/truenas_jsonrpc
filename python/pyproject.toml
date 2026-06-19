@@ -17,6 +17,10 @@ websocket = ["websockets>=13"]
 # FilterableJSONRPCMethod delegates query-filters/query-options to the truenas_pyfilter
 # C engine; imported lazily, so only needed when a protocol registers filterable methods.
 filterable = ["truenas_pyfilter"]
+# The XDR binary wire (truenas_pyjsonrpc.xdr) reflects over the same Structs onto pynfs's
+# xdrlib3 Packer/Unpacker; imported lazily, so only needed when a protocol registers XDR
+# methods (a JSON-only server never pulls it in — the dispatch magic-sniff is a byte compare).
+xdr = ["xdrlib3"]
 
 [tool.setuptools.packages.find]
 where = ["."]

@@ -59,6 +59,25 @@
       },
       "required": ["name", "color", "inner", "api_key"],
       "additionalProperties": false
+    },
+    "QueryArgs": {
+      "type": "object",
+      "$comment": "Base accepts for the filterable x.query method; augmented at runtime with query-filters/query-options.",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "Entry": {
+      "type": "object",
+      "$comment": "Element type of the filterable x.query method (flat scalars + an optional, for the filter ops + null guards).",
+      "properties": {
+        "id": { "type": "integer" },
+        "name": { "type": "string" },
+        "ratio": { "type": "number" },
+        "active": { "type": "boolean" },
+        "note": { "type": "string" }
+      },
+      "required": ["id", "name", "ratio", "active"],
+      "additionalProperties": false
     }
   },
   "methods": {
@@ -74,7 +93,9 @@
       "summary": "Liveness probe.",
       "params": { "$ref": "#/$defs/PingArgs" },
       "result": { "$ref": "#/$defs/PingResult" },
-      "handler": "ping"
+      "handler": "ping",
+      "xdr": true,
+      "xdr_id": 1001
     },
     "crash": {
       "summary": "Always raises (exercises the error-audit path).",
@@ -83,6 +104,13 @@
       "handler": "crash",
       "audit": true,
       "auditMessage": "crash op"
+    },
+    "x.query": {
+      "summary": "Filterable query over a collection of entries.",
+      "params": { "$ref": "#/$defs/QueryArgs" },
+      "filterable": true,
+      "entry": { "$ref": "#/$defs/Entry" },
+      "handler": "query"
     }
   }
 }

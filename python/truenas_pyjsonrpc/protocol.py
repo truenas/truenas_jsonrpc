@@ -81,6 +81,11 @@ _SESSION_CLOSE_METHOD = "$/sessionClose"
 #: $/transferGo: client -> server "consumer paused its reader, start" (download only).
 _TRANSFER_READY_METHOD = "$/transferReady"
 _TRANSFER_GO_METHOD = "$/transferGo"
+#: The 4-byte magic that prefixes an XDR binary-wire frame ("TXDR" = 0x54584452). It is the
+#: pre-decode discriminator at the dispatch entry: a JSON-RPC envelope always begins with `{`
+#: (0x7B), optional leading whitespace, never `T` — so the magic is unambiguous. The check is a
+#: plain byte compare (no `xdr` import), so JSON-only servers never pull in the codec/xdrlib3.
+_XDR_MAGIC = b"TXDR"
 
 
 class _CancelParams(msgspec.Struct):
@@ -163,6 +168,13 @@ def _is_uuid(value: str) -> bool:
         return str(uuid.UUID(value)) == value.lower()
     except ValueError:
         return False
+
+
+def _bytes_to_uuid(b: bytes) -> str:
+    """16 raw bytes -> the canonical hyphenated UUID string. The XDR wire carries the id as
+    16 bytes; canonicalizing it to a string at the wire edge lets the binary path share the
+    JSON path's ``dict[str, ...]`` keying for ``_inflight`` / audit / cancel unchanged."""
+    return str(uuid.UUID(bytes=b))
 
 
 class SessionState:
@@ -321,6 +333,10 @@ class JSONRPCProtocol:
         self._inflight: dict[str, RequestState] = {}
         # subscriptions to SERVER_CLIENT topics: method -> {sub_id: Subscription}.
         self._subscriptions: dict[str, dict[str, Subscription]] = {}
+        # XDR binary-wire op-table: proc_id -> method (the additive RFC-4506 wire; see
+        # _dispatch_one_xdr). Populated by register() for methods with ``xdr=True``; the
+        # proc-id is the wire address, uniqueness enforced here AND by api-specs/gen.py.
+        self._xdr_methods: dict[int, JSONRPCMethod] = {}
         for method in methods:
             self.register(method)
         if authorization_handler is not None:
@@ -367,6 +383,13 @@ class JSONRPCProtocol:
                 "method names beginning with 'rpc.' or '$/' are reserved")
         if method.name in self._methods:
             raise ValueError(f"duplicate method: {method.name!r}")
+        if method.xdr:
+            other = self._xdr_methods.get(method.xdr_id)
+            if other is not None:
+                raise ValueError(
+                    f"duplicate xdr_id {method.xdr_id}: {method.name!r} collides with "
+                    f"{other.name!r}")
+            self._xdr_methods[method.xdr_id] = method
         self._methods[method.name] = method
 
     def add_session_setup(self, setup: JSONRPCMethod,
@@ -588,6 +611,10 @@ class JSONRPCProtocol:
         data = wire.encode() if isinstance(wire, str) else wire
         if session is None:
             session = self.new_session()
+        # The additive XDR binary wire: a 4-byte magic prefix routes to the RFC-4506 path,
+        # which returns ready-to-send bytes (or None for a notification), never a JSON dict.
+        if data[:4] == _XDR_MAGIC:
+            return self._dispatch_one_xdr(data, session)
         response = self._dispatch_one(data, session)
         if response is None or isinstance(response, Transfer):
             return response
@@ -809,6 +836,108 @@ class JSONRPCProtocol:
             self._audit(audit, req, response, session, method, detail)
 
         return None if note else response
+
+    # --- dispatch (XDR binary wire) ------------------------------------------
+    def _dispatch_one_xdr(self, msg: bytes, session: SessionState) -> bytes | None:
+        """Process one XDR binary-wire frame: the reply frame bytes, or ``None`` for a
+        notification (a frame carrying no id). The additive RFC-4506 analog of
+        :meth:`_dispatch_one` — it reuses the SAME authorize → dispatch → audit core
+        (:meth:`_authorize_and_dispatch`, so authz/gate/audit behave identically) and only
+        swaps the three wire-specific stages: frame parse, XDR param decode, and the final
+        envelope→bytes encode. ``xdr`` (hence ``xdrlib3``) is imported lazily, so a
+        JSON-only server never pulls in the binary codec."""
+        from . import xdr  # lazy: only XDR servers need the codec / xdrlib3
+
+        try:
+            parsed = xdr.parse_request(msg)
+        except Exception as e:
+            # An unparseable frame yields no trustworthy id -> a null-id error reply.
+            return self._xdr_error(xdr, None, JSONRPCError.INVALID_REQUEST,
+                                   "Invalid request", str(e))
+        rid_bytes = parsed.rid_bytes
+        rid = _bytes_to_uuid(rid_bytes) if rid_bytes is not None else None
+        note = rid_bytes is None
+
+        def xerr(code: "int | JSONRPCError", message: str,
+                 data: Any = None) -> bytes | None:
+            return None if note else self._xdr_error(xdr, rid_bytes, code, message, data)
+
+        if parsed.version != xdr.VERSION:
+            return xerr(JSONRPCError.INVALID_REQUEST, "Invalid request",
+                        f"unsupported XDR protocol version {parsed.version}")
+        if session.lifecycle is SessionLifecycle.CLOSED:
+            return xerr(JSONRPCError.SESSION_NOT_ESTABLISHED, "Session is closed")
+
+        method = self._xdr_methods.get(parsed.proc_id)
+        if method is None:
+            return xerr(JSONRPCError.METHOD_NOT_FOUND, "Method not found")
+
+        # session-established gate (only when session setup is configured) — same as JSON.
+        if self._session_setup is not None and not method.pre_auth:
+            if session.lifecycle is not SessionLifecycle.ESTABLISHED:
+                return xerr(JSONRPCError.SESSION_NOT_ESTABLISHED, "Session not established")
+
+        # decode + validate params via the XDR codec (positional; lands in the same Struct).
+        params: Any
+        try:
+            if isinstance(method, FilterableJSONRPCMethod):
+                # The augmented accepts ride as XDR<base> + XDR<XdrQueryOptions> + XDR<query-filters as a
+                # JSON-text string>. Rebuild the SAME augmented Struct the JSON path decodes, so the shared
+                # filterable dispatch (compile_query → handler → finalize) is reused unchanged; the dynamic
+                # filters stay JSON text, and the reduced XDR options widen back to the full QueryOptions
+                # (get/select default off — exactly what the Zig port, which dropped them, also produces).
+                from .query import QueryOptions
+                base, xopts, filters_text = xdr.decode_query_params(parsed.params, method.base_accepts)
+                params = method.accepts(
+                    **{f.name: getattr(base, f.name) for f in msgspec.structs.fields(method.base_accepts)},
+                    query_filters=msgspec.json.decode(filters_text) if filters_text else [],
+                    query_options=QueryOptions(count=xopts.count, order_by=xopts.order_by,
+                                               offset=xopts.offset, limit=xopts.limit))
+            else:
+                params = xdr.decode(parsed.params, method.accepts)
+        except Exception as e:
+            return xerr(JSONRPCError.INVALID_PARAMS, "Invalid params", str(e))
+        if method.accepts_validator is not None:
+            try:
+                replaced = method.accepts_validator(params)
+            except Exception as e:
+                return xerr(JSONRPCError.INVALID_PARAMS, "Invalid params", str(e))
+            if replaced is not None:
+                params = replaced
+
+        # authorize -> dispatch -> audit: the wire-neutral core, shared with the JSON path.
+        req = JSONRPCRequest(method=method.name, id=rid, params=params, roles=method.roles)
+        response, request_state = self._authorize_and_dispatch(
+            method, req, params, rid, session)
+        audit = self._audit_handler
+        if audit is not None and method.audit:
+            detail = request_state.audit_message if request_state is not None else None
+            self._audit(audit, req, response, session, method, detail)
+
+        if note:
+            return None
+        # Re-encode the structured envelope _authorize_and_dispatch produced as an XDR frame:
+        # the success result through the codec, or the error object as the frame's detail.
+        if "error" in response:
+            err = response["error"]
+            return xdr.error_frame(rid_bytes, int(err["code"]), _ENC.encode(err))
+        # A filterable result is a list of records (→ `u32 count + entry…`) or an int count (→ a hyper),
+        # encoded against the method's `entry` type; a normal method's result against its `returns` type.
+        if isinstance(method, FilterableJSONRPCMethod):
+            return xdr.reply_frame(rid_bytes, xdr.encode_query_result(response["result"], method.entry))
+        return xdr.reply_frame(rid_bytes, xdr.encode(response["result"], method.returns))
+
+    @staticmethod
+    def _xdr_error(xdr: Any, rid_bytes: "bytes | None", code: "int | JSONRPCError",
+                   message: str, data: Any = None) -> bytes:
+        """An XDR error reply frame: the int ``code`` (fast path) + the full JSON
+        ``{code,message[,data]}`` object as the frame's ``string<>`` detail — the same
+        ``error`` member the JSON wire carries, byte-for-byte the Zig ``errorJson``."""
+        err: dict[str, Any] = {"code": int(code), "message": message}
+        if data is not None:
+            err["data"] = data
+        frame: bytes = xdr.error_frame(rid_bytes, int(code), _ENC.encode(err))  # xdr is an Any param
+        return frame
 
     # --- raw-fd transfer -----------------------------------------------------
     def _begin_transfer(self, method: JSONRPCFdTransferMethod, req: JSONRPCRequest,

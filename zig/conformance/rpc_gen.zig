@@ -39,10 +39,21 @@ pub const Demo = struct {
     api_key: trpc.Secret([]const u8),
 };
 
+pub const QueryArgs = struct {};
+
+pub const Entry = struct {
+    id: i64,
+    name: []const u8,
+    ratio: f64,
+    active: bool,
+    note: ?[]const u8 = null,
+};
+
 /// Register every spec method onto `b`, binding each to `handlers.<handler>`.
 pub fn register(b: anytype, handlers: anytype) !void {
     const H = @TypeOf(handlers.*);
     try b.method("login", handlers, H.login, .{ .audit = true, .audit_message = "user login" });
-    try b.method("ping", handlers, H.ping, .{});
+    try b.method("ping", handlers, H.ping, .{ .xdr = true, .xdr_id = 1001 });
     try b.method("crash", handlers, H.crash, .{ .audit = true, .audit_message = "crash op" });
+    try b.filterableMethod("x.query", handlers, H.query, Entry, .{});
 }

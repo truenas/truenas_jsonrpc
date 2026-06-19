@@ -76,6 +76,8 @@ def build_protocol(spec: dict) -> JSONRPCProtocol:
 
     methods = []
     for name, m in spec["methods"].items():
+        if m.get("filterable"):
+            continue  # filterable methods are scoped out of this A/B (see main(); their surface diverges)
         # A handler whose docstring is the spec summary, so openrpc_gen derives the same `summary`.
         def handler(request, session_state, request_state):  # noqa: ARG001
             ...
@@ -110,13 +112,29 @@ def main() -> int:
     candidate = json.load(open(sys.argv[2]))
     candidate.pop("x-generated", None)  # gen.py's generated-file marker; not part of openrpc_gen's output
 
-    if _norm(golden) == _norm(candidate):
-        print(f"openrpc A/B OK: {sys.argv[2]} == openrpc_gen.py output ({len(golden['methods'])} methods)")
+    # Carve out filterable (x-query) methods: the Zig port DELIBERATELY drops get/select, so gen.py emits a
+    # reduced query-options that openrpc_gen.py (full QueryOptions) can't match — comparing them would be
+    # apples-to-oranges. Drop x-query methods and keep only the schemas openrpc_gen also produced (the
+    # filterable-only entry/args types fall away). Their OpenRPC contract is proven elsewhere: the committed
+    # openrpc.json drift gate, the Zig $/describe round-trip + focused shape assertion, and — for the engine
+    # SEMANTICS, the actual meat — the golden conformance oracle that drives the normative C filter engine.
+    cand = dict(candidate)
+    cand["methods"] = [m for m in candidate.get("methods", []) if not m.get("x-query")]
+    cand["components"] = {
+        "schemas": {k: v for k, v in candidate.get("components", {}).get("schemas", {}).items()
+                    if k in golden["components"]["schemas"]},
+        "errors": candidate.get("components", {}).get("errors", {}),
+    }
+    dropped = len(candidate.get("methods", [])) - len(cand["methods"])
+
+    if _norm(golden) == _norm(cand):
+        print(f"openrpc A/B OK: {sys.argv[2]} == openrpc_gen.py output "
+              f"({len(golden['methods'])} methods compared, {dropped} filterable scoped out)")
         return 0
     print(f"openrpc A/B MISMATCH: {sys.argv[2]} != openrpc_gen.py output", file=sys.stderr)
     import difflib
     a = json.dumps(_norm(golden), indent=1).splitlines()
-    b = json.dumps(_norm(candidate), indent=1).splitlines()
+    b = json.dumps(_norm(cand), indent=1).splitlines()
     print("\n".join(difflib.unified_diff(a, b, "openrpc_gen.py", sys.argv[2], lineterm="")), file=sys.stderr)
     return 1
 
