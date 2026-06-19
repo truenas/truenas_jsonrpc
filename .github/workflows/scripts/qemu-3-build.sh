@@ -96,12 +96,19 @@ sudo dpkg -i ../libpam-truenas_*.deb \
 clone_build truenas_pyos
 sudo dpkg -i ../python3-truenas-pyos_*.deb
 
+# 7. XDR codec -> xdrlib3 (a PyPI backport of the stdlib xdrlib removed in 3.13; not in Debian). The
+#    binary-wire (XDR) tests need it; under TRUENAS_FORBID_TEST_SKIPS its absence would FAIL test_xdr.py
+#    rather than skip, so install it here in the full-stack VM.
+sudo pip install --break-system-packages xdrlib3
+
 # Verify everything test_pam.py imports is present
 echo "Verifying dependency stack..."
 python3 -c "import truenas_pyscram, truenas_pypwenc, truenas_keyring, truenas_api_key, truenas_authenticator, truenas_pypam; from truenas_pam_faillog import PamFaillog; print('dependency stack OK')"
 test -f /usr/lib/security/pam_truenas.so || (echo "ERROR: pam_truenas.so not found"; exit 1)
 # Verify the query engine that FilterableJSONRPCMethod / strict mypy need
 python3 -c "from truenas_pyfilter import compile_filters, compile_options; print('truenas_pyfilter OK')"
+# Verify the XDR codec the binary-wire tests need
+python3 -c "import xdrlib3; print('xdrlib3 OK')"
 
 echo "Dependency stack built and installed"
 REMOTE_SCRIPT

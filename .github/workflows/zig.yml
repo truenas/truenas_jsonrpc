@@ -1,0 +1,50 @@
+name: Zig
+
+# The Zig port lives under zig/ and is independent of the Python build, so this workflow only runs
+# when zig/ (or this file) changes. It builds the library, runs the A/B conformance suite (against the
+# committed golden) + unit tests, and checks formatting. The complementary golden-DRIFT gate — which
+# regenerates the golden from the Python oracle — lives in build-test.yml, where the Python reference
+# and msgspec are already installed (no point standing up a second Python environment here).
+on:
+  pull_request:
+    paths:
+      - 'zig/**'
+      - '.github/workflows/zig.yml'
+  push:
+    branches: [ master ]
+    paths:
+      - 'zig/**'
+      - '.github/workflows/zig.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  zig:
+    name: Build + conformance + fmt (Zig 0.16.0)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig 0.16.0
+        # v2 (>= v2.0.1) understands Zig 0.16.0's tarball name (zig-x86_64-linux-*, arch-os order);
+        # v1 builds the old zig-linux-x86_64-* name and 404s on every mirror.
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.16.0
+
+      # Formatting gate first (cheap, fails fast).
+      - name: zig fmt --check
+        working-directory: zig
+        run: zig fmt --check src xdr conformance bench build.zig
+
+      # Library unit tests + the A/B differential conformance suite (against the committed golden).
+      - name: zig build test
+        working-directory: zig
+        run: zig build test --summary all
+
+      # The dispatch microbenchmark must at least build + run in ReleaseFast (numbers are informational).
+      - name: zig build bench (smoke)
+        working-directory: zig
+        run: zig build bench -Doptimize=ReleaseFast

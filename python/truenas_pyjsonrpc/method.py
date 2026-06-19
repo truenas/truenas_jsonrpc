@@ -26,6 +26,12 @@ from .redaction import compile_plan
 
 _StructType = type[msgspec.Struct]
 
+#: XDR proc-ids 0..=this are RESERVED for protocol control messages (the ``$/`` namespace over
+#: the binary wire — session setup / cancel / serverInfo, mirroring the JSON control ops; not yet
+#: implemented). Application methods must use ``xdr_id`` > this. Kept in lockstep with
+#: api-specs/gen.py and the Zig ``xdr_frame.reserved_proc_max``.
+XDR_RESERVED_PROC_MAX = 1000
+
 
 def _is_struct(value: Any) -> bool:
     return isinstance(value, type) and issubclass(value, msgspec.Struct)
@@ -72,6 +78,8 @@ class JSONRPCMethod:
                  audit_message: str | None = None,
                  cancellable: bool = False,
                  roles: Iterable[str] = (),
+                 xdr: bool = False,
+                 xdr_id: int = 0,
                  accepts_validator: Callable[[Any], Any] | None = None,
                  returns_validator: Callable[[Any], Any] | None = None) -> None:
         if not isinstance(name, str) or not name:
@@ -99,6 +107,17 @@ class JSONRPCMethod:
             if notifies is not None:
                 raise TypeError("'notifies' is only valid for SERVER_CLIENT methods")
             _check_callable(handler, "handler")
+        if not isinstance(xdr, bool):
+            raise TypeError("'xdr' must be a bool")
+        if xdr and direction is MessageDirection.SERVER_CLIENT:
+            # Pub-sub over the binary wire uses a notification frame, not a returns-typed
+            # reply, so it is a separate path (not this request/reply opt-in).
+            raise TypeError("'xdr' is not supported for SERVER_CLIENT methods")
+        if xdr and (not isinstance(xdr_id, int) or isinstance(xdr_id, bool)
+                    or xdr_id <= XDR_RESERVED_PROC_MAX):
+            raise TypeError(
+                f"an 'xdr' method requires an integer 'xdr_id' > {XDR_RESERVED_PROC_MAX} "
+                f"(0..={XDR_RESERVED_PROC_MAX} are reserved for protocol control messages)")
 
         self.name = name
         self.direction = direction
@@ -130,6 +149,13 @@ class JSONRPCMethod:
         self.roles: tuple[str, ...] = tuple(roles)
         if not all(isinstance(r, str) for r in self.roles):
             raise TypeError("'roles' must be an iterable of str")
+        # ``xdr`` opts the method into the additive RFC-4506 binary wire, addressed by
+        # ``xdr_id`` (a spec-assigned u32 proc-id; uniqueness enforced by the protocol's
+        # ``_xdr_methods`` registry + api-specs/gen.py). The SAME accepts/returns Structs
+        # drive both wires — ``truenas_pyjsonrpc.xdr`` reflects over them — so opting a
+        # statically-typed method into the binary wire is just these two flags.
+        self.xdr = xdr
+        self.xdr_id = xdr_id
         self.accepts_validator = accepts_validator
         self.returns_validator = returns_validator
         self._handler = handler
@@ -256,6 +282,8 @@ class FilterableJSONRPCMethod(JSONRPCMethod):
                  audit: bool = False,
                  audit_message: str | None = None,
                  roles: Iterable[str] = (),
+                 xdr: bool = False,
+                 xdr_id: int = 0,
                  accepts_validator: Callable[[Any], Any] | None = None) -> None:
         if not _is_struct(entry):
             raise TypeError("'entry' must be a msgspec.Struct subclass")
@@ -265,4 +293,5 @@ class FilterableJSONRPCMethod(JSONRPCMethod):
         super().__init__(name, accepts=augment_accepts(accepts), returns=None,
                          handler=handler, doc=doc, pre_auth=pre_auth, audit=audit,
                          audit_message=audit_message, roles=roles,
+                         xdr=xdr, xdr_id=xdr_id,
                          accepts_validator=accepts_validator)

@@ -21,9 +21,47 @@ jobs:
         apt-get update
         apt-get install -y \
           devscripts debhelper dh-python pybuild-plugin-pyproject \
-          python3-all python3-all-dev python3-setuptools build-essential git \
+          python3-all python3-all-dev python3-setuptools build-essential git python3-pip \
           libssl-dev libidn-dev libbsd-dev \
-          python3-msgspec python3-pytest python3-websockets python3-cryptography
+          python3-msgspec python3-pytest python3-websockets python3-cryptography python3-jsonschema
+
+    # The filterable (query) tests AND the Zig conformance oracle (generate.py, below) need the
+    # truenas_pyfilter C engine shipped by truenas_pyos. It is not in Debian, so build it from source; the
+    # oracle imports it at module load to drive the normative filter engine, so this must precede the drift
+    # check. (Without it, tests/test_filterable.py self-skips, but generate.py would fail to import.)
+    - name: Build and install truenas_pyos (the filter engine — enables filterable tests + the oracle)
+      run: |
+        cd /tmp
+        git clone --depth 1 https://github.com/truenas/truenas_pyos.git
+        cd truenas_pyos
+        dpkg-buildpackage -us -uc -b
+        dpkg -i ../python3-truenas-pyos_*.deb
+
+    # The XDR binary-wire conformance (generate.py emits byte-exact XDR golden cases) AND the XDR unit
+    # tests need the xdrlib3 codec — a PyPI backport of the stdlib xdrlib removed in 3.13, not in Debian.
+    # It must precede the drift check (generate.py imports truenas_pyjsonrpc.xdr at module load).
+    - name: Install xdrlib3 (the XDR codec for the binary-wire conformance + tests)
+      run: pip install --break-system-packages xdrlib3
+
+    # The Zig port has committed, generated-from-source artifacts that must never silently drift:
+    #   1. zig/conformance/golden.json   — the A/B oracle, generated from THIS (normative Python) reference
+    #      (now incl. filterable cases driven through the truenas_pyfilter engine built just above).
+    #   2. zig/conformance/rpc_gen.zig   — the spec-first Zig method layer, generated from api-specs/*.json.
+    #   3. zig/conformance/openrpc.json — the OpenRPC doc (committed for tooling/docs; the library
+    #      @embedFiles it for $/describe), generated from the same spec.
+    # Regenerate all here (msgspec + jsonschema already installed) and fail on any diff; also A/B the
+    # OpenRPC against python/openrpc_gen.py (filterable methods scoped out — a deliberate surface divergence).
+    # The git diff only inspects the generated files, so the Debian package build's artifacts don't affect it.
+    - name: Zig conformance + codegen — drift check
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        python3 zig/conformance/generate.py
+        git diff --exit-code zig/conformance/golden.json
+        python3 api-specs/gen.py api-specs/sample.json \
+          --out zig/conformance/rpc_gen.zig \
+          --openrpc-json zig/conformance/openrpc.json
+        git diff --exit-code zig/conformance/rpc_gen.zig zig/conformance/openrpc.json
+        python3 api-specs/openrpc_ab.py api-specs/sample.json zig/conformance/openrpc.json
 
     # SCRAM (RFC 5802) tests need the truenas_pyscram C extension. It is not in Debian, so
     # build it from source here; without it the SCRAM tests in tests/test_auth.py self-skip.
@@ -36,17 +74,6 @@ jobs:
         dpkg -i ../libtruenas-scram1_*.deb \
                ../libtruenas-scram-dev_*.deb \
                ../python3-truenas-scram_*.deb
-
-    # The filterable (query) tests need the truenas_pyfilter C engine shipped by
-    # truenas_pyos. Like truenas_scram above it is not in Debian, so build it from
-    # source; without it the tests in tests/test_filterable.py self-skip.
-    - name: Build and install truenas_pyos (enables the filterable tests)
-      run: |
-        cd /tmp
-        git clone --depth 1 https://github.com/truenas/truenas_pyos.git
-        cd truenas_pyos
-        dpkg-buildpackage -us -uc -b
-        dpkg -i ../python3-truenas-pyos_*.deb
 
     # The package lives under python/ (debian/, pyproject.toml, tests/ are all there). The
     # build's dh_auto_test is disabled (see python/debian/rules), so this only builds the .deb.

@@ -1,0 +1,1763 @@
+{
+  "cases": [
+    {
+      "audits": [],
+      "name": "happy_create",
+      "protocol": "open",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "id": 7,
+          "name": "tank"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"pool.create\",\"params\":{\"name\":\"tank\"}}"
+    },
+    {
+      "audits": [],
+      "name": "typed_add",
+      "protocol": "open",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "sum": 5
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":2,\"b\":3}}"
+    },
+    {
+      "audits": [],
+      "name": "uppercase_id_echoed",
+      "protocol": "open",
+      "response": {
+        "id": "123E4567-E89B-12D3-A456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "sum": 2
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123E4567-E89B-12D3-A456-426614174000\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "method_not_found",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "invalid_params_missing",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"pool.create\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "invalid_params_wrongtype",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"pool.create\",\"params\":{\"name\":123}}"
+    },
+    {
+      "audits": [],
+      "name": "invalid_params_array",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":[2,3]}"
+    },
+    {
+      "audits": [],
+      "name": "internal_error",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"boom\"}"
+    },
+    {
+      "audits": [],
+      "name": "custom_request_failed",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "expected failure"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"fail\"}"
+    },
+    {
+      "audits": [],
+      "name": "notification_no_reply",
+      "protocol": "open",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"pool.create\",\"params\":{\"name\":\"tank\"}}"
+    },
+    {
+      "audits": [],
+      "name": "unknown_method_notification",
+      "protocol": "open",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "malformed_json",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32700,
+          "message": "Parse error"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{not json"
+    },
+    {
+      "audits": [],
+      "name": "top_level_array",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "[1,2,3]"
+    },
+    {
+      "audits": [],
+      "name": "bad_jsonrpc_version",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"1.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "non_uuid_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "null_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":null,\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "server_info",
+      "protocol": "open",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "name": "truenas",
+          "version": "42"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/serverInfo\"}"
+    },
+    {
+      "audits": [],
+      "name": "server_info_no_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/serverInfo\"}"
+    },
+    {
+      "audits": [],
+      "name": "unknown_control",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32601,
+          "message": "Method not found"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "unknown_control_notification",
+      "protocol": "open",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/nope\"}"
+    },
+    {
+      "audits": [],
+      "name": "authz_allowed",
+      "protocol": "authz",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "sum": 2
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "authz_denied",
+      "protocol": "authz",
+      "response": {
+        "error": {
+          "code": -32000,
+          "message": "nope"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"secret_op\",\"params\":{\"a\":1,\"b\":1}}"
+    },
+    {
+      "audits": [],
+      "name": "authz_denied_bad_params",
+      "protocol": "authz",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"secret_op\",\"params\":[1,2]}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": "user login as bob",
+          "method": "login",
+          "params": {
+            "password": "********",
+            "user": "bob"
+          },
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "ok": true,
+              "token": "********"
+            }
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_login_ok",
+      "protocol": "audit",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "ok": true,
+          "token": "tok-secret"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"login\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": "user login",
+          "method": "login",
+          "params": {
+            "password": "********",
+            "user": "denyme"
+          },
+          "response": {
+            "error": {
+              "code": -32000,
+              "message": "denied"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_login_denied",
+      "protocol": "audit",
+      "response": {
+        "error": {
+          "code": -32000,
+          "message": "denied"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"login\",\"params\":{\"user\":\"denyme\",\"password\":\"x\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": null,
+          "message": "user login as bob",
+          "method": "login",
+          "params": {
+            "password": "********",
+            "user": "bob"
+          },
+          "response": {
+            "id": null,
+            "jsonrpc": "2.0",
+            "result": {
+              "ok": true,
+              "token": "********"
+            }
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_login_notification",
+      "protocol": "audit",
+      "response": null,
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"login\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": "crash op",
+          "method": "crash",
+          "params": {},
+          "response": {
+            "error": {
+              "code": -32603,
+              "message": "Internal error"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "roles": []
+        }
+      ],
+      "name": "audit_crash",
+      "protocol": "audit",
+      "response": {
+        "error": {
+          "code": -32603,
+          "message": "Internal error"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"crash\"}"
+    },
+    {
+      "audits": [],
+      "name": "audit_ping_no_record",
+      "protocol": "audit",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "pong": true
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"ping\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_blocked_before_setup",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32002,
+          "message": "Session not established"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_pre_auth_allowed",
+      "protocol": "gated",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "v": "1.0"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"version\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_setup_no_id",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\"}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_continue_wrong_state",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "Request failed"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_close_wrong_state",
+      "protocol": "gated",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "Request failed"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": null,
+          "method": "$/sessionSetup",
+          "params": {
+            "password": "********",
+            "user": "bob"
+          },
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "init",
+              "token": "********"
+            }
+          },
+          "roles": []
+        }
+      ],
+      "name": "gated_audit_setup",
+      "protocol": "gated_audit",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "stage": "init",
+          "token": "t0p"
+        }
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+    },
+    {
+      "audits": [],
+      "name": "subscribe_ok",
+      "protocol": "pubsub",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": "00000000-0000-4000-8000-000000000001"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}"
+    },
+    {
+      "audits": [],
+      "name": "subscribe_no_id",
+      "protocol": "pubsub",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}"
+    },
+    {
+      "audits": [],
+      "name": "subscribe_bad_params",
+      "protocol": "pubsub",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"alerts.subscribe\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "cancel_no_id",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32600,
+          "message": "Invalid request"
+        },
+        "id": null,
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"method\":\"$/cancelRequest\",\"params\":{\"target_id\":\"00000000-0000-4000-8000-0000000000aa\"}}"
+    },
+    {
+      "audits": [],
+      "name": "cancel_bad_params",
+      "protocol": "open",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/cancelRequest\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "cancel_denied",
+      "protocol": "authz",
+      "response": {
+        "error": {
+          "code": -32000,
+          "message": "cannot cancel"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/cancelRequest\",\"params\":{\"target_id\":\"00000000-0000-4000-8000-0000000000aa\"}}"
+    },
+    {
+      "audits": [
+        {
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "message": null,
+          "method": "$/cancelRequest",
+          "params": {
+            "target_id": "00000000-0000-4000-8000-0000000000aa"
+          },
+          "response": {
+            "error": {
+              "code": -32803,
+              "message": "Request failed"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "roles": []
+        }
+      ],
+      "name": "cancel_unknown_target",
+      "protocol": "audit",
+      "response": {
+        "error": {
+          "code": -32803,
+          "message": "Request failed"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/cancelRequest\",\"params\":{\"target_id\":\"00000000-0000-4000-8000-0000000000aa\"}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_all",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_eq",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\",\"alpha\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_ci_eq",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"C=\",\"alpha\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_gt_float",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"ratio\",\">\",1.5]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_ge_int",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"id\",\">=\",4]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_in",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"id\",\"in\",[1,4]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_nin",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"id\",\"nin\",[1,4]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_startswith",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"^\",\"al\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_endswith",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"$\",\"ha\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_rin",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"rin\",\"ph\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_bool",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"active\",\"=\",true]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_null_eq",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"note\",\"=\",null]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_null_ne",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"note\",\"!=\",null]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_implicit_and",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\",\"alpha\"],[\"active\",\"=\",true]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_or",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"OR\",[[\"id\",\"=\",1],[\"id\",\"=\",4]]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_and_group_in_or",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"OR\",[[[\"name\",\"=\",\"alpha\"],[\"active\",\"=\",true]],[\"id\",\"=\",4]]]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_count",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": 2
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\",\"alpha\"]],\"query-options\":{\"count\":true}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_count_ignores_paging",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": 5
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"count\":true,\"offset\":1,\"limit\":2}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_desc",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"-ratio\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_paging",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"id\"],\"offset\":1,\"limit\":2}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_multi",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"name\",\"-id\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_nulls_first",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          },
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"nulls_first:note\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_order_nulls_last",
+      "protocol": "filter",
+      "response": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": [
+          {
+            "active": true,
+            "id": 1,
+            "name": "alpha",
+            "note": "x",
+            "ratio": 0.5
+          },
+          {
+            "active": false,
+            "id": 4,
+            "name": "gamma",
+            "note": "y",
+            "ratio": 3.5
+          },
+          {
+            "active": true,
+            "id": 5,
+            "name": "Alpha",
+            "note": "z",
+            "ratio": 0.25
+          },
+          {
+            "active": false,
+            "id": 2,
+            "name": "beta",
+            "note": null,
+            "ratio": 2.5
+          },
+          {
+            "active": true,
+            "id": 3,
+            "name": "alpha",
+            "note": null,
+            "ratio": 1.5
+          }
+        ]
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[],\"query-options\":{\"order_by\":[\"nulls_last:note\"]}}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_invalid_op",
+      "protocol": "filter",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"??\",\"a\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "filter_invalid_arity",
+      "protocol": "filter",
+      "response": {
+        "error": {
+          "code": -32602,
+          "message": "Invalid params"
+        },
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0"
+      },
+      "steps": [],
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"x.query\",\"params\":{\"query-filters\":[[\"name\",\"=\"]]}}"
+    },
+    {
+      "audits": [],
+      "name": "gated_full_flow",
+      "protocol": "gated",
+      "response": null,
+      "steps": [
+        {
+          "audits": [],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "init"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\"}}"
+        },
+        {
+          "audits": [],
+          "response": {
+            "error": {
+              "code": -32002,
+              "message": "Session not established"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+        },
+        {
+          "audits": [],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "established"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"
+        },
+        {
+          "audits": [],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "who": "authed"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+        },
+        {
+          "audits": [],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": true
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
+        },
+        {
+          "audits": [],
+          "response": {
+            "error": {
+              "code": -32002,
+              "message": "Session is closed"
+            },
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0"
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"whoami\",\"params\":{}}"
+        }
+      ],
+      "wire": ""
+    },
+    {
+      "audits": [],
+      "name": "gated_audit_flow",
+      "protocol": "gated_audit",
+      "response": null,
+      "steps": [
+        {
+          "audits": [
+            {
+              "id": "123e4567-e89b-12d3-a456-426614174000",
+              "message": null,
+              "method": "$/sessionSetup",
+              "params": {
+                "password": "********",
+                "user": "bob"
+              },
+              "response": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "jsonrpc": "2.0",
+                "result": {
+                  "stage": "init",
+                  "token": "********"
+                }
+              },
+              "roles": []
+            }
+          ],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "init",
+              "token": "t0p"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"
+        },
+        {
+          "audits": [
+            {
+              "id": "123e4567-e89b-12d3-a456-426614174000",
+              "message": null,
+              "method": "$/sessionSetupContinue",
+              "params": {
+                "otp": "x"
+              },
+              "response": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "jsonrpc": "2.0",
+                "result": {
+                  "stage": "established",
+                  "token": "********"
+                }
+              },
+              "roles": []
+            }
+          ],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": {
+              "stage": "established",
+              "token": "t1"
+            }
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"
+        },
+        {
+          "audits": [
+            {
+              "id": "123e4567-e89b-12d3-a456-426614174000",
+              "message": null,
+              "method": "$/sessionClose",
+              "params": null,
+              "response": {
+                "id": "123e4567-e89b-12d3-a456-426614174000",
+                "jsonrpc": "2.0",
+                "result": true
+              },
+              "roles": []
+            }
+          ],
+          "response": {
+            "id": "123e4567-e89b-12d3-a456-426614174000",
+            "jsonrpc": "2.0",
+            "result": true
+          },
+          "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"$/sessionClose\"}"
+        }
+      ],
+      "wire": ""
+    },
+    {
+      "audits": [],
+      "delivery": {
+        "notifications": [
+          {
+            "jsonrpc": "2.0",
+            "method": "alerts.subscribe",
+            "params": {
+              "level": "warn",
+              "text": "pool degraded"
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "alerts.subscribe",
+            "params": {
+              "level": "info",
+              "text": "scrub done"
+            }
+          }
+        ],
+        "publish": [
+          {
+            "method": "alerts.subscribe",
+            "payload": {
+              "level": "warn",
+              "text": "pool degraded"
+            }
+          },
+          {
+            "method": "alerts.subscribe",
+            "payload": {
+              "level": "info",
+              "text": "scrub done"
+            }
+          }
+        ],
+        "subscribe": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}"
+      },
+      "name": "pubsub_delivery",
+      "protocol": "pubsub",
+      "response": null,
+      "steps": [],
+      "wire": ""
+    }
+  ],
+  "transfer_cases": [
+    {
+      "final": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "label": "ok",
+          "sent": 2048
+        }
+      },
+      "name": "transfer_download",
+      "ready": {
+        "jsonrpc": "2.0",
+        "method": "$/transferReady",
+        "params": {
+          "direction": "download",
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "result": {
+            "size": 2048
+          }
+        }
+      },
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"file.download\",\"params\":{\"size\":2048}}"
+    },
+    {
+      "final": {
+        "id": "123e4567-e89b-12d3-a456-426614174000",
+        "jsonrpc": "2.0",
+        "result": {
+          "ok": true,
+          "received": 4096
+        }
+      },
+      "name": "transfer_upload",
+      "ready": {
+        "jsonrpc": "2.0",
+        "method": "$/transferReady",
+        "params": {
+          "direction": "upload",
+          "id": "123e4567-e89b-12d3-a456-426614174000",
+          "result": true
+        }
+      },
+      "wire": "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"file.upload\",\"params\":{\"size\":4096}}"
+    }
+  ],
+  "xdr_cases": [
+    {
+      "name": "xdr_add",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000005000000026f6b0000",
+      "request": "5458445200000001000003e900000001123e4567e89b12d3a4564266141740000000000200000003"
+    },
+    {
+      "name": "xdr_echo",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000300000001000000020000000300000001000000026869000000000001",
+      "request": "5458445200000001000003ea00000001123e4567e89b12d3a4564266141740000000000300000001000000020000000300000001000000026869000000000001"
+    },
+    {
+      "name": "xdr_echo_empty",
+      "reply": "545844520000000100000001123e4567e89b12d3a45642661417400000000000000000000000000000000000",
+      "request": "5458445200000001000003ea00000001123e4567e89b12d3a456426614174000000000000000000000000000"
+    },
+    {
+      "name": "xdr_unknown_proc",
+      "reply": "545844520000000100000001123e4567e89b12d3a45642661417400000000001ffff80a70000002c7b22636f6465223a2d33323630312c226d657373616765223a224d6574686f64206e6f7420666f756e64227d",
+      "request": "54584452000000010000270f00000001123e4567e89b12d3a456426614174000"
+    },
+    {
+      "name": "xdr_filter_eq",
+      "reply": "545844520000000100000001123e4567e89b12d3a4564266141740000000000000000002000000000000000100000005616c7068610000003fe000000000000000000001000000010000000178000000000000000000000300000005616c7068610000003ff80000000000000000000100000000",
+      "request": "5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000000000000000000000000000000000000000000000000000165b5b226e616d65222c223d222c22616c706861225d5d0000"
+    },
+    {
+      "name": "xdr_filter_count",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000002",
+      "request": "5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000010000000000000000000000000000000000000000000000165b5b226e616d65222c223d222c22616c706861225d5d0000"
+    },
+    {
+      "name": "xdr_filter_order_desc",
+      "reply": "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000500000000000000040000000567616d6d61000000400c000000000000000000000000000100000001790000000000000000000002000000046265746140040000000000000000000000000000000000000000000300000005616c7068610000003ff80000000000000000000100000000000000000000000100000005616c7068610000003fe000000000000000000001000000010000000178000000000000000000000500000005416c7068610000003fd00000000000000000000100000001000000017a000000",
+      "request": "5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000000000000100000001000000062d726174696f000000000000000000000000000000000000000000025b5d0000"
+    }
+  ]
+}

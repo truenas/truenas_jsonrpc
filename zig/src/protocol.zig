@@ -1,0 +1,1741 @@
+//! `Protocol(S)` — the synchronous dispatch core (Zig equivalent of Python `JSONRPCProtocol`), built
+//! by a `Builder` whose `.method` primitive infers `Accepts`/`Returns` from the handler signature.
+//! `dispatch(reply_alloc, wire, session)` is a plain function: bytes in → `Dispatched{reply|none}` out,
+//! running the pipeline in a per-call arena and duping only the reply into `reply_alloc`.
+//!
+//! M1 tracer scope: parse → id → structural → method lookup → decode params → run → response. The
+//! session gate, authorization, audit, and the five `$/` control messages are layered on next.
+const std = @import("std");
+const errors = @import("errors.zig");
+const types = @import("types.zig");
+const envelope = @import("envelope.zig");
+const xdr_frame = @import("xdr_frame.zig");
+const xdr = @import("xdr"); // the generic codec (used by the XDR dispatch tests below)
+const method_mod = @import("method.zig");
+const transfer_mod = @import("transfer.zig");
+const session_mod = @import("session.zig");
+const sink_mod = @import("sink.zig");
+const reflect = @import("reflect.zig");
+const idgen_mod = @import("idgen.zig");
+const IdGen = idgen_mod.IdGen;
+
+/// First application XDR proc-id, just above the reserved control band (0..=1000). The binary-wire op-table
+/// is a flat slot array indexed by `proc_id - xdr_first_proc`, so application proc-ids should be assigned
+/// densely from here up.
+const xdr_first_proc: u32 = xdr_frame.reserved_proc_max + 1;
+/// Upper bound on the slot-table span (so a typo'd huge `xdr_id` can't balloon the array to gigabytes). A
+/// proc-id at/above `xdr_first_proc + this` is a build-time `XdrProcIdTooLarge`. 65536 application ids
+/// (≈8 MiB of slots worst case) dwarfs any real API surface.
+const xdr_max_slots: u32 = 1 << 16;
+
+pub const Dispatched = union(enum) {
+    /// Reply bytes owned by the caller's `reply_alloc` — caller frees.
+    reply: []u8,
+    /// Nothing to send (a notification, or a notification-context fault).
+    none,
+    /// A subscribe request to a `server_client` topic. The (Io-aware) transport sends `reply` (the
+    /// `{result: sub_id}` ack) AND registers the subscription in its own registry. The sans-I/O core only
+    /// mints the id (via the injected `IdGen`) + builds the ack here — mirroring Python's `Transfer`
+    /// directive (delivery + the registry are transport concerns, never the lock-free core's).
+    subscribe: Subscribe,
+    /// A raw-fd transfer request. The (Io-aware) transport sends `directive.ready` (the `$/transferReady`
+    /// envelope), runs the wire handshake for `directive.direction`, builds a concrete `FileTransfer` from
+    /// the connection's fd, then calls `directive.complete(arena, &ft)` → the final response bytes. The
+    /// sans-I/O core only authorizes + negotiates + builds the directive; the fd handoff is the transport's
+    /// (mirrors Python's `Transfer`). The directive's completion state is `reply_alloc`-owned (it outlives
+    /// the per-dispatch arena) — caller frees `ready` + the directive.
+    transfer: transfer_mod.Transfer,
+
+    pub const Subscribe = struct {
+        reply: []u8, // the `{result: sub_id, id}` ack bytes — caller frees
+        sub_id: []const u8, // the minted subscription id — caller frees
+        topic: []const u8, // the topic's registered method name (long-lived)
+    };
+};
+
+/// Carried out of `dispatchFields` when the matched method is a `server_client` topic: the reply bytes are
+/// returned normally; this side-channel adds the minted id + topic so `dispatch` can build the directive.
+const SubscribeInfo = struct { sub_id: []const u8, topic: []const u8 };
+
+/// The in-flight + `$/progress` hooks the Io-aware transport supplies to `dispatchWith` (null on the
+/// sans-I/O path). The core calls `begin` just before running an id-bearing request (register it; obtain
+/// its progress sink) and `end` after it completes (purge queued progress + drop from in-flight) —
+/// mirroring Python's `_inflight[rid] = ...` / `finally: _complete(...)` bracket. Held opaquely by the
+/// core (carries `io`, never calls it); `session` is passed type-erased (the transport casts it back).
+pub const Tracker = struct {
+    ctx: *anyopaque,
+    io: std.Io,
+    /// Register an id-bearing request in-flight (passing whether its method is `cancellable`) and return
+    /// its per-request handles (the progress sink + the shared cooperative-cancel flag).
+    begin_fn: *const fn (ctx: *anyopaque, io: std.Io, rid: []const u8, session: *anyopaque, cancellable: bool) Tracked,
+    end_fn: *const fn (ctx: *anyopaque, io: std.Io, rid: []const u8) void,
+    /// Resolve a `$/cancelRequest` `target_id` to the target's OWNING session (type-erased) for the
+    /// session-scoped authorization — or null if no in-flight request/subscription has that id. Does not
+    /// act (Python resolves under the lock, then authorizes WITH the target, then acts).
+    resolve_fn: *const fn (ctx: *anyopaque, io: std.Io, target_id: []const u8) ?*anyopaque,
+    /// Act on the (now-authorized) target: set a cancellable request's cooperative flag (then run the
+    /// optional cancellation callback with `canceller`), or drop a subscription. Re-resolves under the lock
+    /// (the target may have completed since `resolve`); `canceller` is the cancelling session (type-erased).
+    act_fn: *const fn (ctx: *anyopaque, io: std.Io, target_id: []const u8, canceller: *anyopaque) CancelOutcome,
+};
+
+/// The per-request handles the transport wires into `RequestCtx` at `begin`.
+pub const Tracked = struct {
+    progress: types.ProgressSink,
+    /// The cooperative-cancel event a `$/cancelRequest` sets (null = the method is not `cancellable`).
+    cancel: ?*std.Io.Event,
+};
+
+/// The result of resolving + acting on a `$/cancelRequest` target (drives the response the core builds).
+pub const CancelOutcome = enum {
+    ok, // cancelled an in-flight request (flag set) or dropped a subscription → `{result: true}`
+    not_found, // no request or subscription with that id → REQUEST_FAILED
+    not_cancellable, // an in-flight request whose method is not `cancellable` → REQUEST_FAILED
+    handler_error, // the cancellation callback raised → INTERNAL_ERROR (the flag is still set)
+};
+
+/// `$/cancelRequest` params: the id of the request-in-flight or subscription to cancel (Python `_CancelParams`).
+const CancelParams = struct { target_id: []const u8 };
+
+pub fn Protocol(comptime S: type) type {
+    const Method = method_mod.Method(S);
+    const Session = session_mod.Session(S);
+    const RequestCtx = session_mod.RequestCtx(S);
+    const AuditSink = sink_mod.AuditSink(S);
+    const AuditRecord = sink_mod.AuditRecord(S);
+
+    return struct {
+        const Self = @This();
+
+        /// Authorization hook (mirrors Python `authorization_handler`) — a closure over an app object. The
+        /// `target` is non-null only for a `$/cancelRequest`: the owning session of the request/subscription
+        /// being cancelled (null = not found, or a normal method dispatch), so a handler can enforce
+        /// session-scoped cancellation (compare the canceller's `session` against the target's).
+        pub const Authorizer = struct {
+            ctx: *anyopaque,
+            call: *const fn (ctx: *anyopaque, request: types.RequestInfo, session: *Session, target: ?*Session) types.AuthorizationResponse,
+        };
+
+        /// `$/serverInfo` hook — an unauthenticated, infallible server-identity getter (closure over an app object).
+        pub const ServerInfoHook = struct {
+            ctx: *anyopaque,
+            call: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, session: *Session) []const u8,
+        };
+
+        /// Cancellation hook (Python `cancellation_handler`) — the optional *active-abort* callback run when
+        /// a `$/cancelRequest` cancels a cancellable in-flight request, AFTER its cooperative flag is set.
+        /// Gets the `target_id` + the cancelling `session`; a handler that raises → INTERNAL_ERROR (the
+        /// `call` wrapper reports it as `false`). Not invoked for a subscription or a non-cancellable target.
+        pub const CancellationHandler = struct {
+            ctx: *anyopaque,
+            call: *const fn (ctx: *anyopaque, target_id: []const u8, session: *Session) bool, // false = the callback errored
+        };
+
+        /// Outcome of running a session-setup handler: the result serialized to bytes (lifecycle +
+        /// `server_state_external` already committed onto the session), or a fault.
+        pub const SetupRan = union(enum) {
+            ok: struct { result_bytes: []const u8, audit_params: std.json.Value, audit_result: std.json.Value },
+            rpc_error: struct { err: errors.JsonRpcError, audit_params: std.json.Value },
+            invalid_params, // decode failed before the audit point → not audited (Python parity)
+        };
+
+        /// `$/sessionSetup` / `$/sessionSetupContinue` hook — decodes the credentials, runs the handler
+        /// `fn(*Inst, Accepts, *RequestCtx(S)) !SetupOutcome(Returns)`, then commits the returned
+        /// `lifecycle` + `server_state_external` onto the session. Closure over an app object.
+        pub const SetupHook = struct {
+            ctx: *anyopaque,
+            run: *const fn (ctx: *anyopaque, arena: std.mem.Allocator, params: std.json.Value, rid: ?[]const u8, session: *Session) SetupRan,
+        };
+
+        gpa: std.mem.Allocator,
+        name: []const u8,
+        version: []const u8,
+        methods: std.StringHashMap(Method),
+        /// The XDR binary-wire op-table as a flat SLOT array (not a hashmap): `xdr_slots[xdr_id -
+        /// xdr_first_proc]` is the method for that proc-id. Application proc-ids start just above the
+        /// reserved band, so the proc-id IS the slot index — `dispatchXdr` is a bounds check + indexed
+        /// load, no hashing/probing. Gaps (unassigned ids in range) are `null`; a registered method is a
+        /// value copy (the same `Method` also lives in `methods` by name, at no extra cost). Grown at
+        /// registration, where slot occupancy doubles as the duplicate-id check; sized to the max proc-id.
+        xdr_slots: std.ArrayList(?Method) = .empty,
+        authorizer: ?Authorizer = null,
+        cancellation_handler: ?CancellationHandler = null,
+        server_info: ?ServerInfoHook = null,
+        /// The OpenRPC description served by `$/describe` (the app registers the codegen-produced static
+        /// JSON via `Builder.describe`; null = `$/describe` is METHOD_NOT_FOUND). Spliced raw into `result`.
+        describe_doc: ?[]const u8 = null,
+        audit_sink: ?AuditSink = null,
+        session_setup: ?SetupHook = null,
+        session_setup_continue: ?SetupHook = null,
+        /// Mints subscription ids (pub/sub topics). Injected (`Builder.idGen`); required once topics exist.
+        idgen: ?IdGen = null,
+        /// True once `$/sessionSetup` is configured; activates the ESTABLISHED gate for non-`pre_auth` methods.
+        has_session_setup: bool = false,
+
+        pub const Builder = struct {
+            proto: Self,
+
+            /// Register a handler `fn(*Service, Accepts, *RequestCtx(S)) !Returns`; types are inferred
+            /// from its signature. `name` must not use a reserved (`$/`, `rpc.`) prefix or duplicate.
+            pub fn method(
+                b: *Builder,
+                name: []const u8,
+                instance: anytype,
+                comptime handler: anytype,
+                opts: method_mod.MethodOpts,
+            ) errors.BuildError!void {
+                if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
+                    return error.ReservedMethodName;
+                if (b.proto.methods.contains(name)) return error.DuplicateMethod;
+
+                const Service = @typeInfo(@TypeOf(instance)).pointer.child;
+                const fn_info = @typeInfo(@TypeOf(handler)).@"fn";
+                const Accepts = fn_info.params[1].type.?;
+                const Returns = @typeInfo(fn_info.return_type.?).error_union.payload;
+                const m = Method.define(Service, Accepts, Returns, instance, handler, name, opts);
+                try b.proto.methods.put(name, m);
+                try b.registerXdr(m, opts);
+            }
+
+            /// Register the authorization hook (a closure over `instance`): a function
+            /// `fn(*Inst, RequestInfo, *Session(S)) AuthorizationResponse`. Mirrors Python
+            /// `register_authorization_handler`.
+            pub fn authorizer(b: *Builder, instance: anytype, comptime f: anytype) void {
+                const Inst = @typeInfo(@TypeOf(instance)).pointer.child;
+                const Wrap = struct {
+                    fn call(ctx: *anyopaque, request: types.RequestInfo, session: *Session, target: ?*Session) types.AuthorizationResponse {
+                        const self: *Inst = @ptrCast(@alignCast(ctx));
+                        return f(self, request, session, target);
+                    }
+                };
+                b.proto.authorizer = .{ .ctx = @ptrCast(instance), .call = &Wrap.call };
+            }
+
+            /// Register the cancellation hook (Python `register_cancellation_handler`): a callback
+            /// `fn(*Inst, target_id, *Session(S)) !void` run when a `$/cancelRequest` cancels a cancellable
+            /// in-flight request (after its flag is set). A handler that returns an error → INTERNAL_ERROR.
+            pub fn cancellationHandler(b: *Builder, instance: anytype, comptime f: anytype) void {
+                const Inst = @typeInfo(@TypeOf(instance)).pointer.child;
+                const Wrap = struct {
+                    fn call(ctx: *anyopaque, target_id: []const u8, session: *Session) bool {
+                        const self: *Inst = @ptrCast(@alignCast(ctx));
+                        f(self, target_id, session) catch return false;
+                        return true;
+                    }
+                };
+                b.proto.cancellation_handler = .{ .ctx = @ptrCast(instance), .call = &Wrap.call };
+            }
+
+            /// Enable `$/serverInfo` with an infallible getter `fn(*Inst, *Session(S)) Returns`.
+            pub fn serverInfo(b: *Builder, instance: anytype, comptime handler: anytype) void {
+                const Inst = @typeInfo(@TypeOf(instance)).pointer.child;
+                const Returns = @typeInfo(@TypeOf(handler)).@"fn".return_type.?;
+                const Wrap = struct {
+                    fn call(ctx: *anyopaque, arena: std.mem.Allocator, session: *Session) []const u8 {
+                        const self: *Inst = @ptrCast(@alignCast(ctx));
+                        const result: Returns = handler(self, session);
+                        return method_mod.serializeToBytes(arena, Returns, result) catch "null";
+                    }
+                };
+                b.proto.server_info = .{ .ctx = @ptrCast(instance), .call = &Wrap.call };
+            }
+
+            /// Enable `$/describe` by registering the service's OpenRPC document (`doc`, a long-lived JSON
+            /// string — typically the codegen-produced `openrpc.zig`'s `pub const json`). Returned verbatim
+            /// as the `$/describe` result; without it `$/describe` is METHOD_NOT_FOUND.
+            pub fn describe(b: *Builder, doc: []const u8) void {
+                b.proto.describe_doc = doc;
+            }
+
+            /// Register the audit sink (a closure over `instance`): `fn(*Inst, AuditRecord) void`, invoked
+            /// once per `audit`-flagged method call — success, handler-error, or authorization denial —
+            /// with a secret-redacted view. Mirrors Python `register_audit_handler`.
+            pub fn auditSink(b: *Builder, instance: anytype, comptime f: anytype) void {
+                const Inst = @typeInfo(@TypeOf(instance)).pointer.child;
+                const Wrap = struct {
+                    fn call(ctx: *anyopaque, record: AuditRecord) void {
+                        const self: *Inst = @ptrCast(@alignCast(ctx));
+                        f(self, record);
+                    }
+                };
+                b.proto.audit_sink = .{ .ctx = @ptrCast(instance), .call = &Wrap.call };
+            }
+
+            /// Monomorphize a setup hook: decode `Accepts`, run the handler
+            /// `fn(*Inst, Accepts, *RequestCtx(S)) !SetupOutcome(Returns)`, serialize the result, and
+            /// commit `lifecycle` + `server_state_external`. `Returns` is read off the outcome struct.
+            fn makeSetupHook(instance: anytype, comptime handler: anytype) SetupHook {
+                const Inst = @typeInfo(@TypeOf(instance)).pointer.child;
+                const fn_info = @typeInfo(@TypeOf(handler)).@"fn";
+                const Accepts = fn_info.params[1].type.?;
+                const Outcome = @typeInfo(fn_info.return_type.?).error_union.payload;
+                const Returns = @FieldType(Outcome, "result");
+                const Thunk = struct {
+                    fn run(ctx: *anyopaque, arena: std.mem.Allocator, params: std.json.Value, rid: ?[]const u8, session: *Session) SetupRan {
+                        const self: *Inst = @ptrCast(@alignCast(ctx));
+                        const accepts = std.json.parseFromValueLeaky(Accepts, arena, params, .{ .ignore_unknown_fields = true }) catch
+                            return .invalid_params;
+                        if (@hasDecl(Accepts, "validate")) {
+                            accepts.validate() catch return .invalid_params;
+                        }
+                        // Setup is always audited (when a sink is registered) with creds redacted; it runs
+                        // once per connection, so build the redacted view here rather than thread a flag.
+                        const audit_params = redactedValue(Accepts, arena, accepts);
+                        var rctx = RequestCtx{ .arena = arena, .id = rid, .sess = session };
+                        const outcome = handler(self, accepts, &rctx) catch |e|
+                            return .{ .rpc_error = .{ .err = rctx.takeError(e), .audit_params = audit_params } };
+                        const bytes = method_mod.serializeToBytes(arena, Returns, outcome.result) catch
+                            return .{ .rpc_error = .{ .err = .{ .code = .internal_error, .message = errors.msg.invalid_result }, .audit_params = audit_params } };
+                        // Commit only after a clean run + serialize (a faulted setup leaves the session untouched).
+                        session.lifecycle = outcome.lifecycle;
+                        session.server_state_external = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch null;
+                        // A SEPARATE parse for the audit view — redactValue mutates in place, and the live
+                        // server_state_external above must keep the real (unredacted) result.
+                        const audit_result = reflect.redactValue(Returns, std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch .null);
+                        return .{ .ok = .{ .result_bytes = bytes, .audit_params = audit_params, .audit_result = audit_result } };
+                    }
+                };
+                return .{ .ctx = @ptrCast(instance), .run = &Thunk.run };
+            }
+
+            /// Enable `$/sessionSetup` (the first auth step). Activates the ESTABLISHED gate: thereafter a
+            /// non-`pre_auth` method requires an established session. Mirrors Python `add_session_setup`.
+            pub fn sessionSetup(b: *Builder, instance: anytype, comptime handler: anytype) void {
+                b.proto.session_setup = makeSetupHook(instance, handler);
+                b.proto.has_session_setup = true;
+            }
+
+            /// Enable `$/sessionSetupContinue` (a later auth step, valid only at lifecycle `init`).
+            pub fn sessionSetupContinue(b: *Builder, instance: anytype, comptime handler: anytype) void {
+                b.proto.session_setup_continue = makeSetupHook(instance, handler);
+            }
+
+            /// Register a `server_client` subscription topic: a client subscribes by calling `name` (a
+            /// request → a `{result: sub_id}` ack); `Accepts` is the subscribe params, `Notifies` is the
+            /// published-payload schema (`send_notification` validates against it). No handler — the
+            /// transport delivers the notifications. Same reserved-prefix/duplicate checks as `method`.
+            pub fn subscription(b: *Builder, name: []const u8, comptime Accepts: type, comptime Notifies: type, opts: method_mod.MethodOpts) errors.BuildError!void {
+                if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
+                    return error.ReservedMethodName;
+                if (b.proto.methods.contains(name)) return error.DuplicateMethod;
+                try b.proto.methods.put(name, Method.defineTopic(Accepts, Notifies, name, opts));
+            }
+
+            /// Register a `filterable` query method: a handler `fn(*Service, BaseAccepts, *RequestCtx(S),
+            /// *FilterSink(Entry)) !void` that streams its records into the sink (rather than returning a
+            /// value). The framework augments the request with `query-filters`/`query-options`, compiles the
+            /// filters against `Entry`, and applies count/order_by/offset/limit on the fly — serializing only
+            /// matches. `Service`/`BaseAccepts` are inferred from the handler; `Entry` (the per-record element
+            /// type) is explicit. Same reserved-prefix/duplicate checks as `method`. Codegen emits this for a
+            /// spec method marked `filterable`.
+            pub fn filterableMethod(
+                b: *Builder,
+                name: []const u8,
+                instance: anytype,
+                comptime handler: anytype,
+                comptime Entry: type,
+                opts: method_mod.MethodOpts,
+            ) errors.BuildError!void {
+                if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
+                    return error.ReservedMethodName;
+                if (b.proto.methods.contains(name)) return error.DuplicateMethod;
+
+                const Service = @typeInfo(@TypeOf(instance)).pointer.child;
+                const fn_info = @typeInfo(@TypeOf(handler)).@"fn";
+                const BaseAccepts = fn_info.params[1].type.?;
+                const m = Method.defineFilterable(Service, BaseAccepts, Entry, instance, handler, name, opts);
+                try b.proto.methods.put(name, m);
+                try b.registerXdr(m, opts);
+            }
+
+            /// Register a raw-fd transfer method. `negotiate` (`fn(*Inst, Accepts, *RequestCtx(S)) !Interim`)
+            /// validates + returns the `$/transferReady` interim; `transfer` (`fn(*Inst, Accepts,
+            /// *const FileTransfer, *RequestCtx(S)) !Returns`) does the bulk stream over the connection's fd
+            /// and returns the final result. `Accepts`/`Interim`/`Returns` are inferred from the signatures.
+            pub fn transferMethod(b: *Builder, name: []const u8, instance: anytype, comptime negotiate: anytype, comptime transfer: anytype, direction: transfer_mod.TransferDirection, opts: method_mod.MethodOpts) errors.BuildError!void {
+                return b.transferImpl(name, instance, negotiate, transfer, direction, false, opts);
+            }
+
+            /// Like `transferMethod`, but the `transfer` callback passes/receives open fds via `SCM_RIGHTS`
+            /// (AF_UNIX only — the transport restricts it to an AF_UNIX connection).
+            pub fn fdPassMethod(b: *Builder, name: []const u8, instance: anytype, comptime negotiate: anytype, comptime transfer: anytype, direction: transfer_mod.TransferDirection, opts: method_mod.MethodOpts) errors.BuildError!void {
+                return b.transferImpl(name, instance, negotiate, transfer, direction, true, opts);
+            }
+
+            fn transferImpl(b: *Builder, name: []const u8, instance: anytype, comptime negotiate: anytype, comptime transfer: anytype, direction: transfer_mod.TransferDirection, af_unix: bool, opts: method_mod.MethodOpts) errors.BuildError!void {
+                if (std.mem.startsWith(u8, name, "$/") or std.mem.startsWith(u8, name, "rpc."))
+                    return error.ReservedMethodName;
+                if (b.proto.methods.contains(name)) return error.DuplicateMethod;
+
+                const Service = @typeInfo(@TypeOf(instance)).pointer.child;
+                const neg_info = @typeInfo(@TypeOf(negotiate)).@"fn";
+                const Accepts = neg_info.params[1].type.?;
+                const Interim = @typeInfo(neg_info.return_type.?).error_union.payload;
+                const Returns = @typeInfo(@typeInfo(@TypeOf(transfer)).@"fn".return_type.?).error_union.payload;
+                const m = Method.defineTransfer(Service, Accepts, Interim, Returns, instance, negotiate, transfer, direction, af_unix, name, opts);
+                try b.proto.methods.put(name, m);
+            }
+
+            /// When a method opts into XDR, place it in the proc-id slot table at `xdr_id - xdr_first_proc`
+            /// (growing the array, gaps filled with `null`). An already-occupied slot is a `DuplicateXdrId`;
+            /// the reserved 0..=1000 band is a `ReservedXdrProcId`; a proc-id too far above the base is an
+            /// `XdrProcIdTooLarge` (the slot table is sized to the max id). gen.py enforces all three too.
+            fn registerXdr(b: *Builder, m: Method, opts: method_mod.MethodOpts) errors.BuildError!void {
+                if (!opts.xdr) return;
+                if (opts.xdr_id <= xdr_frame.reserved_proc_max) return error.ReservedXdrProcId;
+                const idx = opts.xdr_id - xdr_first_proc;
+                if (idx >= xdr_max_slots) return error.XdrProcIdTooLarge;
+                while (b.proto.xdr_slots.items.len <= idx) try b.proto.xdr_slots.append(b.proto.gpa, null);
+                if (b.proto.xdr_slots.items[idx] != null) return error.DuplicateXdrId;
+                b.proto.xdr_slots.items[idx] = m;
+            }
+
+            /// Inject the subscription-id generator (a real `UuidV4` in production; a `FixedIdGen` in
+            /// tests/conformance for a reproducible golden). Required once any topic is registered.
+            pub fn idGen(b: *Builder, gen: IdGen) void {
+                b.proto.idgen = gen;
+            }
+
+            pub fn build(b: *Builder) Self {
+                return b.proto;
+            }
+        };
+
+        pub fn builder(gpa: std.mem.Allocator, name: []const u8, version: []const u8) Builder {
+            return .{ .proto = .{
+                .gpa = gpa,
+                .name = name,
+                .version = version,
+                .methods = std.StringHashMap(Method).init(gpa),
+            } };
+        }
+
+        /// Build a protocol from a *service struct* (the primary, ergonomic authoring API — "add a
+        /// method = add a `pub fn`"). Every `pub fn` shaped like a handler
+        /// (`fn(*Service, Accepts, *RequestCtx(S)) !Returns`) becomes a method, its `Accepts`/`Returns`
+        /// inferred. An optional `pub const rpc` decl carries per-method flags + a renamed wire name:
+        /// `pub const rpc = .{ .create = .{ .name = "pool.create", .audit = true, .pre_auth = true } }`.
+        /// Protocol-wide hooks may be passed in `opts` as closures over the same service instance:
+        /// `.{ .authorizer = Svc.authorize, .server_info = Svc.serverInfo, .audit_sink = Svc.onAudit }`.
+        /// Pure sugar over `builder().method(...)` (which the A/B suite proves), so behavior is identical.
+        /// Note: a `pub fn` shaped like a session-setup handler would also match — keep those non-`pub`
+        /// (or on a separate struct) and wire them via `builder().sessionSetup(...)`.
+        pub fn fromService(gpa: std.mem.Allocator, name: []const u8, version: []const u8, service: anytype, opts: anytype) errors.BuildError!Self {
+            const Service = @typeInfo(@TypeOf(service)).pointer.child;
+            var b = builder(gpa, name, version);
+            inline for (@typeInfo(Service).@"struct".decls) |decl| {
+                const member = @field(Service, decl.name);
+                if (@typeInfo(@TypeOf(member)) == .@"fn") {
+                    const fi = @typeInfo(@TypeOf(member)).@"fn";
+                    if (comptime isServiceMethod(@TypeOf(service), fi)) {
+                        const meta = comptime methodMeta(Service, decl.name);
+                        try b.method(meta.name, service, member, meta.opts);
+                    }
+                }
+            }
+            const O = @TypeOf(opts);
+            if (@hasField(O, "authorizer")) b.authorizer(service, opts.authorizer);
+            if (@hasField(O, "server_info")) b.serverInfo(service, opts.server_info);
+            if (@hasField(O, "audit_sink")) b.auditSink(service, opts.audit_sink);
+            return b.build();
+        }
+
+        /// A handler-shaped `pub fn`: `fn(*Service, Accepts, *RequestCtx(S)) !Returns`.
+        fn isServiceMethod(comptime SelfPtr: type, comptime fi: std.builtin.Type.Fn) bool {
+            return fi.params.len == 3 and
+                fi.params[0].type == SelfPtr and
+                fi.params[2].type == *RequestCtx and
+                fi.return_type != null and
+                @typeInfo(fi.return_type.?) == .error_union;
+        }
+
+        /// Resolve a method's wire name + flags from the optional `rpc` metadata decl (defaults otherwise).
+        fn methodMeta(comptime Service: type, comptime decl_name: []const u8) struct { name: []const u8, opts: method_mod.MethodOpts } {
+            if (@hasDecl(Service, "rpc") and @hasField(@TypeOf(Service.rpc), decl_name)) {
+                const m = @field(Service.rpc, decl_name);
+                const M = @TypeOf(m);
+                return .{
+                    .name = if (@hasField(M, "name")) m.name else decl_name,
+                    .opts = .{
+                        .pre_auth = if (@hasField(M, "pre_auth")) m.pre_auth else false,
+                        .audit = if (@hasField(M, "audit")) m.audit else false,
+                        .cancellable = if (@hasField(M, "cancellable")) m.cancellable else false,
+                        .audit_message = if (@hasField(M, "audit_message")) m.audit_message else null,
+                        .roles = if (@hasField(M, "roles")) m.roles else &.{},
+                    },
+                };
+            }
+            return .{ .name = decl_name, .opts = .{} };
+        }
+
+        pub fn deinit(self: *Self) void {
+            self.methods.deinit();
+            self.xdr_slots.deinit(self.gpa);
+        }
+
+        /// session_uuid is a fixed placeholder for now (never appears in a response). The injectable
+        /// IdGen seam lands with pub/sub, where a *subscription* id does appear on the wire.
+        pub fn newSession(self: *const Self, server_state: ?S) Session {
+            return .{
+                .session_uuid = "00000000-0000-4000-8000-000000000000",
+                .protocol_name = self.name,
+                .server_state_internal = server_state,
+            };
+        }
+
+        /// The sans-I/O dispatch entry (no in-flight tracking, no `$/progress`): a pure bytes-in →
+        /// `Dispatched` function. The transport calls `dispatchWith` instead to thread its tracker.
+        pub fn dispatch(self: *const Self, reply_alloc: std.mem.Allocator, wire: []const u8, session: *Session) Dispatched {
+            return self.dispatchWith(reply_alloc, wire, session, null);
+        }
+
+        /// Like `dispatch`, but with an optional `Tracker` (the Io-aware transport's in-flight registry +
+        /// `$/progress` back-channel). `tracker = null` is the pure path, so all A/B conformance — which
+        /// calls `dispatch` — exercises the identical pipeline.
+        pub fn dispatchWith(self: *const Self, reply_alloc: std.mem.Allocator, wire: []const u8, session: *Session, tracker: ?Tracker) Dispatched {
+            var arena_state = std.heap.ArenaAllocator.init(self.gpa);
+            defer arena_state.deinit();
+            const arena = arena_state.allocator();
+
+            // XDR binary frame? (magic prefix) — route to the binary path BEFORE the JSON parse (the lone
+            // `envelope.parse` site below). It builds its own reply bytes.
+            if (xdr_frame.isXdr(wire)) {
+                const xb = self.dispatchXdr(arena, wire, session, tracker) orelse return .none;
+                return .{ .reply = reply_alloc.dupe(u8, xb) catch return .none };
+            }
+
+            // Set by `dispatchFields` only on a successful subscribe (a `server_client` topic): the side
+            // channel that promotes the normal reply into a `.subscribe` directive for the transport.
+            var sub_info: ?SubscribeInfo = null;
+            var transfer_info: ?TransferInfo = null;
+            const bytes: ?[]const u8 = switch (envelope.parse(arena, wire)) {
+                // Stage 1–3 faults are always emitted, even for an id-less message.
+                .fail => |f| envelope.errorBytes(arena, f.rid, f.code, f.message, null) catch null,
+                .fields => |fields| self.dispatchFields(arena, fields, session, &sub_info, &transfer_info, tracker),
+            };
+
+            if (bytes) |b| {
+                const owned = reply_alloc.dupe(u8, b) catch return .none;
+                if (sub_info) |si| return .{
+                    .subscribe = .{
+                        .reply = owned,
+                        .sub_id = reply_alloc.dupe(u8, si.sub_id) catch return .none,
+                        .topic = si.topic, // the registered method name (long-lived; no dupe needed)
+                    },
+                };
+                // Promote a successful negotiate into a `.transfer` directive: the completion state lives in
+                // `reply_alloc` (it outlives this arena — the transport calls `complete` post-handshake).
+                if (transfer_info) |ti| {
+                    const rid_owned = reply_alloc.dupe(u8, ti.rid) catch return .none;
+                    const tc = reply_alloc.create(TransferComplete) catch return .none;
+                    tc.* = .{
+                        .self = self,
+                        .method = ti.method,
+                        .session = session,
+                        .rid = rid_owned,
+                        .params_json = reply_alloc.dupe(u8, ti.params_json) catch return .none,
+                    };
+                    return .{ .transfer = .{
+                        .rid = rid_owned,
+                        .direction = ti.method.transfer_direction.?,
+                        .af_unix = ti.method.transfer_af_unix,
+                        .ready = owned,
+                        .complete_ctx = @ptrCast(tc),
+                        .complete_fn = &transferCompleteThunk,
+                    } };
+                }
+                return .{ .reply = owned };
+            }
+            return .none;
+        }
+
+        /// Stages 6/9/11/12 (lookup → decode → run → response). Returns the reply bytes (arena-owned)
+        /// or null = nothing to send (a notification, whose side effects still run).
+        fn dispatchFields(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, subscribe_out: *?SubscribeInfo, transfer_out: *?TransferInfo, tracker: ?Tracker) ?[]const u8 {
+            const note = !fields.has_id;
+
+            // Stage 4 — CLOSED short-circuit (a closed session rejects everything, including `$/...`).
+            if (session.lifecycle == .closed)
+                return if (note) null else (envelope.errorBytes(arena, fields.rid, .session_not_established, errors.msg.session_closed, null) catch null);
+
+            // Stage 5 — control-message interception (`$/...`).
+            if (std.mem.startsWith(u8, fields.method, "$/"))
+                return self.handleControl(arena, fields, session, tracker);
+
+            const m = self.methods.get(fields.method) orelse
+                return if (note) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+
+            // A subscribe (a `server_client` topic) is a request: it MUST carry an id so the client can
+            // receive the sub id (and later unsubscribe). A subscribe-as-notification is INVALID_REQUEST —
+            // emitted even though it has no id (mirroring `$/serverInfo`), BEFORE the gate (Python parity).
+            if (m.direction == .server_client and note)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            // A transfer request likewise MUST carry an id (the server echoes it through `$/transferReady`,
+            // `$/transferGo`, and the final response) — a transfer-as-notification is INVALID_REQUEST.
+            if (m.transfer_direction != null and note)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+
+            // Stage 8 — session gate (active only when session-setup is configured).
+            if (self.has_session_setup and !m.pre_auth and session.lifecycle != .established)
+                return if (note) null else (envelope.errorBytes(arena, fields.rid, .session_not_established, errors.msg.session_not_established, null) catch null);
+
+            // Stage 9 — decode params before authorize, so INVALID_PARAMS precedes NOT_AUTHORIZED.
+            const decoded = switch (m.decode(arena, fields.params)) {
+                .ok => |p| p,
+                .invalid_params => return if (note) null else (envelope.errorBytes(arena, fields.rid, .invalid_params, errors.msg.invalid_params, null) catch null),
+            };
+
+            // Stage 10 — authorize. A denial is still audited (success/error/denial each audit once).
+            if (self.authorizer) |authz| {
+                const info: types.RequestInfo = .{ .method = fields.method, .id = fields.rid, .params = fields.params, .roles = m.roles };
+                const verdict = authz.call(authz.ctx, info, session, null); // no cancel target for a method dispatch
+                if (!verdict.authorized) {
+                    self.maybeAudit(arena, m, fields.rid, decoded, .{ .err = .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data } }, null, session);
+                    return if (note) null else (envelope.errorBytes(arena, fields.rid, .not_authorized, verdict.message, verdict.data) catch null);
+                }
+            }
+
+            // Subscribe (`server_client`): no handler — mint a sub id + ack here; the transport registers
+            // the subscription (and captures routing) off the returned `.subscribe` directive. Mirrors the
+            // SERVER_CLIENT branch in Python's `_authorize_and_dispatch` (post-gate, post-decode, post-authz).
+            if (m.direction == .server_client)
+                return self.handleSubscribe(arena, m, fields, subscribe_out);
+
+            // Raw-fd transfer: no normal `run` — negotiate + emit a `Transfer` directive (the transport
+            // drives the handshake + fd handoff). Post-gate/decode/authz, mirroring Python `_begin_transfer`.
+            if (m.transfer_direction != null)
+                return self.handleTransfer(arena, m, decoded, fields, transfer_out, session);
+
+            // Stage 11 — run. For an id-bearing request with a tracker, register it in-flight and wire the
+            // `$/progress` sink so the handler can emit; deregister + purge stale progress once it completes
+            // (the begin/end bracket = Python's `_inflight[rid]=...` / `finally: _complete(...)`). Notifications
+            // (no id) and subscribes never reach here with an id-less tracker entry.
+            var ctx: RequestCtx = .{ .arena = arena, .id = fields.rid, .sess = session };
+            if (tracker) |tk| {
+                ctx.io = tk.io; // the app's Io (for handler I/O + the blocking waitForCancel)
+                if (fields.rid) |rid| {
+                    const tracked = tk.begin_fn(tk.ctx, tk.io, rid, @ptrCast(session), m.cancellable);
+                    ctx.progress = tracked.progress;
+                    ctx.cancel = tracked.cancel;
+                }
+            }
+            const ran = m.run(decoded, &ctx);
+            if (tracker) |tk| if (fields.rid) |rid| tk.end_fn(tk.ctx, tk.io, rid);
+
+            // Stage 12 — audit (success or handler-error, carrying the handler's runtime detail). Fires
+            // even for a notification, whose response is built for the audit view but not sent (Python parity).
+            self.maybeAudit(arena, m, fields.rid, decoded, switch (ran) {
+                .ok_bytes => |bytes| .{ .ok_result_bytes = bytes },
+                .rpc_error => |e| .{ .err = e },
+            }, ctx.audit_message, session);
+
+            if (note) return null; // notification: the handler ran (side effects) but we send nothing.
+
+            return switch (ran) {
+                .ok_bytes => |bytes| envelope.successBytesRaw(arena, fields.rid, bytes) catch null,
+                .rpc_error => |e| envelope.errorBytes(arena, fields.rid, e.code, e.message, e.data) catch null,
+            };
+        }
+
+        /// The XDR binary-wire dispatch (the analog of `dispatchFields`): parse the frame, look up by
+        /// proc-id, then REUSE the wire-independent stages — closed/gate, authorize, run (+tracker), audit —
+        /// swapping only the codec (`xdr_decode_fn`/`xdr_run_fn`) and the envelope (`xdr_frame`). Control
+        /// messages + subscribe stay JSON, so an XDR frame is always a method call. Returns the reply-frame
+        /// bytes (arena-owned), or null (a notification, or a fault on a notification). Audit's result view
+        /// degrades to null for XDR (the binary result isn't JSON-reparseable) — params + errors audit fine.
+        fn dispatchXdr(self: *const Self, arena: std.mem.Allocator, wire: []const u8, session: *Session, tracker: ?Tracker) ?[]const u8 {
+            const xerr = struct {
+                fn f(a: std.mem.Allocator, rid: ?[16]u8, is_note: bool, e: errors.JsonRpcError) ?[]const u8 {
+                    return if (is_note) null else (xdr_frame.errorFrame(a, rid, e) catch null);
+                }
+            }.f;
+
+            const req = xdr_frame.parseRequest(arena, wire) catch
+                return xdr_frame.errorFrame(arena, null, .{ .code = .invalid_request, .message = errors.msg.invalid_request }) catch null;
+            const note = req.rid_bytes == null;
+
+            if (req.version != xdr_frame.VERSION)
+                return xerr(arena, req.rid_bytes, note, .{ .code = .invalid_request, .message = errors.msg.invalid_request });
+            if (session.lifecycle == .closed)
+                return xerr(arena, req.rid_bytes, note, .{ .code = .session_not_established, .message = errors.msg.session_closed });
+
+            // Slot-table lookup: the proc-id IS the index (offset by the reserved base). Wrapping subtract
+            // sends a reserved/under-range id to a huge index → caught by the same bounds check as an
+            // over-range id. No hashing — a bounds check + one indexed load.
+            const slot = req.proc_id -% xdr_first_proc;
+            const m = (if (slot < self.xdr_slots.items.len) self.xdr_slots.items[slot] else null) orelse
+                return xerr(arena, req.rid_bytes, note, .{ .code = .method_not_found, .message = errors.msg.method_not_found });
+
+            // Session gate (active only when session-setup is configured).
+            if (self.has_session_setup and !m.pre_auth and session.lifecycle != .established)
+                return xerr(arena, req.rid_bytes, note, .{ .code = .session_not_established, .message = errors.msg.session_not_established });
+
+            // The id rides into the reply as raw bytes (no allocation — the hot path). It is canonicalized
+            // to the UUID string that the string-keyed shared machinery (authz info / in-flight tracker /
+            // audit) expects ONLY when one of those is actually engaged, so a plain method call never
+            // touches the allocator for the id at all.
+            const rid_str: ?[]const u8 = if (req.rid_bytes) |b|
+                (if (self.authorizer != null or m.audit or tracker != null) (xdr_frame.bytesToUuid(arena, b) catch null) else null)
+            else
+                null;
+
+            // Decode (before authorize, so INVALID_PARAMS precedes NOT_AUTHORIZED).
+            const decoded = switch (m.xdr_decode_fn(arena, req.params)) {
+                .ok => |p| p,
+                .invalid_params => return xerr(arena, req.rid_bytes, note, .{ .code = .invalid_params, .message = errors.msg.invalid_params }),
+            };
+
+            // Authorize (a denial is still audited).
+            if (self.authorizer) |authz| {
+                const info: types.RequestInfo = .{ .method = m.name, .id = rid_str, .params = .null, .roles = m.roles };
+                const verdict = authz.call(authz.ctx, info, session, null);
+                if (!verdict.authorized) {
+                    self.maybeAudit(arena, m, rid_str, decoded, .{ .err = .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data } }, null, session);
+                    return xerr(arena, req.rid_bytes, note, .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data });
+                }
+            }
+
+            // Run (with the in-flight/progress/cancel tracker, like the JSON path).
+            var ctx: RequestCtx = .{ .arena = arena, .id = rid_str, .sess = session };
+            if (tracker) |tk| {
+                ctx.io = tk.io;
+                if (rid_str) |rid| {
+                    const tracked = tk.begin_fn(tk.ctx, tk.io, rid, @ptrCast(session), m.cancellable);
+                    ctx.progress = tracked.progress;
+                    ctx.cancel = tracked.cancel;
+                }
+            }
+            const ran = m.xdr_run_fn(m.instance, decoded, &ctx);
+            if (tracker) |tk| if (rid_str) |rid| tk.end_fn(tk.ctx, tk.io, rid);
+
+            self.maybeAudit(arena, m, rid_str, decoded, switch (ran) {
+                .ok_bytes => |bytes| .{ .ok_result_bytes = bytes },
+                .rpc_error => |e| .{ .err = e },
+            }, ctx.audit_message, session);
+
+            if (note) return null;
+            return switch (ran) {
+                .ok_bytes => |bytes| xdr_frame.replyBytes(arena, req.rid_bytes, bytes) catch null,
+                .rpc_error => |e| xdr_frame.errorFrame(arena, req.rid_bytes, e) catch null,
+            };
+        }
+
+        /// Subscribe to a `server_client` topic (reached post-gate, post-decode, post-authorize): mint a
+        /// subscription id via the injected `IdGen`, build the ack, and hand the id + topic out through
+        /// `subscribe_out` so `dispatch` returns a `.subscribe` directive. The Io-aware transport registers
+        /// the subscription (and captures routing) off that directive; the lock-free core never holds the
+        /// registry. The ack `result` is the bare sub_id string (mirroring Python `{"result": sub_id}`).
+        fn handleSubscribe(self: *const Self, arena: std.mem.Allocator, m: Method, fields: envelope.Fields, subscribe_out: *?SubscribeInfo) ?[]const u8 {
+            const gen = self.idgen orelse
+                return envelope.errorBytes(arena, fields.rid, .internal_error, errors.msg.internal_error, null) catch null;
+            var buf: [idgen_mod.uuid_len]u8 = undefined;
+            const sub_id = gen.next(&buf);
+            const result_json = std.json.Stringify.valueAlloc(arena, std.json.Value{ .string = sub_id }, .{}) catch return null;
+            const ack = envelope.successBytesRaw(arena, fields.rid, result_json) catch return null;
+            // `sub_id` aliases the stack `buf`; dupe into the arena before it escapes via `subscribe_out`
+            // (dispatch re-dupes into `reply_alloc`). `m.name` is the long-lived registered topic name.
+            subscribe_out.* = .{ .sub_id = arena.dupe(u8, sub_id) catch return null, .topic = m.name };
+            return ack;
+        }
+
+        // ── raw-fd transfer ─────────────────────────────────────────────────────
+        /// Side-channel set by `dispatchFields` on a successful negotiate (a transfer method): what
+        /// `dispatch` needs to promote the `$/transferReady` reply into a `.transfer` directive +
+        /// build the `reply_alloc`-owned completion state. `direction`/`af_unix` come off `method`.
+        const TransferInfo = struct {
+            method: Method,
+            rid: []const u8, // arena — dispatch re-dupes into reply_alloc
+            params_json: []const u8, // the original params, serialized — arena; re-decoded at complete()
+        };
+
+        /// The `reply_alloc`-owned completion state behind a `.transfer` directive's `complete` thunk. It
+        /// must outlive the per-dispatch arena (the transport calls `complete` AFTER the handshake), so the
+        /// params travel as self-contained JSON, re-decoded into the transport's arena at complete time.
+        const TransferComplete = struct {
+            self: *const Self, // long-lived (the audit sink + maybeAudit)
+            method: Method, // value type: instance + decode + transfer_run_fn + audit thunks (stable refs)
+            session: *Session, // the connection's session (transport-owned; valid through the transfer)
+            rid: []const u8, // reply_alloc
+            params_json: []const u8, // reply_alloc
+        };
+
+        /// The erased `complete` thunk (transfer.zig `Transfer.complete_fn`): re-decode the params, run the
+        /// `transfer` callback over `ft`, audit the completion (Python `_run_transfer`), and build the final
+        /// response. Runs in the TRANSPORT, post-handshake, with the transport's `arena`.
+        fn transferCompleteThunk(ctx_ptr: *anyopaque, arena: std.mem.Allocator, ft: *const transfer_mod.FileTransfer) ?[]const u8 {
+            const tc: *TransferComplete = @ptrCast(@alignCast(ctx_ptr));
+            const value = std.json.parseFromSliceLeaky(std.json.Value, arena, tc.params_json, .{}) catch
+                return envelope.errorBytes(arena, tc.rid, .internal_error, errors.msg.internal_error, null) catch null;
+            const decoded = switch (tc.method.decode(arena, value)) {
+                .ok => |p| p,
+                .invalid_params => return envelope.errorBytes(arena, tc.rid, .invalid_params, errors.msg.invalid_params, null) catch null,
+            };
+            var ctx: RequestCtx = .{ .arena = arena, .id = tc.rid, .sess = tc.session };
+            const ran = tc.method.transfer_run_fn(tc.method.instance, decoded, ft, &ctx);
+            tc.self.maybeAudit(arena, tc.method, tc.rid, decoded, switch (ran) {
+                .ok_bytes => |b| .{ .ok_result_bytes = b },
+                .rpc_error => |e| .{ .err = e },
+            }, ctx.audit_message, tc.session);
+            return switch (ran) {
+                .ok_bytes => |b| envelope.successBytesRaw(arena, tc.rid, b) catch null,
+                .rpc_error => |e| envelope.errorBytes(arena, tc.rid, e.code, e.message, e.data) catch null,
+            };
+        }
+
+        /// The `$/transferReady` envelope: `{jsonrpc, method, params:{id, direction, result:<interim>}}` —
+        /// byte-for-byte Python's `msgspec.json.encode` (compact; key order id→direction→result). `rid` (a
+        /// canonical UUID) + `direction.wire()` are quote-safe; `interim_json` is spliced raw.
+        fn buildTransferReady(arena: std.mem.Allocator, rid: []const u8, direction: transfer_mod.TransferDirection, interim_json: []const u8) ![]u8 {
+            return std.fmt.allocPrint(arena, "{{\"jsonrpc\":\"2.0\",\"method\":\"$/transferReady\",\"params\":{{\"id\":\"{s}\",\"direction\":\"{s}\",\"result\":{s}}}}}", .{ rid, direction.wire(), interim_json });
+        }
+
+        /// A transfer method (reached post-gate/decode/authz, like `handleSubscribe`): run `negotiate` — on
+        /// error, audit + return the error reply; on success, build the `$/transferReady` envelope, set the
+        /// side-channel (so `dispatch` builds the directive), and return the envelope. Mirrors Python's
+        /// `_begin_transfer` (authz already ran in the shared step above).
+        fn handleTransfer(self: *const Self, arena: std.mem.Allocator, m: Method, decoded: *anyopaque, fields: envelope.Fields, transfer_out: *?TransferInfo, session: *Session) ?[]const u8 {
+            const rid = fields.rid.?; // a transfer requires an id (checked before the gate)
+            var ctx: RequestCtx = .{ .arena = arena, .id = rid, .sess = session };
+            const interim_json = switch (m.negotiate_fn(m.instance, decoded, &ctx)) {
+                .ok_interim_json => |j| j,
+                .rpc_error => |e| {
+                    self.maybeAudit(arena, m, rid, decoded, .{ .err = e }, ctx.audit_message, session);
+                    return envelope.errorBytes(arena, rid, e.code, e.message, e.data) catch null;
+                },
+            };
+            const ready = buildTransferReady(arena, rid, m.transfer_direction.?, interim_json) catch return null;
+            // Serialize the ORIGINAL params (self-contained JSON) so the completion state — built into
+            // reply_alloc by dispatch — can re-decode them at complete() time, past this arena's lifetime.
+            const params_json = std.json.Stringify.valueAlloc(arena, fields.params, .{}) catch return null;
+            transfer_out.* = .{ .method = m, .rid = rid, .params_json = params_json };
+            return ready;
+        }
+
+        /// What the audit record's `response` view is built from: `ok_result_bytes` are the success
+        /// result bytes (redacted via the method's `Returns` plan); `err` is an error/denial (passed
+        /// through — error envelopes carry no secret fields).
+        const AuditOutcome = union(enum) {
+            ok_result_bytes: []const u8,
+            err: errors.JsonRpcError,
+        };
+
+        /// Emit one audit record iff the protocol has a sink and the method opted in (`audit = true`).
+        /// Off the hot path: builds the redacted params + response Values and the assembled message.
+        fn maybeAudit(self: *const Self, arena: std.mem.Allocator, m: Method, rid: ?[]const u8, decoded: *anyopaque, outcome: AuditOutcome, detail: ?[]const u8, session: *Session) void {
+            const audit = self.audit_sink orelse return;
+            if (!m.audit) return;
+            const response_v: std.json.Value = switch (outcome) {
+                .ok_result_bytes => |bytes| auditSuccessValue(arena, rid, m.auditResult(arena, bytes)),
+                .err => |e| auditErrorValue(arena, rid, e),
+            };
+            audit.call(audit.ctx, .{
+                .method = m.name,
+                .id = rid,
+                .params = m.auditParams(arena, decoded),
+                .roles = m.roles,
+                .response = response_v,
+                .message = assembleAuditMessage(arena, m.audit_message, detail),
+                .session = session,
+            });
+        }
+
+        /// Emit a control-op audit record (`$/sessionSetup`/`Continue`/`Close`): no per-method plans,
+        /// empty `roles`, null `message`; `params`/`response` are built by the caller.
+        fn emitControlAudit(audit: AuditSink, method_name: []const u8, rid: ?[]const u8, params: std.json.Value, response: std.json.Value, session: *Session) void {
+            audit.call(audit.ctx, .{
+                .method = method_name,
+                .id = rid,
+                .params = params,
+                .roles = &.{},
+                .response = response,
+                .message = null,
+                .session = session,
+            });
+        }
+
+        fn handleControl(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, tracker: ?Tracker) ?[]const u8 {
+            if (std.mem.eql(u8, fields.method, "$/serverInfo")) return self.handleServerInfo(arena, fields, session);
+            if (std.mem.eql(u8, fields.method, "$/describe")) return self.handleDescribe(arena, fields);
+            if (std.mem.eql(u8, fields.method, "$/sessionSetup")) return self.handleSessionSetup(arena, fields, session);
+            if (std.mem.eql(u8, fields.method, "$/sessionSetupContinue")) return self.handleSessionContinue(arena, fields, session);
+            if (std.mem.eql(u8, fields.method, "$/sessionClose")) return self.handleSessionClose(arena, fields, session);
+            if (std.mem.eql(u8, fields.method, "$/cancelRequest")) return self.handleCancel(arena, fields, session, tracker);
+            // Unknown `$/` control: METHOD_NOT_FOUND for a request, ignored for a notification.
+            return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+        }
+
+        /// `$/serverInfo` — unauthenticated, pre-gate, not audited; requires an id (never suppressed).
+        fn handleServerInfo(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+            const hook = self.server_info orelse
+                return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            const result_json = hook.call(hook.ctx, arena, session);
+            return envelope.successBytesRaw(arena, fields.rid, result_json) catch null;
+        }
+
+        /// `$/describe` — unauthenticated, pre-gate, not audited; requires an id. Returns the registered
+        /// OpenRPC document verbatim as `result` (METHOD_NOT_FOUND when none is registered). Like
+        /// `$/serverInfo`, but the payload is the static codegen-produced doc, spliced in raw.
+        fn handleDescribe(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields) ?[]const u8 {
+            const doc = self.describe_doc orelse
+                return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            return envelope.successBytesRaw(arena, fields.rid, doc) catch null;
+        }
+
+        /// `$/sessionSetup` — the first auth step, valid only at lifecycle `none`. Requires an id.
+        /// Bypasses authz (it *is* the auth step). (Audit of setup lands with the control-op audit.)
+        fn handleSessionSetup(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+            const hook = self.session_setup orelse
+                return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            if (session.lifecycle != .none)
+                return envelope.errorBytes(arena, fields.rid, .request_failed, errors.msg.request_failed, null) catch null;
+            return self.runSessionSetup(arena, hook, fields, session, "$/sessionSetup");
+        }
+
+        /// `$/sessionSetupContinue` — a later auth step, valid only at lifecycle `init`. Requires an id.
+        fn handleSessionContinue(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+            const hook = self.session_setup_continue orelse
+                return if (!fields.has_id) null else (envelope.errorBytes(arena, fields.rid, .method_not_found, errors.msg.method_not_found, null) catch null);
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            if (session.lifecycle != .init)
+                return envelope.errorBytes(arena, fields.rid, .request_failed, errors.msg.request_failed, null) catch null;
+            return self.runSessionSetup(arena, hook, fields, session, "$/sessionSetupContinue");
+        }
+
+        fn runSessionSetup(self: *const Self, arena: std.mem.Allocator, hook: SetupHook, fields: envelope.Fields, session: *Session, method_name: []const u8) ?[]const u8 {
+            const ran = hook.run(hook.ctx, arena, fields.params, fields.rid, session);
+            // Setup is ALWAYS audited (when a sink is set) on success + handler-error — creds redacted via
+            // the setup type's plan; not on invalid_params (decode failed, before the audit point).
+            if (self.audit_sink) |audit| switch (ran) {
+                .ok => |o| emitControlAudit(audit, method_name, fields.rid, o.audit_params, auditSuccessValue(arena, fields.rid, o.audit_result), session),
+                .rpc_error => |e| emitControlAudit(audit, method_name, fields.rid, e.audit_params, auditErrorValue(arena, fields.rid, e.err), session),
+                .invalid_params => {},
+            };
+            return switch (ran) {
+                .ok => |o| envelope.successBytesRaw(arena, fields.rid, o.result_bytes) catch null,
+                .invalid_params => envelope.errorBytes(arena, fields.rid, .invalid_params, errors.msg.invalid_params, null) catch null,
+                .rpc_error => |e| envelope.errorBytes(arena, fields.rid, e.err.code, e.err.message, e.err.data) catch null,
+            };
+        }
+
+        /// `$/sessionClose` — client logout (`init`/`established` → `closed`). Requires an id; no authz.
+        /// Audited (when a sink is set) with no method plans: params = null, response = {result:true}.
+        fn handleSessionClose(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session) ?[]const u8 {
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            if (session.lifecycle != .init and session.lifecycle != .established)
+                return envelope.errorBytes(arena, fields.rid, .request_failed, errors.msg.request_failed, null) catch null;
+            session.lifecycle = .closed;
+            if (self.audit_sink) |audit|
+                emitControlAudit(audit, "$/sessionClose", fields.rid, .null, auditSuccessValue(arena, fields.rid, .{ .bool = true }), session);
+            return envelope.successBytesRaw(arena, fields.rid, "true") catch null;
+        }
+
+        /// `$/cancelRequest` — cancel an in-flight request or drop a subscription by `target_id`. A control
+        /// op that (uniquely) runs the authorizer and is audited; it requires an id. Resolution + action
+        /// live in the Io-aware transport (it owns the registries): the core authorizes, then delegates to
+        /// `tracker.cancel_fn`. With no tracker (the sans-I/O path) no target resolves → REQUEST_FAILED.
+        /// (The target-aware, session-scoped authorization is a follow-up.)
+        fn handleCancel(self: *const Self, arena: std.mem.Allocator, fields: envelope.Fields, session: *Session, tracker: ?Tracker) ?[]const u8 {
+            if (!fields.has_id)
+                return envelope.errorBytes(arena, fields.rid, .invalid_request, errors.msg.invalid_request, null) catch null;
+            const params = std.json.parseFromValueLeaky(CancelParams, arena, fields.params, .{ .ignore_unknown_fields = true }) catch
+                return envelope.errorBytes(arena, fields.rid, .invalid_params, errors.msg.invalid_params, null) catch null;
+
+            // Resolve the target's session (for session-scoped authz), authorize WITH it, then act —
+            // mirroring Python's `_authorize_and_cancel` (resolve → authorize(target) → act). Authorizing
+            // before the existence check means an unauthorized caller is denied without learning whether
+            // the target exists. A denial / unknown / non-cancellable target all error; only an applied
+            // cancel or unsubscribe succeeds.
+            const Result = union(enum) { ok, err: errors.JsonRpcError };
+            const result: Result = blk: {
+                const target: ?*Session = if (tracker) |tk|
+                    (if (tk.resolve_fn(tk.ctx, tk.io, params.target_id)) |s| @ptrCast(@alignCast(s)) else null)
+                else
+                    null;
+                if (self.authorizer) |authz| {
+                    const info: types.RequestInfo = .{ .method = "$/cancelRequest", .id = fields.rid, .params = fields.params, .roles = &.{} };
+                    const verdict = authz.call(authz.ctx, info, session, target);
+                    if (!verdict.authorized)
+                        break :blk .{ .err = .{ .code = .not_authorized, .message = verdict.message, .data = verdict.data } };
+                }
+                const outcome = if (tracker) |tk| tk.act_fn(tk.ctx, tk.io, params.target_id, @ptrCast(session)) else .not_found;
+                break :blk switch (outcome) {
+                    .ok => .ok,
+                    // not_found / not_cancellable both → REQUEST_FAILED (Python differs only in the detail
+                    // `data` string, which the A/B strips to the code + message).
+                    .not_found, .not_cancellable => .{ .err = .{ .code = .request_failed, .message = errors.msg.request_failed, .data = null } },
+                    // the cancellation callback raised → INTERNAL_ERROR (the request's flag is still set).
+                    .handler_error => .{ .err = .{ .code = .internal_error, .message = errors.msg.internal_error, .data = null } },
+                };
+            };
+
+            // Control-op audit (when a sink is set): method "$/cancelRequest", params {target_id}, the response.
+            if (self.audit_sink) |audit| {
+                var pobj: std.json.ObjectMap = .empty;
+                pobj.put(arena, "target_id", .{ .string = params.target_id }) catch {};
+                const resp_v = switch (result) {
+                    .ok => auditSuccessValue(arena, fields.rid, .{ .bool = true }),
+                    .err => |e| auditErrorValue(arena, fields.rid, e),
+                };
+                emitControlAudit(audit, "$/cancelRequest", fields.rid, .{ .object = pobj }, resp_v, session);
+            }
+            return switch (result) {
+                .ok => envelope.successBytesRaw(arena, fields.rid, "true") catch null,
+                .err => |e| envelope.errorBytes(arena, fields.rid, e.code, e.message, e.data) catch null,
+            };
+        }
+    };
+}
+
+// Audit-view builders (module scope; independent of `S`). The audit response mirrors the wire envelope
+// but carries the *redacted* result, so secrets never reach the audit handler.
+
+/// Redacted audit view of a typed value: serialize, reparse (a throwaway tree), mask secrets via the
+/// comptime plan. Used for session-setup credentials (the per-method path uses `Method.auditParams`).
+fn redactedValue(comptime T: type, arena: std.mem.Allocator, value: T) std.json.Value {
+    const bytes = method_mod.serializeToBytes(arena, T, value) catch return .null;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}) catch return .null;
+    return reflect.redactValue(T, v);
+}
+
+fn auditSuccessValue(arena: std.mem.Allocator, rid: ?[]const u8, result: std.json.Value) std.json.Value {
+    var obj: std.json.ObjectMap = .empty;
+    obj.put(arena, "jsonrpc", .{ .string = "2.0" }) catch return .null;
+    obj.put(arena, "result", result) catch return .null;
+    obj.put(arena, "id", auditId(rid)) catch return .null;
+    return .{ .object = obj };
+}
+
+fn auditErrorValue(arena: std.mem.Allocator, rid: ?[]const u8, e: errors.JsonRpcError) std.json.Value {
+    var err_obj: std.json.ObjectMap = .empty;
+    err_obj.put(arena, "code", .{ .integer = @intFromEnum(e.code) }) catch return .null;
+    err_obj.put(arena, "message", .{ .string = e.message }) catch return .null;
+    if (e.data) |d| err_obj.put(arena, "data", d) catch {};
+    var obj: std.json.ObjectMap = .empty;
+    obj.put(arena, "jsonrpc", .{ .string = "2.0" }) catch return .null;
+    obj.put(arena, "error", .{ .object = err_obj }) catch return .null;
+    obj.put(arena, "id", auditId(rid)) catch return .null;
+    return .{ .object = obj };
+}
+
+fn auditId(rid: ?[]const u8) std.json.Value {
+    return if (rid) |r| .{ .string = r } else .null;
+}
+
+/// Join the static per-method audit message (`base`) with the runtime `detail` (`set_audit`) into one:
+/// `"base detail"` if both, else whichever is present, else null. Byte-matches Python `_assemble_audit_message`.
+fn assembleAuditMessage(arena: std.mem.Allocator, base: ?[]const u8, detail: ?[]const u8) ?[]const u8 {
+    if (base) |b| {
+        if (detail) |d| return std.fmt.allocPrint(arena, "{s} {s}", .{ b, d }) catch b;
+        return b;
+    }
+    return detail;
+}
+
+// ── Tests: the Zig dispatch spine end-to-end ─────────────────────────────────
+const testing = std.testing;
+const json_eq = @import("json_eq.zig");
+
+const PoolCreateArgs = struct { name: []const u8 };
+const PoolCreateResult = struct { id: u32, name: []const u8 };
+const AddArgs = struct { a: i64, b: i64 };
+const AddResult = struct { sum: i64 };
+const NoArgs = struct {};
+const ServerInfoResult = struct { name: []const u8, version: []const u8 };
+
+const Api = struct {
+    fn create(_: *Api, args: PoolCreateArgs, _: *session_mod.RequestCtx(void)) !PoolCreateResult {
+        return .{ .id = 7, .name = args.name };
+    }
+    fn add(_: *Api, args: AddArgs, _: *session_mod.RequestCtx(void)) !AddResult {
+        return .{ .sum = args.a + args.b };
+    }
+    fn boom(_: *Api, _: NoArgs, _: *session_mod.RequestCtx(void)) !NoArgs {
+        return error.Boom;
+    }
+    fn failing(_: *Api, _: NoArgs, ctx: *session_mod.RequestCtx(void)) !NoArgs {
+        return ctx.fail(.request_failed, "expected failure", null);
+    }
+    fn secretOp(_: *Api, args: AddArgs, _: *session_mod.RequestCtx(void)) !AddResult {
+        return .{ .sum = args.a + args.b };
+    }
+    fn authorize(_: *Api, request: types.RequestInfo, _: *session_mod.Session(void), _: ?*session_mod.Session(void)) types.AuthorizationResponse {
+        if (std.mem.eql(u8, request.method, "secret_op")) return .{ .authorized = false, .message = "nope" };
+        return .{ .authorized = true };
+    }
+    fn serverInfo(_: *Api, _: *session_mod.Session(void)) ServerInfoResult {
+        return .{ .name = "truenas", .version = "42" };
+    }
+};
+
+fn buildApi(gpa: std.mem.Allocator, api: *Api) !Protocol(void) {
+    var b = Protocol(void).builder(gpa, "test", "1.0.0");
+    try b.method("pool.create", api, Api.create, .{});
+    try b.method("add", api, Api.add, .{});
+    try b.method("boom", api, Api.boom, .{});
+    try b.method("fail", api, Api.failing, .{});
+    return b.build();
+}
+
+/// Dispatch `wire` and return the reply parsed to a Value (or null for `.none`).
+fn rj(proto: *Protocol(void), arena: std.mem.Allocator, wire: []const u8) !?std.json.Value {
+    var sess = proto.newSession(null);
+    switch (proto.dispatch(arena, wire, &sess)) {
+        .none => return null,
+        .reply => |bytes| return try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{}),
+        .subscribe => |s| return try std.json.parseFromSliceLeaky(std.json.Value, arena, s.reply, .{}),
+        .transfer => |t| return try std.json.parseFromSliceLeaky(std.json.Value, arena, t.ready, .{}),
+    }
+}
+
+fn expectJson(arena: std.mem.Allocator, actual: ?std.json.Value, expected_json: []const u8) !void {
+    try testing.expect(actual != null);
+    const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, expected_json, .{});
+    try testing.expect(json_eq.eql(actual.?, exp));
+}
+
+fn expectJsonStr(arena: std.mem.Allocator, actual_json: []const u8, expected_json: []const u8) !void {
+    const a = try std.json.parseFromSliceLeaky(std.json.Value, arena, actual_json, .{});
+    const e = try std.json.parseFromSliceLeaky(std.json.Value, arena, expected_json, .{});
+    try testing.expect(json_eq.eql(a, e));
+}
+
+test "audit: redacts params+result, joins message, audits denial w/o detail, skips audit=false" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const Secret = @import("meta.zig").Secret;
+    const LoginArgs = struct { user: []const u8, password: Secret([]const u8) };
+    const LoginResult = struct { token: Secret([]const u8), ok: bool };
+    const PingArgs = struct {};
+    const PingResult = struct { pong: bool };
+
+    const Svc = struct {
+        fn login(_: *@This(), args: LoginArgs, ctx: *session_mod.RequestCtx(void)) !LoginResult {
+            ctx.setAudit(std.fmt.allocPrint(ctx.arena, "as {s}", .{args.user}) catch "as ?");
+            return .{ .token = .{ .value = "tok-secret" }, .ok = true };
+        }
+        fn ping(_: *@This(), _: PingArgs, _: *session_mod.RequestCtx(void)) !PingResult {
+            return .{ .pong = true };
+        }
+        fn authorize(_: *@This(), info: types.RequestInfo, _: *session_mod.Session(void), _: ?*session_mod.Session(void)) types.AuthorizationResponse {
+            if (info.params == .object) if (info.params.object.get("user")) |u| {
+                if (u == .string and std.mem.eql(u8, u.string, "denyme")) return .{ .authorized = false, .message = "denied" };
+            };
+            return .{ .authorized = true };
+        }
+    };
+
+    const Capture = struct {
+        arena: std.mem.Allocator,
+        n: u32 = 0,
+        method: ?[]const u8 = null,
+        params: ?[]const u8 = null,
+        response: ?[]const u8 = null,
+        message: ?[]const u8 = null,
+        fn onAudit(self: *@This(), rec: sink_mod.AuditRecord(void)) void {
+            self.n += 1;
+            self.method = rec.method;
+            self.params = std.json.Stringify.valueAlloc(self.arena, rec.params, .{}) catch null;
+            self.response = std.json.Stringify.valueAlloc(self.arena, rec.response, .{}) catch null;
+            self.message = if (rec.message) |m| (self.arena.dupe(u8, m) catch null) else null;
+        }
+    };
+
+    var svc = Svc{};
+    var cap = Capture{ .arena = arena };
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("login", &svc, Svc.login, .{ .audit = true, .audit_message = "user login" });
+    try b.method("ping", &svc, Svc.ping, .{}); // audit = false
+    b.authorizer(&svc, Svc.authorize);
+    b.auditSink(&cap, Capture.onAudit);
+    var proto = b.build();
+    defer proto.deinit();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+    // success: the WIRE carries the real secret; the AUDIT view masks params + result; message is joined.
+    cap = .{ .arena = arena };
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"login\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"token\":\"tok-secret\",\"ok\":true}}");
+    try testing.expectEqual(@as(u32, 1), cap.n);
+    try testing.expectEqualStrings("login", cap.method.?);
+    try expectJsonStr(arena, cap.params.?, "{\"user\":\"bob\",\"password\":\"********\"}");
+    try expectJsonStr(arena, cap.response.?, "{\"jsonrpc\":\"2.0\",\"result\":{\"token\":\"********\",\"ok\":true},\"id\":\"" ++ uid ++ "\"}");
+    try testing.expectEqualStrings("user login as bob", cap.message.?);
+
+    // denial: still audited (params redacted, error response), but message has NO detail (handler never ran).
+    cap = .{ .arena = arena };
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"login\",\"params\":{\"user\":\"denyme\",\"password\":\"x\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32000,\"message\":\"denied\"}}");
+    try testing.expectEqual(@as(u32, 1), cap.n);
+    try expectJsonStr(arena, cap.params.?, "{\"user\":\"denyme\",\"password\":\"********\"}");
+    try expectJsonStr(arena, cap.response.?, "{\"jsonrpc\":\"2.0\",\"error\":{\"code\":-32000,\"message\":\"denied\"},\"id\":\"" ++ uid ++ "\"}");
+    try testing.expectEqualStrings("user login", cap.message.?);
+
+    // audit = false: no record even though a sink is registered.
+    cap = .{ .arena = arena };
+    _ = try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"ping\",\"params\":{}}");
+    try testing.expectEqual(@as(u32, 0), cap.n);
+}
+
+test "session lifecycle: gate, pre_auth bypass, setup→init→continue→established, close→closed" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const SetupArgs = struct { user: []const u8 };
+    const ContinueArgs = struct { otp: []const u8 };
+    const SetupAck = struct { stage: []const u8 };
+    const Whoami = struct { who: []const u8 };
+    const Version = struct { v: []const u8 };
+
+    const Svc = struct {
+        fn setup(_: *@This(), _: SetupArgs, _: *session_mod.RequestCtx(void)) !types.SetupOutcome(SetupAck) {
+            return .{ .lifecycle = .init, .result = .{ .stage = "init" } };
+        }
+        fn cont(_: *@This(), _: ContinueArgs, _: *session_mod.RequestCtx(void)) !types.SetupOutcome(SetupAck) {
+            return .{ .lifecycle = .established, .result = .{ .stage = "established" } };
+        }
+        fn whoami(_: *@This(), _: struct {}, _: *session_mod.RequestCtx(void)) !Whoami {
+            return .{ .who = "authed" };
+        }
+        fn version(_: *@This(), _: struct {}, _: *session_mod.RequestCtx(void)) !Version {
+            return .{ .v = "1.0" };
+        }
+    };
+    const H = struct {
+        fn go(p: *Protocol(void), a: std.mem.Allocator, s: *session_mod.Session(void), wire: []const u8) !?std.json.Value {
+            return switch (p.dispatch(a, wire, s)) {
+                .none => null,
+                .reply => |bytes| try std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{}),
+                .subscribe => |sub| try std.json.parseFromSliceLeaky(std.json.Value, a, sub.reply, .{}),
+                .transfer => |t| try std.json.parseFromSliceLeaky(std.json.Value, a, t.ready, .{}),
+            };
+        }
+    };
+
+    var svc = Svc{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("whoami", &svc, Svc.whoami, .{});
+    try b.method("version", &svc, Svc.version, .{ .pre_auth = true });
+    b.sessionSetup(&svc, Svc.setup);
+    b.sessionSetupContinue(&svc, Svc.cont);
+    var proto = b.build();
+    defer proto.deinit();
+
+    const id = "\"123e4567-e89b-12d3-a456-426614174000\"";
+    const whoami_wire = "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"whoami\",\"params\":{}}";
+
+    var sess = proto.newSession(null);
+    // gate: a normal method before setup → SESSION_NOT_ESTABLISHED
+    try expectJson(arena, try H.go(&proto, arena, &sess, whoami_wire), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"error\":{\"code\":-32002,\"message\":\"Session not established\"}}");
+    // pre_auth method bypasses the gate
+    try expectJson(arena, try H.go(&proto, arena, &sess, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"version\",\"params\":{}}"), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":{\"v\":\"1.0\"}}");
+    // setup → init
+    try expectJson(arena, try H.go(&proto, arena, &sess, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":{\"stage\":\"init\"}}");
+    try testing.expectEqual(types.SessionLifecycle.init, sess.lifecycle);
+    // still gated at init (needs established, not just init)
+    try expectJson(arena, try H.go(&proto, arena, &sess, whoami_wire), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"error\":{\"code\":-32002,\"message\":\"Session not established\"}}");
+    // continue → established
+    try expectJson(arena, try H.go(&proto, arena, &sess, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":{\"stage\":\"established\"}}");
+    try testing.expectEqual(types.SessionLifecycle.established, sess.lifecycle);
+    // now the gate passes
+    try expectJson(arena, try H.go(&proto, arena, &sess, whoami_wire), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":{\"who\":\"authed\"}}");
+    // close → closed, replies true
+    try expectJson(arena, try H.go(&proto, arena, &sess, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionClose\"}"), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":true}");
+    try testing.expectEqual(types.SessionLifecycle.closed, sess.lifecycle);
+    // a closed session rejects everything
+    try expectJson(arena, try H.go(&proto, arena, &sess, whoami_wire), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"error\":{\"code\":-32002,\"message\":\"Session is closed\"}}");
+
+    // wrong-state / shape errors on a fresh (NONE) session
+    var s2 = proto.newSession(null);
+    try expectJson(arena, try H.go(&proto, arena, &s2, "{\"jsonrpc\":\"2.0\",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
+    try expectJson(arena, try H.go(&proto, arena, &s2, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionSetupContinue\",\"params\":{\"otp\":\"x\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"error\":{\"code\":-32803,\"message\":\"Request failed\"}}");
+    try expectJson(arena, try H.go(&proto, arena, &s2, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionClose\"}"), "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"error\":{\"code\":-32803,\"message\":\"Request failed\"}}");
+}
+
+test "fromService: pub fns become methods, rpc renames + flags apply, opts wire hooks" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const FsCreateArgs = struct { name: []const u8 };
+    const FsCreateResult = struct { id: u32, name: []const u8 };
+    const FsAddArgs = struct { a: i64, b: i64 };
+    const FsAddResult = struct { sum: i64 };
+    const FsVer = struct { v: []const u8 };
+
+    const Svc = struct {
+        pub fn create(_: *@This(), args: FsCreateArgs, _: *session_mod.RequestCtx(void)) !FsCreateResult {
+            return .{ .id = 7, .name = args.name };
+        }
+        pub fn add(_: *@This(), args: FsAddArgs, _: *session_mod.RequestCtx(void)) !FsAddResult {
+            return .{ .sum = args.a + args.b };
+        }
+        pub fn version(_: *@This(), _: struct {}, _: *session_mod.RequestCtx(void)) !FsVer {
+            return .{ .v = "1.0" };
+        }
+        // private + handler-shaped: must NOT be collected (proves pub-only collection).
+        fn secret(_: *@This(), _: struct {}, _: *session_mod.RequestCtx(void)) !FsVer {
+            return .{ .v = "nope" };
+        }
+        // 2-param shape (a server-info getter), NOT a method; wired only via opts.server_info.
+        pub fn srvInfo(_: *@This(), _: *session_mod.Session(void)) FsVer {
+            return .{ .v = "srv" };
+        }
+        pub const rpc = .{
+            .create = .{ .name = "pool.create", .audit = true },
+            .version = .{ .pre_auth = true },
+        };
+    };
+
+    var svc = Svc{};
+    var proto = try Protocol(void).fromService(testing.allocator, "test", "1.0.0", &svc, .{ .server_info = Svc.srvInfo });
+    defer proto.deinit();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+    // renamed + default-named methods dispatch
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"pool.create\",\"params\":{\"name\":\"tank\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"id\":7,\"name\":\"tank\"}}");
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"add\",\"params\":{\"a\":2,\"b\":3}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"sum\":5}}");
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"version\",\"params\":{}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"v\":\"1.0\"}}");
+    // the Zig fn name "create" is NOT registered (renamed to pool.create)
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"create\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}");
+    // private + 2-param fns are NOT collected
+    try testing.expect(proto.methods.get("secret") == null);
+    try testing.expect(proto.methods.get("srvInfo") == null);
+    // rpc flags landed on the registered methods
+    try testing.expect(proto.methods.get("pool.create").?.audit);
+    try testing.expect(proto.methods.get("version").?.pre_auth);
+    try testing.expect(!proto.methods.get("add").?.audit);
+    // opts.server_info wired the $/serverInfo hook
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/serverInfo\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"v\":\"srv\"}}");
+}
+
+test "control-op audit: $/sessionSetup redacts creds + result; $/sessionClose has params=null" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const Secret = @import("meta.zig").Secret;
+    const Creds = struct { user: []const u8, password: Secret([]const u8) };
+    const Ack = struct { token: Secret([]const u8), stage: []const u8 };
+    const ContinueCreds = struct { otp: []const u8 };
+
+    const Svc = struct {
+        fn setup(_: *@This(), _: Creds, _: *session_mod.RequestCtx(void)) !types.SetupOutcome(Ack) {
+            return .{ .lifecycle = .init, .result = .{ .token = .{ .value = "t0p" }, .stage = "init" } };
+        }
+        fn cont(_: *@This(), _: ContinueCreds, _: *session_mod.RequestCtx(void)) !types.SetupOutcome(Ack) {
+            return .{ .lifecycle = .established, .result = .{ .token = .{ .value = "t1" }, .stage = "established" } };
+        }
+    };
+    const Capture = struct {
+        arena: std.mem.Allocator,
+        n: u32 = 0,
+        method: ?[]const u8 = null,
+        params: ?[]const u8 = null,
+        response: ?[]const u8 = null,
+        message: ?[]const u8 = null,
+        fn onAudit(self: *@This(), rec: sink_mod.AuditRecord(void)) void {
+            self.n += 1;
+            self.method = rec.method;
+            self.params = std.json.Stringify.valueAlloc(self.arena, rec.params, .{}) catch null;
+            self.response = std.json.Stringify.valueAlloc(self.arena, rec.response, .{}) catch null;
+            self.message = rec.message;
+        }
+    };
+
+    var svc = Svc{};
+    var cap = Capture{ .arena = arena };
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    b.sessionSetup(&svc, Svc.setup);
+    b.sessionSetupContinue(&svc, Svc.cont);
+    b.auditSink(&cap, Capture.onAudit);
+    var proto = b.build();
+    defer proto.deinit();
+
+    const id = "\"123e4567-e89b-12d3-a456-426614174000\"";
+    var sess = proto.newSession(null);
+
+    // $/sessionSetup: the WIRE keeps the real token; the AUDIT masks both the credential and the result token.
+    cap = .{ .arena = arena };
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionSetup\",\"params\":{\"user\":\"bob\",\"password\":\"hunter2\"}}", &sess)) {
+        .reply => |bytes| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+            const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"result\":{\"token\":\"t0p\",\"stage\":\"init\"}}", .{});
+            try testing.expect(json_eq.eql(v, exp));
+        },
+        .none, .subscribe, .transfer => try testing.expect(false),
+    }
+    try testing.expectEqual(@as(u32, 1), cap.n);
+    try testing.expectEqualStrings("$/sessionSetup", cap.method.?);
+    try expectJsonStr(arena, cap.params.?, "{\"user\":\"bob\",\"password\":\"********\"}");
+    try expectJsonStr(arena, cap.response.?, "{\"jsonrpc\":\"2.0\",\"result\":{\"token\":\"********\",\"stage\":\"init\"},\"id\":" ++ id ++ "}");
+    try testing.expect(cap.message == null);
+    try testing.expectEqual(types.SessionLifecycle.init, sess.lifecycle);
+
+    // $/sessionClose at init: params null, response {result:true}, no message; method = the wire name.
+    cap = .{ .arena = arena };
+    _ = proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":" ++ id ++ ",\"method\":\"$/sessionClose\"}", &sess);
+    try testing.expectEqual(@as(u32, 1), cap.n);
+    try testing.expectEqualStrings("$/sessionClose", cap.method.?);
+    try expectJsonStr(arena, cap.params.?, "null");
+    try expectJsonStr(arena, cap.response.?, "{\"jsonrpc\":\"2.0\",\"result\":true,\"id\":" ++ id ++ "}");
+    try testing.expect(cap.message == null);
+    try testing.expectEqual(types.SessionLifecycle.closed, sess.lifecycle);
+}
+
+test "dispatch spine: happy / errors / notification" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var api = Api{};
+    var proto = try buildApi(testing.allocator, &api);
+    defer proto.deinit();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+    // happy path — id echoed verbatim
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"pool.create\",\"params\":{\"name\":\"tank\"}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"id\":7,\"name\":\"tank\"}}");
+
+    // typed add
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"add\",\"params\":{\"a\":2,\"b\":3}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"sum\":5}}");
+
+    // unknown method → METHOD_NOT_FOUND
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"nope\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}");
+
+    // missing required param → INVALID_PARAMS
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"pool.create\",\"params\":{}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}");
+
+    // array params → INVALID_PARAMS (by-name only)
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"add\",\"params\":[2,3]}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}");
+
+    // handler raises → INTERNAL_ERROR
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"boom\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32603,\"message\":\"Internal error\"}}");
+
+    // handler ctx.fail → chosen code passes through
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"fail\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32803,\"message\":\"expected failure\"}}");
+
+    // notification (no id) → no reply
+    try testing.expect((try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"pool.create\",\"params\":{\"name\":\"tank\"}}")) == null);
+    // unknown-method notification → no reply
+    try testing.expect((try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"nope\"}")) == null);
+
+    // envelope faults (always emitted, id null)
+    try expectJson(arena, try rj(&proto, arena, "{not json"), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32700,\"message\":\"Parse error\"}}");
+    try expectJson(arena, try rj(&proto, arena, "[1,2,3]"), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
+}
+
+test "authorization: deny → NOT_AUTHORIZED; decode precedes authz" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{});
+    try b.method("secret_op", &api, Api.secretOp, .{});
+    b.authorizer(&api, Api.authorize);
+    var proto = b.build();
+    defer proto.deinit();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+    // allowed method runs normally
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"sum\":2}}");
+
+    // denied → NOT_AUTHORIZED carrying the authorizer's message
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"secret_op\",\"params\":{\"a\":1,\"b\":1}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32000,\"message\":\"nope\"}}");
+
+    // denied method with bad params → INVALID_PARAMS (decode runs before authorize)
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"secret_op\",\"params\":[1,2]}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}");
+}
+
+test "control: $/serverInfo, unknown $/, CLOSED short-circuit" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{});
+    b.serverInfo(&api, Api.serverInfo);
+    var proto = b.build();
+    defer proto.deinit();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+    // $/serverInfo → result (unauthenticated, no params)
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/serverInfo\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":{\"name\":\"truenas\",\"version\":\"42\"}}");
+
+    // $/serverInfo without an id → INVALID_REQUEST (never suppressed)
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"$/serverInfo\"}"), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
+
+    // unknown $/ control → METHOD_NOT_FOUND; as a notification → no reply
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/nope\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}");
+    try testing.expect((try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"$/nope\"}")) == null);
+
+    // a CLOSED session rejects everything
+    var sess = proto.newSession(null);
+    sess.lifecycle = .closed;
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"add\",\"params\":{\"a\":1,\"b\":1}}", &sess)) {
+        .reply => |bytes| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+            const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32002,\"message\":\"Session is closed\"}}", .{});
+            try testing.expect(json_eq.eql(v, exp));
+        },
+        .none, .subscribe, .transfer => try testing.expect(false),
+    }
+}
+
+test "describe: returns the registered OpenRPC doc; no-id INVALID_REQUEST; unset METHOD_NOT_FOUND" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+    const doc = "{\"openrpc\":\"1.3.2\",\"info\":{\"title\":\"t\",\"version\":\"1\"},\"methods\":[],\"components\":{\"schemas\":{},\"errors\":{}}}";
+
+    // a protocol with a registered describe doc
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{});
+    b.describe(doc);
+    var proto = b.build();
+    defer proto.deinit();
+
+    // $/describe → the doc spliced verbatim into `result`
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/describe\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":" ++ doc ++ "}");
+    // without an id → INVALID_REQUEST (never suppressed)
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"$/describe\"}"), "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}");
+
+    // a protocol with NO describe doc → $/describe is METHOD_NOT_FOUND (request) / suppressed (notification)
+    var b2 = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b2.method("add", &api, Api.add, .{});
+    var proto2 = b2.build();
+    defer proto2.deinit();
+    try expectJson(arena, try rj(&proto2, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"$/describe\"}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32601,\"message\":\"Method not found\"}}");
+    try testing.expect((try rj(&proto2, arena, "{\"jsonrpc\":\"2.0\",\"method\":\"$/describe\"}")) == null);
+}
+
+test "builder rejects reserved prefixes and duplicates" {
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    var proto_built = false;
+    defer if (!proto_built) {
+        var p = b.build();
+        p.deinit();
+    };
+
+    try b.method("pool.create", &api, Api.create, .{});
+    try testing.expectError(error.DuplicateMethod, b.method("pool.create", &api, Api.create, .{}));
+    try testing.expectError(error.ReservedMethodName, b.method("$/x", &api, Api.create, .{}));
+    try testing.expectError(error.ReservedMethodName, b.method("rpc.x", &api, Api.create, .{}));
+
+    var proto = b.build();
+    proto_built = true;
+    proto.deinit();
+}
+
+test "subscribe: server_client topic mints a sub_id ack + .subscribe directive; id/params gating" {
+    var arena_state = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    const SubArgs = struct { channel: []const u8 };
+    const AlertEvent = struct { level: []const u8, text: []const u8 };
+
+    // A deterministic id source — a *consumer* concern (mirrors how the conformance suite owns its
+    // FixedIdGen), injected through the `IdGen` seam so the minted sub_id is reproducible.
+    const Seq = struct {
+        n: u64 = 0,
+        fn nextImpl(ctx: *anyopaque, buf: *[idgen_mod.uuid_len]u8) []const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ctx));
+            self.n += 1;
+            return std.fmt.bufPrint(buf, "00000000-0000-4000-8000-{d:0>12}", .{self.n}) catch unreachable;
+        }
+    };
+    var seq = Seq{};
+
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{});
+    try b.subscription("alerts.subscribe", SubArgs, AlertEvent, .{});
+    b.idGen(.{ .ctx = @ptrCast(&seq), .nextFn = &Seq.nextImpl });
+    var proto = b.build();
+    defer proto.deinit();
+
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+    var sess = proto.newSession(null);
+
+    // subscribe → a `.subscribe` directive: the ack's `result` is the bare minted sub_id string; the
+    // directive separately exposes sub_id + topic for the (Io-aware) transport's registry.
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}", &sess)) {
+        .subscribe => |s| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, s.reply, .{});
+            const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"result\":\"00000000-0000-4000-8000-000000000001\"}", .{});
+            try testing.expect(json_eq.eql(v, exp));
+            try testing.expectEqualStrings("00000000-0000-4000-8000-000000000001", s.sub_id);
+            try testing.expectEqualStrings("alerts.subscribe", s.topic);
+        },
+        else => try testing.expect(false),
+    }
+
+    // subscribe-as-notification (no id) → INVALID_REQUEST: a reply (NOT suppressed) and NOT a directive.
+    switch (proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"method\":\"alerts.subscribe\",\"params\":{\"channel\":\"pool\"}}", &sess)) {
+        .reply => |bytes| {
+            const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, bytes, .{});
+            const exp = try std.json.parseFromSliceLeaky(std.json.Value, arena, "{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{\"code\":-32600,\"message\":\"Invalid request\"}}", .{});
+            try testing.expect(json_eq.eql(v, exp));
+        },
+        else => try testing.expect(false),
+    }
+
+    // subscribe with bad params → INVALID_PARAMS, a normal reply (no directive, decode precedes the mint).
+    try expectJson(arena, try rj(&proto, arena, "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"alerts.subscribe\",\"params\":{}}"), "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}");
+}
+
+// ── XDR binary-wire dispatch ──────────────────────────────────────────────────
+const idb16: [16]u8 = .{ 0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40, 0x00 };
+
+fn xdrReq(arena: std.mem.Allocator, proc_id: u32, id: ?[16]u8, params: anytype) ![]u8 {
+    var aw: std.Io.Writer.Allocating = .init(arena);
+    try aw.writer.writeInt(u32, xdr_frame.MAGIC, .big);
+    try xdr.encode(&aw.writer, xdr_frame.RequestEnvelope{ .version = xdr_frame.VERSION, .proc_id = proc_id, .id = id });
+    try xdr.encode(&aw.writer, params);
+    return aw.writer.buffered();
+}
+
+test "XDR wire: typed request/reply round-trip, dual-wire with JSON, unknown-proc error" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{ .xdr = true, .xdr_id = 1001 });
+    var proto = b.build();
+    defer proto.deinit();
+    var sess = proto.newSession(null);
+
+    // success: encode a typed XDR request, dispatch, decode the typed reply
+    {
+        const d = proto.dispatch(arena, try xdrReq(arena, 1001, idb16, AddArgs{ .a = 2, .b = 3 }), &sess);
+        try testing.expect(d == .reply);
+        try testing.expect(xdr_frame.isXdr(d.reply));
+        var r = std.Io.Reader.fixed(d.reply);
+        _ = try r.takeArray(4); // magic
+        const env = try xdr.decode(xdr_frame.ReplyEnvelope, arena, &r);
+        try testing.expectEqual(@as(u32, 0), env.status); // ok
+        try testing.expectEqual(idb16, env.id.?); // id echoed
+        try testing.expectEqual(@as(i64, 5), (try xdr.decode(AddResult, arena, &r)).sum);
+    }
+
+    // the SAME method still answers JSON (dual-wire)
+    {
+        const jr = proto.dispatch(arena, "{\"jsonrpc\":\"2.0\",\"id\":\"123e4567-e89b-12d3-a456-426614174000\",\"method\":\"add\",\"params\":{\"a\":4,\"b\":5}}", &sess);
+        try testing.expect(jr == .reply);
+        const v = try std.json.parseFromSliceLeaky(std.json.Value, arena, jr.reply, .{});
+        try testing.expectEqual(@as(i64, 9), v.object.get("result").?.object.get("sum").?.integer);
+    }
+
+    // unknown proc-id → an XDR error frame (method_not_found = -32601)
+    {
+        const d = proto.dispatch(arena, try xdrReq(arena, 9999, idb16, AddArgs{ .a = 0, .b = 0 }), &sess);
+        try testing.expect(d == .reply);
+        var r = std.Io.Reader.fixed(d.reply);
+        _ = try r.takeArray(4);
+        const env = try xdr.decode(xdr_frame.ReplyEnvelope, arena, &r);
+        try testing.expectEqual(@as(u32, 1), env.status); // err
+        try testing.expectEqual(@as(i32, -32601), (try xdr.decode(xdr_frame.XdrErrorPayload, arena, &r)).code);
+    }
+}
+
+test "XDR: a duplicate xdr_id is a build-time DuplicateXdrId (the slot is already occupied)" {
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    try b.method("add", &api, Api.add, .{ .xdr = true, .xdr_id = 1007 });
+    try testing.expectError(error.DuplicateXdrId, b.method("add2", &api, Api.add, .{ .xdr = true, .xdr_id = 1007 }));
+    var proto = b.build();
+    proto.deinit();
+}
+
+test "XDR: an xdr_id in the reserved 0..=1000 band is a build-time ReservedXdrProcId" {
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    // 0..=1000 are reserved for protocol control messages; an application method must use >= 1001.
+    try testing.expectError(error.ReservedXdrProcId, b.method("add", &api, Api.add, .{ .xdr = true, .xdr_id = 1000 }));
+    try b.method("ok", &api, Api.add, .{ .xdr = true, .xdr_id = 1001 }); // the first application id is fine
+    var proto = b.build();
+    proto.deinit();
+}
+
+test "XDR: a proc-id too far above the base is XdrProcIdTooLarge (the slot table stays bounded)" {
+    var api = Api{};
+    var b = Protocol(void).builder(testing.allocator, "test", "1.0.0");
+    // 1001 + 65536 = 66537 is one past the slot-table cap → rejected (a typo can't balloon the array);
+    // a dense pair (1001, 1002) builds a 2-slot table and dispatches fine (covered above).
+    try testing.expectError(error.XdrProcIdTooLarge, b.method("big", &api, Api.add, .{ .xdr = true, .xdr_id = 66537 }));
+    var proto = b.build();
+    proto.deinit();
+}
+
+const XfArgs = struct { size: i64 };
+const XfInterim = struct { size: i64 };
+const XfResult = struct { sent: i64, label: []const u8 };
+const XfApi = struct {
+    fn negotiate(_: *XfApi, args: XfArgs, _: *session_mod.RequestCtx(void)) !XfInterim {
+        return .{ .size = args.size };
+    }
+    fn transfer(_: *XfApi, args: XfArgs, ft: *const transfer_mod.FileTransfer, _: *session_mod.RequestCtx(void)) !XfResult {
+        _ = ft; // a real DOWNLOAD sendfiles on ft.fileno(); the test returns a canned result
+        return .{ .sent = args.size, .label = "ok" };
+    }
+};
+
+test "transfer: dispatch → a .transfer directive ($/transferReady); complete() over a mock fd → final response" {
+    var a = std.heap.ArenaAllocator.init(testing.allocator);
+    defer a.deinit();
+    const arena = a.allocator();
+    const uid = "123e4567-e89b-12d3-a456-426614174000";
+
+    var api = XfApi{};
+    var b = Protocol(void).builder(testing.allocator, "t", "1.0.0");
+    try b.transferMethod("file.download", &api, XfApi.negotiate, XfApi.transfer, .download, .{});
+    var proto = b.build();
+    defer proto.deinit();
+    var sess = proto.newSession(null);
+
+    // Use `arena` as reply_alloc so the directive's completion state is arena-owned (freed at deinit).
+    const wire = "{\"jsonrpc\":\"2.0\",\"id\":\"" ++ uid ++ "\",\"method\":\"file.download\",\"params\":{\"size\":2048}}";
+    const d = proto.dispatch(arena, wire, &sess);
+    try testing.expect(d == .transfer);
+    try testing.expect(d.transfer.direction == .download);
+    try testing.expect(!d.transfer.af_unix);
+
+    // the $/transferReady envelope the transport sends before the handshake
+    const ready = try std.json.parseFromSliceLeaky(std.json.Value, arena, d.transfer.ready, .{});
+    try testing.expectEqualStrings("$/transferReady", ready.object.get("method").?.string);
+    const rp = ready.object.get("params").?.object;
+    try testing.expectEqualStrings(uid, rp.get("id").?.string);
+    try testing.expectEqualStrings("download", rp.get("direction").?.string);
+    try testing.expectEqual(@as(i64, 2048), rp.get("result").?.object.get("size").?.integer);
+
+    // complete() over a mock FileTransfer (no real fd) → the final response (params re-decoded from JSON)
+    const ft: transfer_mod.FileTransfer = .{ .fd = -1, .direction = .download, .af_unix = false, .result_json = "{}" };
+    const final = d.transfer.complete(arena, &ft).?;
+    const fv = try std.json.parseFromSliceLeaky(std.json.Value, arena, final, .{});
+    try testing.expectEqualStrings(uid, fv.object.get("id").?.string);
+    const result = fv.object.get("result").?.object;
+    try testing.expectEqual(@as(i64, 2048), result.get("sent").?.integer);
+    try testing.expectEqualStrings("ok", result.get("label").?.string);
+}
