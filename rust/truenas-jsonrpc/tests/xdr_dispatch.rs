@@ -9,9 +9,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use truenas_jsonrpc::{
-    AuthorizationResponse, CompiledFilters, CompiledOptions, Dispatched, Filtered,
-    FilterableJsonRpcMethod, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, NullOutbound,
-    RequestCtx, Session, SessionLifecycle,
+    AuthorizationResponse, Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef,
+    NullOutbound, RequestCtx, Session, SessionLifecycle,
 };
 use truenas_xdr::frame::{self, build_request};
 use truenas_xdr::to_bytes;
@@ -189,25 +188,18 @@ async fn unencodable_result_is_internal_error() {
 }
 
 #[tokio::test]
-async fn filterable_and_python_are_not_on_the_xdr_wire() {
-    // A filterable method registered with an xdr_id replies method-not-found over XDR.
+async fn python_method_is_not_on_the_xdr_wire() {
+    // A python method registered with an xdr_id replies method-not-found over XDR (its body
+    // runs via the PyO3 bridge, not the binary codec). (Filterable methods, by contrast, DO
+    // work over XDR now — see the xdr_filter_* conformance tests in tests/xdr_filter.rs.)
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .filterable(FilterableJsonRpcMethod::<AddArgs, AddResult, _>::new(
-            MethodDef::new("xdr.q").xdr(2001),
-            |_a: AddArgs, _cx: &RequestCtx<()>, _f: &CompiledFilters, _o: &CompiledOptions| {
-                Ok::<_, JsonRpcError>(Filtered::Rows(vec![]))
-            },
-        ))
-        .unwrap()
         .python_method(MethodDef::new("xdr.py").xdr(2002))
         .unwrap()
         .build();
-    for proc in [2001u32, 2002] {
-        let request = build_request(proc, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
-        let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
-        let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
-        assert_eq!(code, -32601, "proc {proc} should be method-not-found over XDR");
-    }
+    let request = build_request(2002, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
+    let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
+    assert_eq!(code, -32601); // METHOD_NOT_FOUND
 }
 
 #[test]

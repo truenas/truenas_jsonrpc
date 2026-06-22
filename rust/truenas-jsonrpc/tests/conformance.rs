@@ -111,7 +111,7 @@ fn query_handler(
     _cx: &RequestCtx<()>,
     f: &CompiledFilters,
     o: &CompiledOptions,
-) -> Result<Filtered, JsonRpcError> {
+) -> Result<Filtered<Value>, JsonRpcError> {
     Ok(tnfilter(query_data(), f, o)?)
 }
 
@@ -149,7 +149,7 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
             SubscriptionDef::<Empty, PoolEvent>::new(MethodDef::new("events").audit_message("subscribed")),
         )
         .unwrap()
-        .filterable(FilterableJsonRpcMethod::<Empty, (), _>::new(
+        .filterable(FilterableJsonRpcMethod::<Empty, Value, _>::new(
             MethodDef::new("x.query"),
             query_handler,
         ))

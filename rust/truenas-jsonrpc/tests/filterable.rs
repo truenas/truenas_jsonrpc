@@ -35,7 +35,7 @@ fn query(
     _cx: &RequestCtx<()>,
     f: &CompiledFilters,
     o: &CompiledOptions,
-) -> Result<Filtered, JsonRpcError> {
+) -> Result<Filtered<Value>, JsonRpcError> {
     Ok(tnfilter(data(), f, o)?)
 }
 
@@ -45,7 +45,7 @@ fn deny(_r: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>) -> Auth
 
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("t", "1.0.0")
-        .filterable(FilterableJsonRpcMethod::<NoArgs, (), _>::new(
+        .filterable(FilterableJsonRpcMethod::<NoArgs, Value, _>::new(
             MethodDef::new("x.query"),
             query,
         ))
@@ -136,7 +136,7 @@ async fn authz_denied_before_compile() {
     // (which would be INVALID_PARAMS) never runs — proving INVALID_PARAMS precedes nothing
     // here and NOT_AUTHORIZED wins.
     let p = JsonRpcProtocol::<()>::builder("t", "1.0.0")
-        .filterable(FilterableJsonRpcMethod::<NoArgs, (), _>::new(
+        .filterable(FilterableJsonRpcMethod::<NoArgs, Value, _>::new(
             MethodDef::new("x.query"),
             query,
         ))
@@ -152,7 +152,7 @@ async fn filterable_is_audited() {
     let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let cap = captured.clone();
     let p = JsonRpcProtocol::<()>::builder("t", "1.0.0")
-        .filterable(FilterableJsonRpcMethod::<NoArgs, (), _>::new(
+        .filterable(FilterableJsonRpcMethod::<NoArgs, Value, _>::new(
             MethodDef::new("x.query").audit_message("queried"),
             query,
         ))

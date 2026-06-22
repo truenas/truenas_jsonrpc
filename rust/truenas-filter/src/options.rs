@@ -151,9 +151,10 @@ impl CompiledOptions {
         self.limit
     }
 
-    /// Run the non-count pipeline tail on the matched rows: order → offset → limit. Rows are
-    /// passed through unchanged (no projection).
-    pub(crate) fn apply(&self, matched: Vec<Value>) -> Result<Vec<Value>, FilterError> {
+    /// Run the non-count pipeline tail on the matched rows: order → offset → limit. Each row
+    /// is a `(view, item)` pair — ordering uses the `view`, and the typed `item` is returned
+    /// unchanged (no projection).
+    pub(crate) fn apply<E>(&self, matched: Vec<(Value, E)>) -> Result<Vec<E>, FilterError> {
         let mut rv = matched;
         if !self.order_specs.is_empty() {
             rv = apply_order(rv, &self.order_specs)?;
@@ -168,7 +169,7 @@ impl CompiledOptions {
         if self.limit > 0 && rv.len() > self.limit {
             rv.truncate(self.limit);
         }
-        Ok(rv)
+        Ok(rv.into_iter().map(|(_, item)| item).collect())
     }
 }
 
@@ -193,7 +194,10 @@ fn order_get(item: &Value, parts: &[PathPart]) -> Value {
     cur.clone()
 }
 
-fn apply_order(rows: Vec<Value>, specs: &[OrderSpec]) -> Result<Vec<Value>, FilterError> {
+fn apply_order<E>(
+    rows: Vec<(Value, E)>,
+    specs: &[OrderSpec],
+) -> Result<Vec<(Value, E)>, FilterError> {
     let mut rv = rows;
     // Last spec first: each stable pass is overridden by the next, so specs[0] is primary.
     for spec in specs.iter().rev() {
@@ -212,17 +216,21 @@ fn pair_cmp(ka: &Value, sa: i64, kb: &Value, sb: i64) -> Result<Ordering, Filter
     }
 }
 
-fn sort_by_spec(list: Vec<Value>, spec: &OrderSpec) -> Result<Vec<Value>, FilterError> {
+fn sort_by_spec<E>(
+    list: Vec<(Value, E)>,
+    spec: &OrderSpec,
+) -> Result<Vec<(Value, E)>, FilterError> {
     if list.len() <= 1 {
         return Ok(list);
     }
 
-    // Partition out null/absent sort columns (by a *literal* top-level lookup of top_key).
-    let (nulls, non_nulls): (Vec<Value>, Vec<Value>) = if spec.nulls_mode != 0 {
+    // Partition out null/absent sort columns (by a *literal* top-level lookup of top_key on
+    // the row's `Value` view, `.0`).
+    let (nulls, non_nulls) = if spec.nulls_mode != 0 {
         let mut nulls = Vec::new();
         let mut non = Vec::new();
         for item in list {
-            let is_null = match &item {
+            let is_null = match &item.0 {
                 Value::Object(map) => !matches!(map.get(&spec.top_key), Some(v) if !v.is_null()),
                 _ => true,
             };
@@ -238,7 +246,7 @@ fn sort_by_spec(list: Vec<Value>, spec: &OrderSpec) -> Result<Vec<Value>, Filter
     };
 
     // Sort non_nulls by (key, signed-index), mirroring the C build/sort/reverse dance.
-    let keys: Vec<Value> = non_nulls.iter().map(|it| order_get(it, &spec.keys)).collect();
+    let keys: Vec<Value> = non_nulls.iter().map(|it| order_get(&it.0, &spec.keys)).collect();
     let mut order: Vec<usize> = (0..non_nulls.len()).collect();
     let mut err: Option<FilterError> = None;
     order.sort_by(|&a, &b| {
@@ -264,7 +272,11 @@ fn sort_by_spec(list: Vec<Value>, spec: &OrderSpec) -> Result<Vec<Value>, Filter
     if spec.reverse {
         order.reverse();
     }
-    let sorted_non: Vec<Value> = order.into_iter().map(|i| non_nulls[i].clone()).collect();
+    // Permute `non_nulls` by `order` without cloning the typed item: each permutation index
+    // is used exactly once, so `take` always yields `Some`.
+    let mut slots: Vec<Option<(Value, E)>> = non_nulls.into_iter().map(Some).collect();
+    let sorted_non: Vec<(Value, E)> =
+        order.into_iter().map(|i| slots[i].take().expect("permutation index used once")).collect();
 
     Ok(match spec.nulls_mode {
         1 => nulls.into_iter().chain(sorted_non).collect(),
@@ -280,6 +292,11 @@ mod tests {
 
     fn co(v: serde_json::Value) -> Result<CompiledOptions, FilterError> {
         compile_options(&serde_json::from_value(v).unwrap())
+    }
+
+    /// Wrap dynamic rows as `(view, item)` pairs (here the view is the row itself).
+    fn pairs(vs: Vec<Value>) -> Vec<(Value, Value)> {
+        vs.into_iter().map(|v| (v.clone(), v)).collect()
     }
 
     #[test]
@@ -307,20 +324,20 @@ mod tests {
     fn apply_pipeline_edges() {
         // single-element sort (n<=1 fast path) + stable ties + offset+limit slice
         let one = vec![json!({"x": 1})];
-        assert_eq!(co(json!({"order_by": ["x"]})).unwrap().apply(one.clone()).unwrap(), one);
+        assert_eq!(co(json!({"order_by": ["x"]})).unwrap().apply(pairs(one.clone())).unwrap(), one);
         let ties = vec![json!({"x": 1, "i": "a"}), json!({"x": 1, "i": "b"})];
-        assert_eq!(co(json!({"order_by": ["x"]})).unwrap().apply(ties.clone()).unwrap(), ties);
+        assert_eq!(co(json!({"order_by": ["x"]})).unwrap().apply(pairs(ties.clone())).unwrap(), ties);
         let rows = vec![json!(0), json!(1), json!(2), json!(3)];
-        assert_eq!(co(json!({"offset": 1, "limit": 2})).unwrap().apply(rows).unwrap(), vec![json!(1), json!(2)]);
+        assert_eq!(co(json!({"offset": 1, "limit": 2})).unwrap().apply(pairs(rows)).unwrap(), vec![json!(1), json!(2)]);
         // offset beyond the end → empty
-        assert!(co(json!({"offset": 9})).unwrap().apply(vec![json!(0)]).unwrap().is_empty());
+        assert!(co(json!({"offset": 9})).unwrap().apply(pairs(vec![json!(0)])).unwrap().is_empty());
     }
 
     #[test]
     fn order_nulls_non_dict_row() {
         // a non-dict row in a nulls-ordered list lands in the nulls bucket
         let rows = vec![json!({"v": 2}), json!("scalar"), json!({"v": 1})];
-        let out = co(json!({"order_by": ["nulls_first:v"]})).unwrap().apply(rows).unwrap();
+        let out = co(json!({"order_by": ["nulls_first:v"]})).unwrap().apply(pairs(rows)).unwrap();
         assert_eq!(out, vec![json!("scalar"), json!({"v": 1}), json!({"v": 2})]);
     }
 }

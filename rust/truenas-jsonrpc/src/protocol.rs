@@ -337,12 +337,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
         method: FilterableJsonRpcMethod<A, E, F>,
     ) -> BuildResult<Self>
     where
-        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>
+        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
             + Send
             + Sync
             + 'static,
         A: DeserializeOwned + Send + 'static,
-        E: 'static,
+        E: Serialize + 'static,
     {
         self.insert(method.erase::<S>())?;
         Ok(self)

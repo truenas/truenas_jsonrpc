@@ -196,8 +196,8 @@ impl<S, A, E, F> ErasedSync<S> for FilterableErased<A, E, F>
 where
     S: Send + Sync + 'static,
     A: DeserializeOwned + Send + 'static,
-    E: 'static,
-    F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>
+    E: Serialize + 'static,
+    F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
         + Send
         + Sync,
 {
@@ -218,29 +218,77 @@ where
         let cf = compile_filters(&aug.query_filters)?;
         let co = compile_options(&aug.query_options)?;
         let out = (self.f)(aug.base, cx, &cf, &co)?;
-        let value = finalize(out, &aug.query_options)?;
-        encode_result(&value)
+        finalize_json(out, &aug.query_options)
     }
-    fn xdr_run(&self, _params: &[u8], _cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
-        // Filterable (query) methods are not carried on the XDR binary wire in v1.
-        Err(JsonRpcError::method_not_found("Method not found"))
+    fn xdr_run(&self, params: &[u8], cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+        // The XDR filterable request is XDR<base> + XDR<XdrQueryOptions> + XDR<query-filters
+        // as a JSON-text string> (query-filters are dynamic, so they ride as JSON text on the
+        // binary wire). The result is the Zig/Python count-or-(count+entries) shape.
+        let (base, xopts, filters_json): (A, XdrQueryOptions, String) =
+            truenas_xdr::from_bytes(params).map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        let filters: QueryFilters = serde_json::from_str(&filters_json)
+            .map_err(|e| JsonRpcError::invalid_params(format!("query-filters: {e}")))?;
+        let cf = compile_filters(&filters)?;
+        let co = compile_options(&xopts.into_query_options())?;
+        let out = (self.f)(base, cx, &cf, &co)?;
+        finalize_xdr(out)
     }
 }
 
-/// Apply the `get`/`count` finalize convention to the handler's result (Python's
-/// `finalize_result`): `count` → the integer; `get` → the single record (or REQUEST_FAILED
-/// when none matched); otherwise the list.
-fn finalize(out: Filtered, opts: &QueryOptions) -> Result<Value, JsonRpcError> {
+/// Encode a filterable result for the **JSON** wire (Python's `finalize_result`): `count` →
+/// the integer; `get` → the single record (or REQUEST_FAILED when none matched); otherwise
+/// the array of entries.
+fn finalize_json<E: Serialize>(
+    out: Filtered<E>,
+    opts: &QueryOptions,
+) -> Result<Box<RawValue>, JsonRpcError> {
     match out {
-        Filtered::Count(n) => Ok(Value::from(n)),
+        Filtered::Count(n) => encode_result(&n),
         Filtered::Rows(rows) => {
             if opts.get {
-                rows.into_iter().next().ok_or_else(|| {
-                    JsonRpcError::request_failed("no record matched query with get=True")
-                })
+                match rows.into_iter().next() {
+                    Some(e) => encode_result(&e),
+                    None => Err(JsonRpcError::request_failed(
+                        "no record matched query with get=True",
+                    )),
+                }
             } else {
-                Ok(Value::Array(rows))
+                encode_result(&rows)
             }
+        }
+    }
+}
+
+/// Encode a filterable result for the **XDR** wire: `count` → a hyper; otherwise
+/// `u32 count + entries` (the Zig/Python filterable-over-XDR result shape). `get` is not
+/// offered over the binary wire (the reduced [`XdrQueryOptions`] has no `get`).
+fn finalize_xdr<E: Serialize>(out: Filtered<E>) -> Result<Vec<u8>, JsonRpcError> {
+    let bytes = match out {
+        Filtered::Count(n) => truenas_xdr::to_bytes(&n),
+        Filtered::Rows(rows) => truenas_xdr::to_bytes(&rows),
+    };
+    bytes.map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))
+}
+
+/// The reduced `query-options` carried on the XDR wire: `count`, `order_by`, and hyper
+/// `offset`/`limit` (no `get`/`select`). Field order matches the binary wire (and the Zig/
+/// Python `XdrQueryOptions`).
+#[derive(Deserialize)]
+struct XdrQueryOptions {
+    count: bool,
+    order_by: Option<Vec<String>>,
+    offset: i64,
+    limit: i64,
+}
+
+impl XdrQueryOptions {
+    fn into_query_options(self) -> QueryOptions {
+        QueryOptions {
+            get: false,
+            count: self.count,
+            order_by: self.order_by,
+            offset: self.offset.max(0) as usize,
+            limit: self.limit.max(0) as usize,
         }
     }
 }
@@ -513,8 +561,8 @@ impl<A, E, F> FilterableJsonRpcMethod<A, E, F> {
     where
         S: Send + Sync + 'static,
         A: DeserializeOwned + Send + 'static,
-        E: 'static,
-        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>
+        E: Serialize + 'static,
+        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
             + Send
             + Sync
             + 'static,

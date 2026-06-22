@@ -15,13 +15,13 @@ const GOLDEN: &str = include_str!("conformance/golden.json");
 
 /// Run one filter case through the Rust engine, mirroring `compile → compile → tnfilter`
 /// so a compile-time error surfaces as `Compile` and a runtime one as `Eval`.
-fn run_filter(data: Vec<Value>, filters: &[Value], opts: &QueryOptions) -> Result<Filtered, FilterError> {
+fn run_filter(data: Vec<Value>, filters: &[Value], opts: &QueryOptions) -> Result<Filtered<Value>, FilterError> {
     let cf = compile_filters(filters)?;
     let co = compile_options(opts)?;
     tnfilter(data, &cf, &co)
 }
 
-fn check_result(label: &str, expected: &Value, actual: Result<Filtered, FilterError>) {
+fn check_result(label: &str, expected: &Value, actual: Result<Filtered<Value>, FilterError>) {
     if let Some(kind) = expected.get("error").and_then(Value::as_str) {
         match actual {
             Err(FilterError::Compile(_)) => {

@@ -81,7 +81,7 @@ pub trait Handlers<S>: Send + Sync {
     /// Handler for `crash`.
     fn crash(&self, request: CrashArgs, cx: &truenas_jsonrpc::RequestCtx<S>) -> Result<PingResult, truenas_jsonrpc::JsonRpcError>;
     /// Filterable handler for `query`.
-    fn query(&self, request: QueryArgs, cx: &truenas_jsonrpc::RequestCtx<S>, filters: &truenas_jsonrpc::CompiledFilters, options: &truenas_jsonrpc::CompiledOptions) -> Result<truenas_jsonrpc::Filtered, truenas_jsonrpc::JsonRpcError>;
+    fn query(&self, request: QueryArgs, cx: &truenas_jsonrpc::RequestCtx<S>, filters: &truenas_jsonrpc::CompiledFilters, options: &truenas_jsonrpc::CompiledOptions) -> Result<truenas_jsonrpc::Filtered<Entry>, truenas_jsonrpc::JsonRpcError>;
 }
 
 /// Register every spec method onto `builder`, binding each to `handlers.<handler>`.

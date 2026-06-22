@@ -223,8 +223,12 @@ fn emit_handlers_trait(spec: &Spec) -> Result<String> {
                 ));
             }
             Kind::Filterable => {
+                let entry = ref_name_of(
+                    m.entry.as_ref().expect("filterable entry present (guaranteed by validate)"),
+                    "entry",
+                )?;
                 methods.push_str(&format!(
-                    "    /// Filterable handler for `{}`.\n    fn {}(&self, request: {params}, cx: &truenas_jsonrpc::RequestCtx<S>, filters: &truenas_jsonrpc::CompiledFilters, options: &truenas_jsonrpc::CompiledOptions) -> Result<truenas_jsonrpc::Filtered, truenas_jsonrpc::JsonRpcError>;\n",
+                    "    /// Filterable handler for `{}`.\n    fn {}(&self, request: {params}, cx: &truenas_jsonrpc::RequestCtx<S>, filters: &truenas_jsonrpc::CompiledFilters, options: &truenas_jsonrpc::CompiledOptions) -> Result<truenas_jsonrpc::Filtered<{entry}>, truenas_jsonrpc::JsonRpcError>;\n",
                     wire_doc(spec, m), m.handler
                 ));
             }

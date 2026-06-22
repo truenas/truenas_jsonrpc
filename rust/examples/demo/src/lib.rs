@@ -47,13 +47,15 @@ mod tests {
             _cx: &RequestCtx<()>,
             f: &CompiledFilters,
             o: &CompiledOptions,
-        ) -> Result<Filtered, JsonRpcError> {
-            let rows = vec![
-                json!({"id": 1, "name": "a"}),
-                json!({"id": 2, "name": "b"}),
-                json!({"id": 3, "name": "a"}),
+        ) -> Result<Filtered<Item>, JsonRpcError> {
+            // Typed rows: `tnfilter` filters via a Value view but returns the typed `Item`s,
+            // so the result can be encoded to either the JSON or the XDR wire.
+            let items = vec![
+                Item { id: 1, name: "a".into() },
+                Item { id: 2, name: "b".into() },
+                Item { id: 3, name: "a".into() },
             ];
-            Ok(tnfilter(rows, f, o)?)
+            Ok(tnfilter(items, f, o)?)
         }
     }
 

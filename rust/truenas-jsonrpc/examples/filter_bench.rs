@@ -53,7 +53,7 @@ async fn main() {
 
     let d = data.clone();
     let proto = JsonRpcProtocol::<()>::builder("bench", "1.0")
-        .filterable(FilterableJsonRpcMethod::<Empty, (), _>::new(
+        .filterable(FilterableJsonRpcMethod::<Empty, Value, _>::new(
             MethodDef::new("report.query"),
             move |_a: Empty, _cx: &RequestCtx<()>, f: &CompiledFilters, o: &CompiledOptions| {
                 Ok(tnfilter(d.iter().cloned(), f, o)?)

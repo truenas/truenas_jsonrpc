@@ -39,7 +39,8 @@ mod value;
 pub use filter::{compile_filters, CompiledFilters};
 pub use options::{compile_options, CompiledOptions, QueryOptions};
 
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{to_value, Value};
 
 /// A raw `query-filters` list (middleware form): `[name, op, value]` leaves and
 /// `["OR", [branch, …]]` nodes. Handed verbatim to [`compile_filters`].
@@ -47,10 +48,16 @@ pub type QueryFilters = Vec<Value>;
 
 /// The result of [`tnfilter`]: either the matched rows (post order/offset/limit) or, when
 /// `query-options.count` is set, the count of matched rows.
+///
+/// Generic over the row type `E`: the engine evaluates filters/ordering against a
+/// `serde_json::Value` *view* of each row (the byte-identical comparison semantics), but
+/// carries the original typed `E` through to the result — so matches can be serialized to
+/// **either** the JSON or the XDR wire (a dynamic `Value` can't be XDR-encoded). Pass
+/// `E = serde_json::Value` to filter dynamic rows.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Filtered {
+pub enum Filtered<E> {
     /// Matched rows, in result order (the common case).
-    Rows(Vec<Value>),
+    Rows(Vec<E>),
     /// The number of matched rows (`count=true`); offset/limit do not apply.
     Count(i64),
 }
@@ -84,27 +91,32 @@ impl std::error::Error for FilterError {}
 
 /// Filter `data` with a pre-compiled query, returning the matched rows (or their count).
 ///
-/// `data` is consumed **lazily** through its iterator and rows are read-only: each item is
-/// tested against `filters` by borrowing it, and a matching row is **moved** into the result
-/// unchanged (the unfiltered source is never materialized, and matches are never copied or
-/// reshaped). `get` (with no `order_by`) short-circuits at the first match; `count` tallies
-/// without retaining; with no `order_by` and a `limit`, only the requested page is kept.
-/// With `order_by`, all matches are retained (sorting needs them). The post-filter pipeline
-/// is `count` → `order` → `offset` → `limit`.
-pub fn tnfilter<I>(
+/// `data` is consumed **lazily** through its iterator. Each item is serialized to a
+/// `serde_json::Value` *view* once (`to_value`) and tested/ordered against that view, while
+/// the original typed item is carried through so a match is **moved** into the result
+/// unchanged — never copied or reshaped (no `select`). The unfiltered source is never
+/// materialized. `get` (with no `order_by`) short-circuits at the first match; `count`
+/// tallies without retaining; with no `order_by` and a `limit`, only the requested page is
+/// kept; with `order_by`, all matches are retained (sorting needs them). The post-filter
+/// pipeline is `count` → `order` → `offset` → `limit`.
+///
+/// With `E = serde_json::Value` the view is the row itself (dynamic filtering); with a typed
+/// `E` the result is a `Vec<E>` that can be encoded to the JSON **or** XDR wire.
+pub fn tnfilter<E, I>(
     data: I,
     filters: &CompiledFilters,
     options: &CompiledOptions,
-) -> Result<Filtered, FilterError>
+) -> Result<Filtered<E>, FilterError>
 where
-    I: IntoIterator<Item = Value>,
+    E: Serialize,
+    I: IntoIterator<Item = E>,
 {
     // count: stream and tally matches; never retain. `shortcircuit` caps the tally at the
     // first match (get with no order_by).
     if options.count_flag() {
         let mut n: i64 = 0;
         for item in data {
-            if filter::matches_all(&item, filters)? {
+            if filter::matches_all(&view(&item)?, filters)? {
                 n += 1;
                 if options.shortcircuit() {
                     break;
@@ -122,10 +134,12 @@ where
         None
     };
 
-    let mut matched: Vec<Value> = Vec::new();
+    // Carry `(view, item)` for each match: the view drives ordering, the item is the result.
+    let mut matched: Vec<(Value, E)> = Vec::new();
     for item in data {
-        if filter::matches_all(&item, filters)? {
-            matched.push(item);
+        let v = view(&item)?;
+        if filter::matches_all(&v, filters)? {
+            matched.push((v, item));
             if options.shortcircuit() {
                 break;
             }
@@ -138,6 +152,12 @@ where
     }
 
     Ok(Filtered::Rows(options.apply(matched)?))
+}
+
+/// The `serde_json::Value` view of a row, for filter/order evaluation. (For
+/// `E = Value` this is a clone; for a typed `E` it is the row serialized to JSON.)
+fn view<E: Serialize>(item: &E) -> Result<Value, FilterError> {
+    to_value(item).map_err(|e| FilterError::Eval(format!("row is not representable for filtering: {e}")))
 }
 
 /// Test whether a single `item` matches all `filters` (the C engine's `match`, as a pure
@@ -176,5 +196,20 @@ mod tests {
         let cf = compile_filters(&[json!(["n", "=", 1])]).unwrap();
         assert!(tnmatch(&json!({"n": 1}), &cf).unwrap());
         assert!(!tnmatch(&json!({"n": 2}), &cf).unwrap());
+    }
+
+    #[test]
+    fn unrepresentable_row_is_eval_error() {
+        // A row whose `Serialize` fails → the `to_value` view fails → FilterError::Eval.
+        struct Unser;
+        impl serde::Serialize for Unser {
+            fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+                use serde::ser::Error;
+                Err(S::Error::custom("not serializable"))
+            }
+        }
+        let cf = compile_filters(&[]).unwrap(); // empty filters = match all
+        let co = compile_options(&QueryOptions::default()).unwrap();
+        assert!(matches!(tnfilter(vec![Unser], &cf, &co), Err(FilterError::Eval(_))));
     }
 }
