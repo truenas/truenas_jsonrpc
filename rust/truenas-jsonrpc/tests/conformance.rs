@@ -245,6 +245,7 @@ async fn run_steps(
         let actual = match proto.dispatch(wire.as_bytes(), &session).await {
             Dispatched::Reply(b) => Some(serde_json::from_slice::<Value>(&b).unwrap()),
             Dispatched::Nothing => None,
+            Dispatched::Transfer(_) => unreachable!("transfer directive unexpected in this test"),
         };
         let expected = &step["response"];
         if expected.is_null() {

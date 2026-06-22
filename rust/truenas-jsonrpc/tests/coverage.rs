@@ -40,6 +40,7 @@ async fn call<S: Send + Sync + 'static>(
     match proto.dispatch(wire, session).await {
         Dispatched::Reply(b) => Some(serde_json::from_slice(&b).unwrap()),
         Dispatched::Nothing => None,
+        Dispatched::Transfer(_) => unreachable!("transfer directive unexpected in this test"),
     }
 }
 

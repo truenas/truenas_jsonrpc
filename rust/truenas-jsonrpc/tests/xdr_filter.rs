@@ -84,6 +84,7 @@ async fn xdr_filter_goldens() {
         let got = match p.dispatch(&unhex(request), &s).await {
             Dispatched::Reply(b) => b,
             Dispatched::Nothing => panic!("{name}: expected a reply"),
+            Dispatched::Transfer(_) => unreachable!("transfer directive unexpected in this test"),
         };
         assert_eq!(got, unhex(reply), "{name}: filterable XDR reply mismatch");
     }

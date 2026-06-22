@@ -24,6 +24,7 @@ use truenas_filter::{
 
 use crate::error::{ErrorCode, JsonRpcError};
 use crate::request::RequestCtx;
+use crate::transfer::{FileTransfer, TransferDirection};
 use crate::types::MessageDirection;
 
 pub(crate) fn decode_params<T: DeserializeOwned>(
@@ -293,6 +294,72 @@ impl XdrQueryOptions {
     }
 }
 
+// --- raw-fd transfer method erasure ------------------------------------------
+//
+// A transfer method has two callbacks instead of one handler (Python's
+// `JSONRPCFdTransferMethod`): `negotiate` runs after authz and returns the interim
+// "ready" result (sent as `$/transferReady`); then — after the server's wire handshake —
+// `transfer` receives the connection's [`FileTransfer`] (the raw fd) plus the typed request
+// and produces the final result. The decoded request `A` is borrowed by `negotiate` and
+// then *moved* into `transfer`, so a single decode serves both.
+
+pub(crate) trait ErasedTransfer<S>: Send + Sync {
+    /// Decode + validate the request params (before authz, like every other method).
+    fn decode(&self, params: Option<&RawValue>) -> Result<Box<dyn Any + Send>, JsonRpcError>;
+    /// Run `negotiate` over the decoded request → the interim "ready" result (encoded).
+    fn negotiate(
+        &self,
+        decoded: &(dyn Any + Send),
+        cx: &RequestCtx<S>,
+    ) -> Result<Box<RawValue>, JsonRpcError>;
+    /// Run `transfer` over the decoded request + the connection's fd → the final result.
+    fn run_transfer(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        ft: &dyn FileTransfer,
+    ) -> Result<Box<RawValue>, JsonRpcError>;
+}
+
+struct TransferErased<A, N, R, FN, FT> {
+    negotiate: FN,
+    transfer: FT,
+    #[allow(clippy::type_complexity)]
+    _p: PhantomData<fn() -> (A, N, R)>,
+}
+
+impl<S, A, N, R, FN, FT> ErasedTransfer<S> for TransferErased<A, N, R, FN, FT>
+where
+    S: Send + Sync + 'static,
+    A: DeserializeOwned + Send + 'static,
+    N: Serialize,
+    R: Serialize,
+    FN: Fn(&A, &RequestCtx<S>) -> Result<N, JsonRpcError> + Send + Sync,
+    FT: Fn(A, &dyn FileTransfer) -> Result<R, JsonRpcError> + Send + Sync,
+{
+    fn decode(&self, params: Option<&RawValue>) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        let accepts: A = decode_params(params)?;
+        Ok(Box::new(accepts))
+    }
+    fn negotiate(
+        &self,
+        decoded: &(dyn Any + Send),
+        cx: &RequestCtx<S>,
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        let accepts = decoded.downcast_ref::<A>().expect("decoded params type matches the method");
+        let interim = (self.negotiate)(accepts, cx)?;
+        encode_result(&interim)
+    }
+    fn run_transfer(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        ft: &dyn FileTransfer,
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        let accepts = *decoded.downcast::<A>().expect("decoded params type matches the method");
+        let result = (self.transfer)(accepts, ft)?;
+        encode_result(&result)
+    }
+}
+
 // --- method metadata + flags -------------------------------------------------
 
 /// Static per-method metadata (the non-handler half of Python's `JSONRPCMethod`).
@@ -434,6 +501,15 @@ pub(crate) enum MethodImpl<S> {
     /// A `python:true` method: no Rust handler. The spine routes/gates/authorizes/audits it,
     /// then runs the body via the `PyDispatcher` seam. `S`-independent (like `Subscription`).
     Python,
+    /// A raw-fd transfer method. The spine routes/gates/authorizes it, runs `negotiate`, and
+    /// returns a [`crate::Transfer`] directive for the server to drive the fd handoff. The
+    /// erased callbacks are held in an `Arc` so the directive's deferred `complete` closure
+    /// can run `transfer` after the handshake. `direction`/`af_unix` drive that handshake.
+    FdTransfer {
+        direction: TransferDirection,
+        af_unix: bool,
+        erased: Arc<dyn ErasedTransfer<S>>,
+    },
 }
 
 pub(crate) struct Method<S> {
@@ -574,6 +650,90 @@ impl<A, E, F> FilterableJsonRpcMethod<A, E, F> {
                 _p: PhantomData,
             })),
         }
+    }
+}
+
+/// A **raw-fd transfer** method (e.g. `zfs send`/`recv` via libzfs). Two callbacks instead of
+/// one handler (mirrors Python's `JSONRPCFdTransferMethod`):
+///
+/// - `negotiate: Fn(&A, &RequestCtx<S>) -> Result<N, JsonRpcError>` runs after authorization,
+///   validates the request, and returns the **interim** "ready" result `N` (sent to the
+///   client as `$/transferReady`); return an error to refuse.
+/// - `transfer: Fn(A, &dyn FileTransfer) -> Result<R, JsonRpcError>` then receives the
+///   connection's raw fd (via the server crate's concrete [`FileTransfer`]) plus the decoded
+///   request, streams the bulk data, and returns the final result `R`.
+///
+/// `direction` is [`TransferDirection::Download`] (server produces) or
+/// [`TransferDirection::Upload`] (server consumes). Transfers require a plain or kTLS
+/// connection (the fd must carry plaintext) — see `truenas-jsonrpc-server`.
+pub struct JsonRpcFdTransferMethod<A, N, R, FN, FT> {
+    def: MethodDef,
+    direction: TransferDirection,
+    negotiate: FN,
+    transfer: FT,
+    af_unix: bool,
+    #[allow(clippy::type_complexity)]
+    _p: PhantomData<fn() -> (A, N, R)>,
+}
+
+impl<A, N, R, FN, FT> JsonRpcFdTransferMethod<A, N, R, FN, FT> {
+    /// Pair a [`MethodDef`] with a transfer `direction` and the `negotiate` / `transfer`
+    /// callbacks.
+    pub fn new(def: MethodDef, direction: TransferDirection, negotiate: FN, transfer: FT) -> Self {
+        Self { def, direction, negotiate, transfer, af_unix: false, _p: PhantomData }
+    }
+
+    pub(crate) fn erase<S>(self) -> Method<S>
+    where
+        S: Send + Sync + 'static,
+        A: DeserializeOwned + Send + 'static,
+        N: Serialize + 'static,
+        R: Serialize + 'static,
+        FN: Fn(&A, &RequestCtx<S>) -> Result<N, JsonRpcError> + Send + Sync + 'static,
+        FT: Fn(A, &dyn FileTransfer) -> Result<R, JsonRpcError> + Send + Sync + 'static,
+    {
+        Method {
+            meta: self.def.into_meta(MessageDirection::ClientServer),
+            imp: MethodImpl::FdTransfer {
+                direction: self.direction,
+                af_unix: self.af_unix,
+                erased: Arc::new(TransferErased::<A, N, R, FN, FT> {
+                    negotiate: self.negotiate,
+                    transfer: self.transfer,
+                    _p: PhantomData,
+                }),
+            },
+        }
+    }
+}
+
+/// A **file-descriptor passing** method — `SCM_RIGHTS` over an AF_UNIX connection. Identical
+/// to [`JsonRpcFdTransferMethod`], but the `transfer` callback passes/receives open fds (via
+/// the server crate's `FileTransfer` `SCM_RIGHTS` helpers) instead of streaming bytes.
+/// **AF_UNIX only** — the server rejects a call over any other transport with `REQUEST_FAILED`.
+pub struct JsonRpcFdPassMethod<A, N, R, FN, FT> {
+    inner: JsonRpcFdTransferMethod<A, N, R, FN, FT>,
+}
+
+impl<A, N, R, FN, FT> JsonRpcFdPassMethod<A, N, R, FN, FT> {
+    /// Pair a [`MethodDef`] with a transfer `direction` and the `negotiate` / `transfer`
+    /// callbacks; the connection must be AF_UNIX.
+    pub fn new(def: MethodDef, direction: TransferDirection, negotiate: FN, transfer: FT) -> Self {
+        let mut inner = JsonRpcFdTransferMethod::new(def, direction, negotiate, transfer);
+        inner.af_unix = true;
+        Self { inner }
+    }
+
+    pub(crate) fn erase<S>(self) -> Method<S>
+    where
+        S: Send + Sync + 'static,
+        A: DeserializeOwned + Send + 'static,
+        N: Serialize + 'static,
+        R: Serialize + 'static,
+        FN: Fn(&A, &RequestCtx<S>) -> Result<N, JsonRpcError> + Send + Sync + 'static,
+        FT: Fn(A, &dyn FileTransfer) -> Result<R, JsonRpcError> + Send + Sync + 'static,
+    {
+        self.inner.erase()
     }
 }
 

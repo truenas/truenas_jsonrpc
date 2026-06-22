@@ -20,12 +20,14 @@ use serde_json::{json, Value};
 use crate::envelope::{self, ParsedRequest};
 use crate::error::{BuildResult, Error, ErrorCode, JsonRpcError};
 use crate::method::{
-    decode_params, encode_result, AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcMethod,
-    Method, MethodDef, MethodImpl, MethodMeta, SubscriptionDef, SubscriptionImpl,
+    decode_params, encode_result, AsyncJsonRpcMethod, ErasedTransfer, FilterableJsonRpcMethod,
+    JsonRpcFdPassMethod, JsonRpcFdTransferMethod, JsonRpcMethod, Method, MethodDef, MethodImpl,
+    MethodMeta, SubscriptionDef, SubscriptionImpl,
 };
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::RequestCtx;
 use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SystemClock, UuidGen};
+use crate::transfer::{FileTransfer, Transfer, TransferDirection};
 use crate::types::{AuthorizationResponse, JsonRpcRequest, MessageDirection, SessionLifecycle};
 use truenas_filter::{CompiledFilters, CompiledOptions, Filtered};
 
@@ -35,6 +37,7 @@ const SESSION_SETUP_METHOD: &str = "$/sessionSetup";
 const SESSION_SETUP_CONTINUE_METHOD: &str = "$/sessionSetupContinue";
 const SESSION_CLOSE_METHOD: &str = "$/sessionClose";
 const DESCRIBE_METHOD: &str = "$/describe";
+const TRANSFER_READY_METHOD: &str = "$/transferReady";
 
 /// The result of dispatching one inbound message.
 pub enum Dispatched {
@@ -42,14 +45,20 @@ pub enum Dispatched {
     Reply(Vec<u8>),
     /// Nothing to send (a notification, or a suppressed reply).
     Nothing,
+    /// A raw-fd transfer method was authorized + negotiated: the server must run the wire
+    /// handshake and fd handoff (see [`Transfer`]). Returned only by the JSON wire — the XDR
+    /// binary wire does not offer transfer methods.
+    Transfer(Transfer),
 }
 
 impl Dispatched {
-    /// The reply bytes, if any (`None` for [`Dispatched::Nothing`]).
+    /// The reply bytes, if any (`None` for [`Dispatched::Nothing`]; a [`Dispatched::Transfer`]
+    /// has no single reply — it yields the `$/transferReady` envelope then a final response
+    /// via the server's handshake, so this is `None`).
     pub fn into_bytes(self) -> Option<Vec<u8>> {
         match self {
             Dispatched::Reply(b) => Some(b),
-            Dispatched::Nothing => None,
+            Dispatched::Nothing | Dispatched::Transfer(_) => None,
         }
     }
 }
@@ -343,6 +352,43 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             + 'static,
         A: DeserializeOwned + Send + 'static,
         E: Serialize + 'static,
+    {
+        self.insert(method.erase::<S>())?;
+        Ok(self)
+    }
+
+    /// Register a raw-fd transfer method (e.g. `zfs send`/`recv` via libzfs). After
+    /// authorization the `negotiate` callback runs and a [`Transfer`] directive is handed back
+    /// for the server to drive the wire handshake + fd handoff; the `transfer` callback then
+    /// streams over the connection's raw fd. Mirrors Python's `JSONRPCFdTransferMethod`.
+    pub fn fd_transfer_method<A, N, R, FN, FT>(
+        mut self,
+        method: JsonRpcFdTransferMethod<A, N, R, FN, FT>,
+    ) -> BuildResult<Self>
+    where
+        A: DeserializeOwned + Send + 'static,
+        N: Serialize + 'static,
+        R: Serialize + 'static,
+        FN: Fn(&A, &RequestCtx<S>) -> Result<N, JsonRpcError> + Send + Sync + 'static,
+        FT: Fn(A, &dyn FileTransfer) -> Result<R, JsonRpcError> + Send + Sync + 'static,
+    {
+        self.insert(method.erase::<S>())?;
+        Ok(self)
+    }
+
+    /// Register an `SCM_RIGHTS` file-descriptor-passing method (**AF_UNIX only**). Like
+    /// [`fd_transfer_method`](Self::fd_transfer_method), but the `transfer` callback passes /
+    /// receives open fds rather than streaming bytes. Mirrors Python's `JSONRPCFdPassMethod`.
+    pub fn fd_pass_method<A, N, R, FN, FT>(
+        mut self,
+        method: JsonRpcFdPassMethod<A, N, R, FN, FT>,
+    ) -> BuildResult<Self>
+    where
+        A: DeserializeOwned + Send + 'static,
+        N: Serialize + 'static,
+        R: Serialize + 'static,
+        FN: Fn(&A, &RequestCtx<S>) -> Result<N, JsonRpcError> + Send + Sync + 'static,
+        FT: Fn(A, &dyn FileTransfer) -> Result<R, JsonRpcError> + Send + Sync + 'static,
     {
         self.insert(method.erase::<S>())?;
         Ok(self)
@@ -768,6 +814,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             return self.handle_subscribe(&method, sub_impl.as_ref(), parsed, session);
         }
 
+        // A raw-fd transfer method: authorize + negotiate here, then hand a `Transfer`
+        // directive back to the server to drive the wire handshake + fd handoff.
+        if let MethodImpl::FdTransfer { direction, af_unix, erased } = &method.imp {
+            return self.begin_transfer(&method, *direction, *af_unix, erased.clone(), parsed, session);
+        }
+
         let response = self.run_method(method, parsed, session.clone()).await;
         finish(note, response)
     }
@@ -903,6 +955,96 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
 
         finish(note, ack)
+    }
+
+    // --- raw-fd transfer -----------------------------------------------------
+
+    /// Authorize, run the transfer method's `negotiate` callback, and return a [`Transfer`]
+    /// directive (or an error envelope). The server drives the wire handshake and fd handoff
+    /// from there, then calls [`Transfer::complete`]. An authorization denial or a `negotiate`
+    /// failure is audited here (as a normal method's denial/error is); a transfer that
+    /// proceeds is audited inside the directive's `complete` closure. Mirrors Python's
+    /// `_begin_transfer`.
+    fn begin_transfer(
+        &self,
+        method: &Arc<Method<S>>,
+        direction: TransferDirection,
+        af_unix: bool,
+        erased: Arc<dyn ErasedTransfer<S>>,
+        parsed: ParsedRequest,
+        session: &Arc<Session<S>>,
+    ) -> Dispatched {
+        // A transfer has a multi-step reply ($/transferReady + a final response), so it can't
+        // be a notification.
+        let Some(rid) = parsed.id.clone() else {
+            return Dispatched::Reply(envelope::error(
+                None,
+                ErrorCode::InvalidRequest.code(),
+                "Invalid request",
+                Some(&json!("a transfer request requires an 'id'")),
+            ));
+        };
+
+        // Decode + typed-validate (INVALID_PARAMS before authz, like every method); not audited.
+        let decoded = match erased.decode(parsed.params.as_deref()) {
+            Ok(d) => d,
+            Err(e) => return Dispatched::Reply(response_bytes(Some(&rid), &Err(e))),
+        };
+
+        let need_snapshot = self.authorizer.is_some() || method.meta.audit;
+        let req = JsonRpcRequest {
+            method: parsed.method.clone(),
+            id: Some(rid.clone()),
+            params: if need_snapshot { raw_to_value(parsed.params.as_deref()) } else { Value::Null },
+            roles: if need_snapshot { method.meta.roles.to_vec() } else { Vec::new() },
+        };
+
+        // Authorize; a denial is audited (like the normal path audits an authorized call).
+        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, None) {
+            let resp = response_bytes(Some(&rid), &Err(denied));
+            if method.meta.audit {
+                if let Some(sink) = self.audit_sink.as_deref() {
+                    audit_call(sink, &method.meta, &req, &resp, None, session);
+                }
+            }
+            return Dispatched::Reply(resp);
+        }
+
+        // Negotiate → the interim "ready" result (a refusal is audited like a handler error).
+        let cx = RequestCtx::new(Some(rid.clone()), session.clone(), self.never_cancel.clone());
+        let interim = match erased.negotiate(decoded.as_ref(), &cx) {
+            Ok(raw) => raw,
+            Err(e) => {
+                let resp = response_bytes(Some(&rid), &Err(e));
+                if method.meta.audit {
+                    if let Some(sink) = self.audit_sink.as_deref() {
+                        audit_call(sink, &method.meta, &req, &resp, None, session);
+                    }
+                }
+                return Dispatched::Reply(resp);
+            }
+        };
+
+        let ready = build_transfer_ready(&rid, direction, &interim);
+
+        // The deferred completion: after the server's handshake hands over the fd, run
+        // `transfer`, build the final reply, and audit (mirrors Python's `_run_transfer`).
+        let audit = method.meta.audit;
+        let audit_sink = self.audit_sink.clone();
+        let meta = method.meta.clone();
+        let session = session.clone();
+        let final_rid = rid.clone();
+        let complete = Box::new(move |ft: &dyn FileTransfer| -> Vec<u8> {
+            let resp = response_bytes(Some(&final_rid), &erased.run_transfer(decoded, ft));
+            if audit {
+                if let Some(sink) = &audit_sink {
+                    audit_call(sink.as_ref(), &meta, &req, &resp, None, &session);
+                }
+            }
+            resp
+        });
+
+        Dispatched::Transfer(Transfer::new(rid, direction, af_unix, ready, complete))
     }
 
     // --- control messages ----------------------------------------------------
@@ -1155,6 +1297,30 @@ fn finish(note: bool, bytes: Vec<u8>) -> Dispatched {
     } else {
         Dispatched::Reply(bytes)
     }
+}
+
+/// Build the `$/transferReady` notification envelope the server sends before the fd handoff:
+/// `{"jsonrpc":"2.0","method":"$/transferReady","params":{"id":<rid>,"direction":<dir>,"result":<interim>}}`
+/// (`result` embeds the `negotiate` interim verbatim). Byte-compatible with Python's.
+fn build_transfer_ready(rid: &str, direction: TransferDirection, interim: &RawValue) -> Vec<u8> {
+    #[derive(Serialize)]
+    struct Params<'a> {
+        id: &'a str,
+        direction: TransferDirection,
+        result: &'a RawValue,
+    }
+    #[derive(Serialize)]
+    struct Ready<'a> {
+        jsonrpc: &'static str,
+        method: &'static str,
+        params: Params<'a>,
+    }
+    serde_json::to_vec(&Ready {
+        jsonrpc: crate::JSONRPC_VERSION,
+        method: TRANSFER_READY_METHOD,
+        params: Params { id: rid, direction, result: interim },
+    })
+    .expect("encoding the $/transferReady envelope cannot fail")
 }
 
 fn raw_to_value(params: Option<&RawValue>) -> Value {

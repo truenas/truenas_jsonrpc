@@ -26,17 +26,20 @@ mod protocol;
 mod pydispatch;
 mod request;
 mod session;
+mod transfer;
 mod types;
 
 pub use error::{BuildResult, Error, ErrorCode, JsonRpcError};
 pub use meta::Secret;
 pub use method::{
-    AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcMethod, MethodDef, SubscriptionDef,
+    AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcFdPassMethod, JsonRpcFdTransferMethod,
+    JsonRpcMethod, MethodDef, SubscriptionDef,
 };
 pub use protocol::{
     AuditSink, Authorizer, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
     JsonRpcProtocolBuilder, ServerInfoHandler,
 };
+pub use transfer::{FileTransfer, Transfer, TransferDirection};
 pub use pydispatch::{PyDispatcher, PyOutcome, PyResult};
 pub use request::RequestCtx;
 pub use session::{Clock, IdGen, NullOutbound, Outbound, Session, SessionId, SystemClock, UuidGen};
