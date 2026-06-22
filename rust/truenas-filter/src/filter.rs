@@ -89,6 +89,22 @@ impl std::fmt::Debug for CompiledFilters {
     }
 }
 
+impl CompiledFilters {
+    /// Visit the pre-split path of every leaf condition, recursing through `OR`/`AND` nodes.
+    /// Used by [`crate::extract`] to work out which fields each row's view must carry.
+    pub(crate) fn visit_paths(&self, f: &mut impl FnMut(&[PathPart])) {
+        fn walk(node: &Node, f: &mut impl FnMut(&[PathPart])) {
+            match node {
+                Node::Simple(s) => f(&s.parts),
+                Node::Or(children) | Node::And(children) => {
+                    children.iter().for_each(|c| walk(c, f));
+                }
+            }
+        }
+        self.filters.iter().for_each(|node| walk(node, f));
+    }
+}
+
 /// Compile a raw `query-filters` list into a [`CompiledFilters`].
 ///
 /// Returns [`FilterError::Compile`] for malformed syntax (bad operator, wrong node arity,

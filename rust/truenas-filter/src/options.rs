@@ -151,6 +151,14 @@ impl CompiledOptions {
         self.limit
     }
 
+    /// Visit the split key path of every `order_by` spec, for [`crate::extract`]'s needed-field
+    /// analysis. (The nulls partition's literal `top_key` lookup is covered too: a spec only
+    /// qualifies for the pruned view when its key is a single plain component, for which
+    /// `top_key` equals that component — see `extract::simple_key`.)
+    pub(crate) fn visit_order_keys(&self, f: &mut impl FnMut(&[PathPart])) {
+        self.order_specs.iter().for_each(|s| f(&s.keys));
+    }
+
     /// Run the non-count pipeline tail on the matched rows: order → offset → limit. Each row
     /// is a `(view, item)` pair — ordering uses the `view`, and the typed `item` is returned
     /// unchanged (no projection).

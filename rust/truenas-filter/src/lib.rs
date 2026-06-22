@@ -31,6 +31,7 @@
 //! `query-filters` operators (incl. the `C` case-insensitive prefix), `order_by`, `get`,
 //! `count`, `offset`, `limit` — is byte-identical to the C oracle.
 
+mod extract;
 mod filter;
 mod options;
 mod path;
@@ -40,7 +41,7 @@ pub use filter::{compile_filters, CompiledFilters};
 pub use options::{compile_options, CompiledOptions, QueryOptions};
 
 use serde::Serialize;
-use serde_json::{to_value, Value};
+use serde_json::Value;
 
 /// A raw `query-filters` list (middleware form): `[name, op, value]` leaves and
 /// `["OR", [branch, …]]` nodes. Handed verbatim to [`compile_filters`].
@@ -92,10 +93,11 @@ impl std::error::Error for FilterError {}
 /// Filter `data` with a pre-compiled query, returning the matched rows (or their count).
 ///
 /// `data` is consumed **lazily** through its iterator. Each item is serialized to a
-/// `serde_json::Value` *view* once (`to_value`) and tested/ordered against that view, while
-/// the original typed item is carried through so a match is **moved** into the result
-/// unchanged — never copied or reshaped (no `select`). The unfiltered source is never
-/// materialized. `get` (with no `order_by`) short-circuits at the first match; `count`
+/// `serde_json::Value` *view* once and tested/ordered against that view, while the original
+/// typed item is carried through so a match is **moved** into the result unchanged — never
+/// copied or reshaped (no `select`). The view is pruned to just the fields the query reads
+/// (often none), so the unfiltered source is never materialized in full.
+/// `get` (with no `order_by`) short-circuits at the first match; `count`
 /// tallies without retaining; with no `order_by` and a `limit`, only the requested page is
 /// kept; with `order_by`, all matches are retained (sorting needs them). The post-filter
 /// pipeline is `count` → `order` → `offset` → `limit`.
@@ -111,12 +113,16 @@ where
     E: Serialize,
     I: IntoIterator<Item = E>,
 {
+    // Work out which fields the filters/order actually read, once, so each row's view carries
+    // only those (or, when nothing is read, nothing at all) — see [`extract`].
+    let needed = extract::compute_needed(filters, options);
+
     // count: stream and tally matches; never retain. `shortcircuit` caps the tally at the
     // first match (get with no order_by).
     if options.count_flag() {
         let mut n: i64 = 0;
         for item in data {
-            if filter::matches_all(&view(&item)?, filters)? {
+            if filter::matches_all(&extract::build_view(&item, &needed)?, filters)? {
                 n += 1;
                 if options.shortcircuit() {
                     break;
@@ -137,7 +143,7 @@ where
     // Carry `(view, item)` for each match: the view drives ordering, the item is the result.
     let mut matched: Vec<(Value, E)> = Vec::new();
     for item in data {
-        let v = view(&item)?;
+        let v = extract::build_view(&item, &needed)?;
         if filter::matches_all(&v, filters)? {
             matched.push((v, item));
             if options.shortcircuit() {
@@ -152,12 +158,6 @@ where
     }
 
     Ok(Filtered::Rows(options.apply(matched)?))
-}
-
-/// The `serde_json::Value` view of a row, for filter/order evaluation. (For
-/// `E = Value` this is a clone; for a typed `E` it is the row serialized to JSON.)
-fn view<E: Serialize>(item: &E) -> Result<Value, FilterError> {
-    to_value(item).map_err(|e| FilterError::Eval(format!("row is not representable for filtering: {e}")))
 }
 
 /// Test whether a single `item` matches all `filters` (the C engine's `match`, as a pure
@@ -200,7 +200,9 @@ mod tests {
 
     #[test]
     fn unrepresentable_row_is_eval_error() {
-        // A row whose `Serialize` fails → the `to_value` view fails → FilterError::Eval.
+        // A row whose `Serialize` fails → the view can't be built → FilterError::Eval. A filter
+        // is required: with no filters/order the view is never built (`Needed::Nothing`), so the
+        // failing `Serialize` would never be invoked.
         struct Unser;
         impl serde::Serialize for Unser {
             fn serialize<S: serde::Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
@@ -208,7 +210,7 @@ mod tests {
                 Err(S::Error::custom("not serializable"))
             }
         }
-        let cf = compile_filters(&[]).unwrap(); // empty filters = match all
+        let cf = compile_filters(&[json!(["x", "=", 1])]).unwrap();
         let co = compile_options(&QueryOptions::default()).unwrap();
         assert!(matches!(tnfilter(vec![Unser], &cf, &co), Err(FilterError::Eval(_))));
     }
