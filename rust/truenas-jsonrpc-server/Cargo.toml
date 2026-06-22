@@ -1,0 +1,32 @@
+# `truenas-jsonrpc-server` — the optional async server transport for `truenas-jsonrpc`
+# (mirrors Python's `truenas_pyjsonrpc_server`). Length-prefixed JSON framing + `$/negotiate`
+# over AF_UNIX and plain TCP; TLS/kTLS and WebSocket arrive behind opt-in features. It is NOT
+# in the workspace `default-members` (a plain `cargo build`/`coverage.sh` skips it, like the
+# pyo3 bridge) — the dispatch core stays transport-free; depend on this crate to run a server.
+[package]
+name = "truenas-jsonrpc-server"
+version = "0.1.0"
+description = "Optional async server transport (AF_UNIX/TCP, length-prefixed JSON, $/negotiate) for truenas-jsonrpc"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-jsonrpc = { path = "../truenas-jsonrpc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# `net` pulls mio + socket2 (the only new transitive crates for AF_UNIX/TCP — tokio's own
+# networking foundation); `io-util` gives the framed read/write helpers.
+tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "macros", "time"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+
+# This crate makes syscalls (SO_PEERCRED now; kTLS / SCM_RIGHTS in later phases), so it cannot
+# use the workspace's `unsafe_code = "forbid"`. It denies unsafe by default and allows it only
+# in narrowly-scoped, audited blocks (`#[allow(unsafe_code)]`); the dispatch core stays forbid.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

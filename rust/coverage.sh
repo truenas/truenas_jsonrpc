@@ -42,7 +42,7 @@ for b in "${BINS[@]}"; do [ -n "$b" ] && OBJ+=(--object "$b"); done
 # Scope to this crate's src/: exclude deps, std, our own tests/examples/build output, and
 # the proc-macro crate (`truenas-xdr-derive` runs at compile time, not in the instrumented
 # test binaries; its generated output is covered behaviorally by `truenas-xdr`'s tests).
-IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/)'
+IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-jsonrpc-server/)'
 
 # Merged line coverage, exported as lcov (the standard interchange format Codecov/Coveralls
 # consume): a source line is covered if ANY test executed it. We deliberately gate on this

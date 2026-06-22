@@ -13,12 +13,15 @@ members = [
     "truenas-xdr-derive",
     "truenas-jsonrpc-codegen",
     "truenas-jsonrpc-pyo3",
+    "truenas-jsonrpc-server",
     "examples/demo",
 ]
-# `truenas-jsonrpc-pyo3` links libpython, so it is excluded from the default set: a plain
-# `cargo build`/`cargo test` (and `coverage.sh`, which runs without `-p`) skip it — the
-# default build links zero libpython (mirroring the Zig `-Dpython` opt-in). It is still built
-# by `cargo clippy --workspace` and tested with `cargo test -p truenas-jsonrpc-pyo3`.
+# Two crates are excluded from the default set (a plain `cargo build`/`cargo test` and
+# `coverage.sh`, which run without `-p`, skip them): `truenas-jsonrpc-pyo3` links libpython
+# (so the default build links none, mirroring Zig's `-Dpython` opt-in), and
+# `truenas-jsonrpc-server` does socket / kTLS / SCM_RIGHTS I/O that can't be unit-tested to
+# 100% deterministically (it is covered behaviorally instead, and excluded from the coverage
+# gate). Both are still built by `cargo clippy --workspace` and tested with `cargo test -p …`.
 default-members = [
     "truenas-jsonrpc",
     "truenas-filter",
