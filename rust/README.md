@@ -7,14 +7,36 @@ in [`../ARCHITECTURE.md`](../ARCHITECTURE.md) and the project overview in
 
 ## Crates
 
-- **`truenas-jsonrpc`** — the transport-agnostic **dispatch core** (Python's `JSONRPCProtocol`):
-  envelope parse/validation, the session lifecycle + gate, the authorize → handler → audit
-  pipeline, the `$/` control messages, pub/sub (`SERVER_CLIENT` subscriptions), and filterable
-  (query) methods. Sync handlers run on `spawn_blocking`; async handlers are awaited (a
-  Rust-only addition — Python has no async methods).
+This is a workspace of focused crates, but **a consumer depends on only one of them at
+runtime.** The split is internal layering (and, for two of them, a hard requirement — see
+below), not a per-crate dependency you take on. What actually goes in your `Cargo.toml`:
+
+- **`truenas-jsonrpc`** — *your only runtime dependency.* The transport-agnostic **dispatch
+  core** (Python's `JSONRPCProtocol`): envelope parse/validation, the session lifecycle +
+  gate, the authorize → handler → audit pipeline, the `$/` control messages, pub/sub
+  (`SERVER_CLIENT` subscriptions), and filterable (query) methods. Sync handlers run on
+  `spawn_blocking`; async handlers are awaited (a Rust-only addition — Python has no async
+  methods). It **re-exports the filter API** (`tnfilter`, `Filtered`, `CompiledFilters`, …),
+  so you `use truenas_jsonrpc::…` for filtering too.
+- **`truenas-jsonrpc-codegen`** — a **build-dependency** (never a runtime one): the `json-idl/`
+  → Rust generator, run from `build.rs` (see [Code generation](#code-generation-truenas-jsonrpc-codegen)).
+- **`truenas-jsonrpc-pyo3`** — **optional**, only if you run `python:true` handler bodies in an
+  embedded CPython interpreter. It is excluded from the workspace's default members, so a
+  default `cargo build` links **zero** libpython.
+
+The remaining crates are **internal** — pulled in transitively by `truenas-jsonrpc`, so you
+don't name them. Each is self-contained with a smaller dependency set, so it's *also* usable
+standalone if you want just that piece:
+
 - **`truenas-filter`** — the `query-filters` / `query-options` **engine**, a port of the
-  `truenas_pyfilter` C extension. Consumed by `truenas-jsonrpc`'s filterable methods; also
-  usable standalone.
+  `truenas_pyfilter` C extension (deps: `serde` + `serde_json`). Re-exported through
+  `truenas-jsonrpc`.
+- **`truenas-xdr`** — a serde **XDR (RFC 4506) codec** + the TXDR binary frame (deps: `serde` +
+  `thiserror`), driving the binary wire inside the core's dispatch. Its `derive` feature adds
+  `#[derive(XdrEnum/XdrUnion)]`.
+- **`truenas-xdr-derive`** — the proc-macro crate behind that `derive` feature. A proc-macro
+  *must* be its own crate (a language rule), so you never depend on it directly — you enable
+  `truenas-xdr`'s `derive` feature and the macros are re-exported for you.
 
 ## Parity & proof
 
