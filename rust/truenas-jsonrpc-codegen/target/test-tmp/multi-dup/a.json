@@ -1,1 +1,0 @@
-{"name":"s","version":"1","$defs":{"A":{"type":"object","properties":{},"required":[]}},"methods":{"m":{"handler":"m","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"}}}}

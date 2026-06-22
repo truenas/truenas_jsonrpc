@@ -1,1 +1,0 @@
-{"name":"ignored","version":"9","$defs":{"B":{"type":"object","properties":{},"required":[]}},"methods":{"m2":{"handler":"m2","params":{"$ref":"#/$defs/B"},"result":{"$ref":"#/$defs/A"}}}}
