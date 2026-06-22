@@ -188,6 +188,14 @@ pub(crate) fn error(
     .expect("serializing an error envelope cannot fail")
 }
 
+/// The bare error object `{"code":..,"message":..,"data"?:..}` — the JSON wire's `error`
+/// member on its own. Used as the XDR error-frame detail so both wires carry identical
+/// bytes (field order: code, message, data).
+pub(crate) fn error_object(code: i32, message: &str, data: Option<&serde_json::Value>) -> Vec<u8> {
+    serde_json::to_vec(&WireError { code, message, data })
+        .expect("serializing an error object cannot fail")
+}
+
 /// Convenience: render a [`ParseError`] to wire bytes (always sent).
 pub(crate) fn error_from_parse(e: &ParseError) -> Vec<u8> {
     let data = e.data.as_ref().map(|s| serde_json::Value::String(s.clone()));

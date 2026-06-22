@@ -1,0 +1,26 @@
+# `truenas-jsonrpc-pyo3` — the optional PyO3 bridge that runs `python:true` method bodies in
+# an embedded CPython interpreter. It implements the core's `PyDispatcher` seam by calling a
+# Python `dispatch(name, params, session)` callable (the contract `gen.py --python-out`
+# emits). It is NOT in the workspace `default-members`, so the default build links no
+# libpython; opt in by depending on it (the consumer's choice, like Zig's `-Dpython`).
+[package]
+name = "truenas-jsonrpc-pyo3"
+version = "0.1.0"
+description = "PyO3 bridge: run truenas-jsonrpc python:true method bodies in an embedded CPython interpreter"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-jsonrpc = { path = "../truenas-jsonrpc" }
+serde_json = { workspace = true }
+# `auto-initialize` starts the embedded interpreter on first `Python::with_gil`.
+pyo3 = { version = "0.23", features = ["auto-initialize"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+[lints]
+workspace = true

@@ -23,6 +23,7 @@ use crate::method::{
     decode_params, encode_result, AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcMethod,
     Method, MethodDef, MethodImpl, MethodMeta, SubscriptionDef, SubscriptionImpl,
 };
+use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::RequestCtx;
 use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SystemClock, UuidGen};
 use crate::types::{AuthorizationResponse, JsonRpcRequest, MessageDirection, SessionLifecycle};
@@ -33,6 +34,7 @@ const SERVERINFO_METHOD: &str = "$/serverInfo";
 const SESSION_SETUP_METHOD: &str = "$/sessionSetup";
 const SESSION_SETUP_CONTINUE_METHOD: &str = "$/sessionSetupContinue";
 const SESSION_CLOSE_METHOD: &str = "$/sessionClose";
+const DESCRIBE_METHOD: &str = "$/describe";
 
 /// The result of dispatching one inbound message.
 pub enum Dispatched {
@@ -223,12 +225,16 @@ pub struct JsonRpcProtocolBuilder<S> {
     name: Arc<str>,
     version: Arc<str>,
     methods: HashMap<Arc<str>, Arc<Method<S>>>,
+    /// XDR-enabled methods, keyed by proc-id (a subset of `methods`, sharing the `Arc`).
+    xdr_methods: HashMap<u32, Arc<Method<S>>>,
     authorizer: Option<Arc<dyn Authorizer<S>>>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     canceller: Option<Arc<dyn Canceller<S>>>,
     server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
     setup: Option<SetupSlot<S>>,
     setup_continue: Option<SetupSlot<S>>,
+    describe: Option<Box<RawValue>>,
+    py_dispatcher: Option<Arc<dyn PyDispatcher>>,
     id_gen: Arc<dyn IdGen>,
     clock: Arc<dyn Clock>,
 }
@@ -240,12 +246,15 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             name: name.into(),
             version: version.into(),
             methods: HashMap::new(),
+            xdr_methods: HashMap::new(),
             authorizer: None,
             audit_sink: None,
             canceller: None,
             server_info: None,
             setup: None,
             setup_continue: None,
+            describe: None,
+            py_dispatcher: None,
             id_gen: Arc::new(UuidGen),
             clock: Arc::new(SystemClock),
         }
@@ -259,7 +268,29 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
         if self.methods.contains_key(&name) {
             return Err(Error::DuplicateMethod(name.to_string()));
         }
-        self.methods.insert(name, Arc::new(method));
+        match method.meta.xdr_id {
+            None => {
+                self.methods.insert(name, Arc::new(method));
+            }
+            Some(id) => {
+                // 0..=RESERVED_PROC_MAX are reserved for control messages over the binary wire.
+                if id <= truenas_xdr::frame::RESERVED_PROC_MAX {
+                    return Err(Error::Config(format!(
+                        "xdr_id {id} for method {name:?} is reserved (must be > {})",
+                        truenas_xdr::frame::RESERVED_PROC_MAX
+                    )));
+                }
+                if self.xdr_methods.contains_key(&id) {
+                    return Err(Error::Config(format!(
+                        "duplicate xdr_id {id} for method {name:?}"
+                    )));
+                }
+                // The same `Arc<Method>` lives in both maps (JSON by name, XDR by proc-id).
+                let arc = Arc::new(method);
+                self.xdr_methods.insert(id, arc.clone());
+                self.methods.insert(name, arc);
+            }
+        }
         Ok(())
     }
 
@@ -341,6 +372,31 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
         self
     }
 
+    /// Provide the OpenRPC service description served by the unauthenticated `$/describe`
+    /// introspection method (typically the generated `openrpc.json`, embedded with
+    /// `include_str!` and parsed once into a [`RawValue`]). Without it, `$/describe`
+    /// reports method-not-found.
+    pub fn describe(mut self, doc: Box<RawValue>) -> Self {
+        self.describe = Some(doc);
+        self
+    }
+
+    /// Register a python-backed method (`python:true`): no Rust handler — the body runs via
+    /// the configured [`PyDispatcher`]. The spine still routes/gates/authorizes/audits it;
+    /// only the body crosses into Python. Set the dispatcher with
+    /// [`python_dispatcher`](Self::python_dispatcher).
+    pub fn python_method(mut self, def: MethodDef) -> BuildResult<Self> {
+        self.insert(Method::python(def))?;
+        Ok(self)
+    }
+
+    /// Set the [`PyDispatcher`] that runs `python:true` method bodies. Without it, a python
+    /// method dispatches to `INTERNAL_ERROR` (degrading safely, like the Zig spine).
+    pub fn python_dispatcher(mut self, dispatcher: impl PyDispatcher + 'static) -> Self {
+        self.py_dispatcher = Some(Arc::new(dispatcher));
+        self
+    }
+
     /// Enable `$/sessionSetup` (and optionally `$/sessionSetupContinue`) authentication.
     /// `def` carries audit/secret-field metadata (setup is always audited, redacted).
     pub fn session_setup<F, A, R>(mut self, def: MethodDef, handler: F) -> Self
@@ -395,12 +451,15 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             name: self.name,
             version: self.version,
             methods: self.methods,
+            xdr_methods: self.xdr_methods,
             authorizer: self.authorizer,
             audit_sink: self.audit_sink,
             canceller: self.canceller,
             server_info: self.server_info,
             setup: self.setup,
             setup_continue: self.setup_continue,
+            describe: self.describe,
+            py_dispatcher: self.py_dispatcher,
             has_session_setup,
             id_gen: self.id_gen,
             clock: self.clock,
@@ -419,12 +478,15 @@ pub struct JsonRpcProtocol<S> {
     name: Arc<str>,
     version: Arc<str>,
     methods: HashMap<Arc<str>, Arc<Method<S>>>,
+    xdr_methods: HashMap<u32, Arc<Method<S>>>,
     authorizer: Option<Arc<dyn Authorizer<S>>>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     canceller: Option<Arc<dyn Canceller<S>>>,
     server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
     setup: Option<SetupSlot<S>>,
     setup_continue: Option<SetupSlot<S>>,
+    describe: Option<Box<RawValue>>,
+    py_dispatcher: Option<Arc<dyn PyDispatcher>>,
     has_session_setup: bool,
     id_gen: Arc<dyn IdGen>,
     #[allow(dead_code)] // used by audit timestamping once the audit record carries time
@@ -541,12 +603,95 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     /// Dispatch one framed JSON-RPC message. Total — never returns an error; every
     /// protocol/handler fault becomes a wire error object inside [`Dispatched::Reply`].
     pub async fn dispatch(&self, wire: &[u8], session: &Arc<Session<S>>) -> Dispatched {
+        // A leading 4-byte TXDR magic selects the binary wire; a JSON envelope always
+        // begins with `{` (0x7B), so the discriminator is unambiguous.
+        if truenas_xdr::frame::is_xdr(wire) {
+            return self.dispatch_xdr(wire, session);
+        }
         let parsed = match envelope::parse(wire) {
             Ok(p) => p,
             // Parse / id / structural errors are always replied to (never suppressed).
             Err(pe) => return Dispatched::Reply(envelope::error_from_parse(&pe)),
         };
         self.dispatch_parsed(parsed, session).await
+    }
+
+    /// Dispatch an XDR binary-wire frame (the [`is_xdr`](truenas_xdr::frame::is_xdr) magic
+    /// was already matched). v1 scope: plain methods only (filterable/subscription/python
+    /// over XDR return method-not-found); params are **not** surfaced to the authorizer and
+    /// XDR calls are **not** audited (both are JSON-wire features deferred for the binary
+    /// wire); and the body runs inline on the calling task (offloading like the JSON sync
+    /// path is deferred to the server layer). The session gate + authorization still apply.
+    fn dispatch_xdr(&self, wire: &[u8], session: &Arc<Session<S>>) -> Dispatched {
+        use truenas_xdr::frame;
+        let request = match frame::parse_request(wire) {
+            Ok(r) => r,
+            // Truncated/corrupt frame: no id to echo — reply with an id-less error frame.
+            Err(_) => {
+                return Dispatched::Reply(
+                    self.xdr_error(None, &JsonRpcError::new(ErrorCode::InvalidRequest, "Invalid request")),
+                )
+            }
+        };
+        let rid = request.rid;
+        let note = rid.is_none();
+
+        // A CLOSED session accepts nothing further.
+        if session.lifecycle() == SessionLifecycle::Closed {
+            return finish(note, self.xdr_error(rid, &JsonRpcError::session_not_established("Session is closed")));
+        }
+        // Method lookup by proc-id.
+        let method = match self.xdr_methods.get(&request.proc_id) {
+            Some(m) => m.clone(),
+            None => {
+                return finish(note, self.xdr_error(rid, &JsonRpcError::method_not_found("Method not found")))
+            }
+        };
+        // Session-established gate (only when session setup is configured).
+        if self.has_session_setup
+            && !method.meta.pre_auth
+            && session.lifecycle() != SessionLifecycle::Established
+        {
+            return finish(
+                note,
+                self.xdr_error(rid, &JsonRpcError::session_not_established("Session not established")),
+            );
+        }
+
+        // The 16 raw id bytes canonicalize to a UUID string for the string-keyed authz hook.
+        let id_str = rid.map(|b| uuid::Uuid::from_bytes(b).to_string());
+        let req = JsonRpcRequest {
+            method: method.meta.name.to_string(),
+            id: id_str.clone(),
+            params: Value::Null,
+            roles: method.meta.roles.to_vec(),
+        };
+        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, None) {
+            return finish(note, self.xdr_error(rid, &denied));
+        }
+
+        let cx = RequestCtx::new(id_str, session.clone(), self.never_cancel.clone());
+        let outcome = match &method.imp {
+            MethodImpl::Sync(erased) | MethodImpl::Filterable(erased) => {
+                erased.xdr_run(request.params, &cx)
+            }
+            // Subscription / python methods are not callable over the binary wire.
+            _ => Err(JsonRpcError::method_not_found("Method not found")),
+        };
+        let reply = match outcome {
+            Ok(result_bytes) => {
+                frame::build_reply_ok(rid, &result_bytes).expect("XDR reply envelope encodes")
+            }
+            Err(e) => self.xdr_error(rid, &e),
+        };
+        finish(note, reply)
+    }
+
+    /// Build an XDR error reply frame whose detail is the JSON `{code,message,data?}` object
+    /// (the same bytes the JSON wire's `error` member carries).
+    fn xdr_error(&self, rid: Option<[u8; 16]>, e: &JsonRpcError) -> Vec<u8> {
+        let detail = envelope::error_object(e.code, &e.message, e.data.as_ref());
+        truenas_xdr::frame::build_reply_err(rid, e.code, &detail).expect("XDR error frame encodes")
     }
 
     async fn dispatch_parsed(&self, parsed: ParsedRequest, session: &Arc<Session<S>>) -> Dispatched {
@@ -570,6 +715,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         match parsed.method.as_str() {
             CANCEL_METHOD => return self.handle_cancel(parsed, session),
             SERVERINFO_METHOD => return self.handle_server_info(parsed, session).await,
+            DESCRIBE_METHOD => return self.handle_describe(parsed),
             SESSION_SETUP_METHOD => return self.handle_setup(parsed, session, true).await,
             SESSION_SETUP_CONTINUE_METHOD => return self.handle_setup(parsed, session, false).await,
             SESSION_CLOSE_METHOD => return self.handle_close(parsed, session),
@@ -662,7 +808,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // Bundle everything the decode → authorize → handler → audit stages share into a
         // single owned value, so the sync path can move it across the `spawn_blocking`
         // boundary as one argument instead of cloning six locals to thread through.
-        let is_sync = matches!(method.imp, MethodImpl::Sync(_) | MethodImpl::Filterable(_));
+        // Sync, filterable, and python bodies all run on the blocking pool (a python body
+        // holds the GIL); only an async method is awaited on the runtime.
+        let is_blocking = matches!(
+            method.imp,
+            MethodImpl::Sync(_) | MethodImpl::Filterable(_) | MethodImpl::Python
+        );
         let pipeline = Pipeline {
             method,
             session,
@@ -670,11 +821,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             rid: rid.clone(),
             authorizer: self.authorizer.clone(),
             audit_sink: self.audit_sink.clone(),
+            py_dispatcher: self.py_dispatcher.clone(),
         };
 
-        let response = if is_sync {
+        let response = if is_blocking {
             let params = parsed.params;
-            match tokio::task::spawn_blocking(move || pipeline.run_sync(params.as_deref(), cx)).await {
+            match tokio::task::spawn_blocking(move || pipeline.run_blocking(params.as_deref(), cx)).await {
                 Ok(bytes) => bytes,
                 Err(_panicked) => envelope::error(
                     rid.as_deref(),
@@ -789,6 +941,25 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             ),
         };
         finish(note, bytes)
+    }
+
+    /// `$/describe`: return the configured OpenRPC service description. Unauthenticated and
+    /// ungated (like `$/serverInfo`); method-not-found when no description was provided.
+    fn handle_describe(&self, parsed: ParsedRequest) -> Dispatched {
+        let note = parsed.id.is_none();
+        let rid = parsed.id;
+        match &self.describe {
+            Some(doc) => finish(note, envelope::success(rid.as_deref(), doc)),
+            None => finish(
+                note,
+                envelope::error(
+                    rid.as_deref(),
+                    ErrorCode::MethodNotFound.code(),
+                    "Method not found",
+                    None,
+                ),
+            ),
+        }
     }
 
     async fn handle_setup(
@@ -1095,6 +1266,20 @@ struct Pipeline<S> {
     rid: Option<String>,
     authorizer: Option<Arc<dyn Authorizer<S>>>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
+    py_dispatcher: Option<Arc<dyn PyDispatcher>>,
+}
+
+/// A minimal JSON snapshot of the session handed to a python method body: the session id,
+/// the lifecycle as its `u8` discriminant (0=none, 1=init, 2=established, 3=closed), and the
+/// client-facing `external` setup result. The server-internal state `S` is **not**
+/// serialized (so the protocol needs no `S: Serialize` bound); v1 python bodies see only this.
+fn build_session_view<S>(session: &Session<S>) -> Vec<u8> {
+    let view = json!({
+        "session_id": session.id().to_string(),
+        "lifecycle": session.lifecycle() as u8,
+        "external": session.external(),
+    });
+    serde_json::to_vec(&view).expect("a serde_json::Value always serializes")
 }
 
 impl<S: Send + Sync + 'static> Pipeline<S> {
@@ -1112,6 +1297,46 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let outcome = match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
             Err(denied) => Err(denied),
             Ok(()) => erased.run(decoded, &cx),
+        };
+        let response = response_bytes(self.rid.as_deref(), &outcome);
+        self.do_audit(&response, &audit_detail);
+        response
+    }
+
+    /// Blocking-pool entry: route a python body through the `PyDispatcher` seam, everything
+    /// else through `run_sync`. Kept here (not in `run_method`) so both share one
+    /// `spawn_blocking` call + panic guard.
+    fn run_blocking(self, params: Option<&RawValue>, cx: RequestCtx<S>) -> Vec<u8> {
+        if matches!(self.method.imp, MethodImpl::Python) {
+            self.run_python(params, cx)
+        } else {
+            self.run_sync(params, cx)
+        }
+    }
+
+    /// Python pipeline (blocking pool): authorize (a denial is still audited), then run the
+    /// body via the `PyDispatcher` seam. There is no Rust-side param decode — Python
+    /// validates, so an INVALID_PARAMS comes back from the body *after* authz (matching Zig).
+    fn run_python(self, params: Option<&RawValue>, cx: RequestCtx<S>) -> Vec<u8> {
+        let audit_detail = cx.audit_handle();
+        let outcome = match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+            Err(denied) => Err(denied),
+            Ok(()) => match &self.py_dispatcher {
+                None => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+                Some(dispatcher) => {
+                    let params_json = params.map(|r| r.get().as_bytes()).unwrap_or(b"{}");
+                    let view = build_session_view(&self.session);
+                    let PyResult { outcome, audit_message } =
+                        dispatcher.dispatch(self.req.method.as_str(), params_json, &view);
+                    if let Some(message) = audit_message {
+                        *audit_detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+                    }
+                    match outcome {
+                        PyOutcome::Ok(raw) => Ok(raw),
+                        PyOutcome::Error(e) => Err(e),
+                    }
+                }
+            },
         };
         let response = response_bytes(self.rid.as_deref(), &outcome);
         self.do_audit(&response, &audit_detail);
@@ -1170,6 +1395,7 @@ mod tests {
             rid: None,
             authorizer: None,
             audit_sink: None,
+            py_dispatcher: None,
         }
     }
 
@@ -1224,4 +1450,26 @@ mod tests {
 
     // (The subscribe-without-id guard and all pub/sub behavior are covered via the real
     // `.subscription(...)` API in tests/pubsub.rs.)
+
+    #[tokio::test]
+    async fn describe_returns_doc_or_method_not_found() {
+        use serde_json::value::RawValue;
+        let id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+        let wire = format!(r#"{{"jsonrpc":"2.0","method":"$/describe","id":"{id}"}}"#);
+
+        // Not configured → method not found.
+        let proto = JsonRpcProtocol::<()>::builder("t", "1").build();
+        let s = proto.new_session(Some(()), Arc::new(NullOutbound));
+        let reply = proto.dispatch(wire.as_bytes(), &s).await.into_bytes().unwrap();
+        let v: Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(v["error"]["code"], -32601);
+
+        // Configured → returns the OpenRPC doc as the result.
+        let doc: Box<RawValue> = serde_json::from_str(r#"{"openrpc":"1.3.2"}"#).unwrap();
+        let proto = JsonRpcProtocol::<()>::builder("t", "1").describe(doc).build();
+        let s = proto.new_session(Some(()), Arc::new(NullOutbound));
+        let reply = proto.dispatch(wire.as_bytes(), &s).await.into_bytes().unwrap();
+        let v: Value = serde_json::from_slice(&reply).unwrap();
+        assert_eq!(v["result"]["openrpc"], "1.3.2");
+    }
 }

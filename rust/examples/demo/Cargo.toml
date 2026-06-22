@@ -1,0 +1,22 @@
+# End-to-end demo consumer: the documented `json-idl` + build.rs codegen layout, exercised
+# as a real integration test against the live dispatch core. Lives under `examples/` so the
+# coverage gate (which ignores `/examples/`) doesn't hold this demo to 100%, while its tests
+# still run and prove the generated code compiles + dispatches.
+[package]
+name = "demo-consumer"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-jsonrpc = { path = "../../truenas-jsonrpc" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+truenas-jsonrpc-codegen = { path = "../../truenas-jsonrpc-codegen" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+truenas-xdr = { path = "../../truenas-xdr" }

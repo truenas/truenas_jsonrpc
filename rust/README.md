@@ -66,3 +66,18 @@ Regenerating the golden corpora (requires the Python reference + the installed
 python3 conformance/generate.py                  # protocol A/B golden
 python3 truenas-filter/conformance/generate.py   # filter-engine A/B golden
 ```
+
+## Code generation (`truenas-jsonrpc-codegen`)
+
+A consumer defines a `json-idl/` directory of JSON-Schema specs and generates typed server
+bindings (structs + a `Handlers` trait + `register()`), a typed client, and an OpenRPC
+document — via a `build.rs` build-dependency (prost/tonic-build style):
+
+```rust
+// server-gen/build.rs
+truenas_jsonrpc_codegen::Build::new().json_idl("../json-idl").emit_server().unwrap();
+```
+
+See `truenas-jsonrpc-codegen/README.md` for the dialect, the consumer crate layout
+(`json-idl/` + `server-gen` + `client-gen` + your own crate), and the packaging caveat. The
+generated OpenRPC is byte-for-byte equivalent (A/B-tested) to `api-specs/gen.py`'s output.

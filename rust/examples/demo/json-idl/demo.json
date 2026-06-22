@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "demo",
+  "version": "1.0.0",
+  "$comment": "End-to-end demo spec: a plain method, a secret-bearing method, an XDR method (both wires), and a filterable query.",
+  "$defs": {
+    "GreetArgs": {
+      "type": "object",
+      "properties": { "name": { "type": "string" } },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "GreetResult": {
+      "type": "object",
+      "properties": { "message": { "type": "string" } },
+      "required": ["message"],
+      "additionalProperties": false
+    },
+    "LoginArgs": {
+      "type": "object",
+      "properties": {
+        "user": { "type": "string" },
+        "password": { "type": "string", "secret": true }
+      },
+      "required": ["user", "password"],
+      "additionalProperties": false
+    },
+    "LoginResult": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "secret": true },
+        "ok": { "type": "boolean" }
+      },
+      "required": ["token", "ok"],
+      "additionalProperties": false
+    },
+    "AddArgs": {
+      "type": "object",
+      "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } },
+      "required": ["a", "b"],
+      "additionalProperties": false
+    },
+    "AddResult": {
+      "type": "object",
+      "properties": { "sum": { "type": "integer" } },
+      "required": ["sum"],
+      "additionalProperties": false
+    },
+    "QueryArgs": { "type": "object", "properties": {}, "additionalProperties": false },
+    "Item": {
+      "type": "object",
+      "properties": { "id": { "type": "integer" }, "name": { "type": "string" } },
+      "required": ["id", "name"],
+      "additionalProperties": false
+    }
+  },
+  "methods": {
+    "greet": {
+      "summary": "Greet by name.",
+      "handler": "greet",
+      "params": { "$ref": "#/$defs/GreetArgs" },
+      "result": { "$ref": "#/$defs/GreetResult" }
+    },
+    "login": {
+      "summary": "Authenticate (password + token are redacted in audit).",
+      "handler": "login",
+      "params": { "$ref": "#/$defs/LoginArgs" },
+      "result": { "$ref": "#/$defs/LoginResult" },
+      "audit": true,
+      "auditMessage": "user login"
+    },
+    "add": {
+      "summary": "Sum two integers; reachable over JSON and the XDR binary wire.",
+      "handler": "add",
+      "params": { "$ref": "#/$defs/AddArgs" },
+      "result": { "$ref": "#/$defs/AddResult" },
+      "xdr": true,
+      "xdr_id": 1001
+    },
+    "items.query": {
+      "summary": "Filterable query over a fixed collection.",
+      "handler": "query",
+      "params": { "$ref": "#/$defs/QueryArgs" },
+      "filterable": true,
+      "entry": { "$ref": "#/$defs/Item" }
+    }
+  }
+}

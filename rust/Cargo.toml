@@ -6,7 +6,27 @@
 # crates are added as later phases (see the plan).
 [workspace]
 resolver = "2"
-members = ["truenas-jsonrpc", "truenas-filter"]
+members = [
+    "truenas-jsonrpc",
+    "truenas-filter",
+    "truenas-xdr",
+    "truenas-xdr-derive",
+    "truenas-jsonrpc-codegen",
+    "truenas-jsonrpc-pyo3",
+    "examples/demo",
+]
+# `truenas-jsonrpc-pyo3` links libpython, so it is excluded from the default set: a plain
+# `cargo build`/`cargo test` (and `coverage.sh`, which runs without `-p`) skip it — the
+# default build links zero libpython (mirroring the Zig `-Dpython` opt-in). It is still built
+# by `cargo clippy --workspace` and tested with `cargo test -p truenas-jsonrpc-pyo3`.
+default-members = [
+    "truenas-jsonrpc",
+    "truenas-filter",
+    "truenas-xdr",
+    "truenas-xdr-derive",
+    "truenas-jsonrpc-codegen",
+    "examples/demo",
+]
 
 [workspace.package]
 edition = "2021"
@@ -31,3 +51,5 @@ tokio = { version = "1", features = ["rt"] }
 async-trait = "0.1"
 # truenas-jsonrpc depends on the filter engine for filterable (query) methods.
 truenas-filter = { path = "truenas-filter" }
+# ...and on the XDR codec for the binary wire (the `xdr:true` methods + the TXDR frame).
+truenas-xdr = { path = "truenas-xdr" }

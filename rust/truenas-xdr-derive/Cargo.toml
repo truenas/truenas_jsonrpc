@@ -1,0 +1,28 @@
+# `truenas-xdr-derive` — `#[derive(XdrEnum)]` / `#[derive(XdrUnion)]` for `truenas-xdr`.
+#
+# These read a type's explicit `#[repr(iN)]` discriminants and generate `Serialize`/
+# `Deserialize` that encode/decode the *declared* i32 value (not serde's
+# declaration-order variant index), which is required for byte-exact RFC-4506 enums
+# and unions with discriminant gaps (e.g. the FreeBSD `sctrl` union where `grab = 4`).
+# syn/quote/proc-macro2 are already transitive deps of the workspace, so this adds
+# zero new crates to the dependency closure.
+[package]
+name = "truenas-xdr-derive"
+version = "0.1.0"
+description = "Derive macros (XdrEnum, XdrUnion) for truenas-xdr — encodes #[repr(i32)] discriminants byte-exactly"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = "2"
+quote = "1"
+proc-macro2 = "1"
+
+[lints]
+workspace = true

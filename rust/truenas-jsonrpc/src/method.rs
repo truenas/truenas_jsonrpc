@@ -55,6 +55,10 @@ pub(crate) trait ErasedSync<S>: Send + Sync {
     fn decode(&self, params: Option<&RawValue>) -> Result<Box<dyn Any + Send>, JsonRpcError>;
     fn run(&self, decoded: Box<dyn Any + Send>, cx: &RequestCtx<S>)
         -> Result<Box<RawValue>, JsonRpcError>;
+    /// Decode XDR-encoded params, run the handler, and XDR-encode the result — the binary
+    /// wire's analogue of `decode` + `run`. (Only plain methods support it; filterable
+    /// returns method-not-found.)
+    fn xdr_run(&self, params: &[u8], cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError>;
 }
 
 #[async_trait]
@@ -88,6 +92,13 @@ where
             .expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx)?;
         encode_result(&result)
+    }
+    fn xdr_run(&self, params: &[u8], cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+        let accepts: A = truenas_xdr::from_bytes(params)
+            .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        let result = (self.f)(accepts, cx)?;
+        truenas_xdr::to_bytes(&result)
+            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))
     }
 }
 
@@ -210,6 +221,10 @@ where
         let value = finalize(out, &aug.query_options)?;
         encode_result(&value)
     }
+    fn xdr_run(&self, _params: &[u8], _cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+        // Filterable (query) methods are not carried on the XDR binary wire in v1.
+        Err(JsonRpcError::method_not_found("Method not found"))
+    }
 }
 
 /// Apply the `get`/`count` finalize convention to the handler's result (Python's
@@ -245,6 +260,8 @@ pub(crate) struct MethodMeta {
     #[allow(dead_code)] // surfaced via codegen/OpenRPC; not used by dispatch
     pub doc: Option<Arc<str>>,
     pub secret_fields: Arc<[String]>,
+    /// If set, the method is also reachable over the XDR binary wire at this proc-id.
+    pub xdr_id: Option<u32>,
 }
 
 /// A method's name + flags — the Rust analogue of Python's keyword-only `JSONRPCMethod`
@@ -260,6 +277,7 @@ pub struct MethodDef {
     roles: Vec<String>,
     doc: Option<Arc<str>>,
     secret_fields: Vec<String>,
+    xdr_id: Option<u32>,
 }
 
 impl MethodDef {
@@ -274,6 +292,7 @@ impl MethodDef {
             roles: Vec::new(),
             doc: None,
             secret_fields: Vec::new(),
+            xdr_id: None,
         }
     }
 
@@ -328,6 +347,14 @@ impl MethodDef {
         self
     }
 
+    /// Make the method **also** reachable over the XDR binary wire at `proc_id` (which must
+    /// be > 1000 — proc-ids 0..=1000 are reserved for control messages). v1 supports the
+    /// XDR wire for plain (non-filterable, non-python) methods only.
+    pub fn xdr(mut self, proc_id: u32) -> Self {
+        self.xdr_id = Some(proc_id);
+        self
+    }
+
     pub(crate) fn into_meta(self, direction: MessageDirection) -> MethodMeta {
         MethodMeta {
             name: self.name,
@@ -339,6 +366,7 @@ impl MethodDef {
             roles: self.roles.into(),
             doc: self.doc,
             secret_fields: self.secret_fields.into(),
+            xdr_id: self.xdr_id,
         }
     }
 }
@@ -355,11 +383,22 @@ pub(crate) enum MethodImpl<S> {
     /// finalize logic lives inside the erased `run`); a distinct variant only so a future
     /// `describe()`/codegen can recover its filterable-ness and `entry` type.
     Filterable(Box<dyn ErasedSync<S>>),
+    /// A `python:true` method: no Rust handler. The spine routes/gates/authorizes/audits it,
+    /// then runs the body via the `PyDispatcher` seam. `S`-independent (like `Subscription`).
+    Python,
 }
 
 pub(crate) struct Method<S> {
     pub meta: MethodMeta,
     pub imp: MethodImpl<S>,
+}
+
+impl<S> Method<S> {
+    /// A python-backed method: carries only the method's flags (name/audit/roles/
+    /// secret_fields); the body runs via the [`crate::PyDispatcher`] seam.
+    pub(crate) fn python(def: MethodDef) -> Self {
+        Method { meta: def.into_meta(MessageDirection::ClientServer), imp: MethodImpl::Python }
+    }
 }
 
 /// A synchronous request method (the common case). Pairs a [`MethodDef`] with a sync

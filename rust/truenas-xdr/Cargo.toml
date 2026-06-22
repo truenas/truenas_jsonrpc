@@ -1,0 +1,38 @@
+# `truenas-xdr` — a byte-exact, dependency-light serde XDR (RFC 4506) codec.
+#
+# Runtime dependencies are deliberately minimal: `serde` (traits only — this crate
+# implements `Serializer`/`Deserializer` and hand-writes the wrapper `Serialize`/
+# `Deserialize` impls, so it needs no `serde_derive`) and `thiserror`. `serde_json`
+# is a dev-dependency only (loading the conformance golden vectors). The optional
+# `derive` feature pulls the `truenas-xdr-derive` proc-macros (`XdrEnum`/`XdrUnion`),
+# which add zero new transitive crates (syn/quote/proc-macro2 are already in the lock).
+[package]
+name = "truenas-xdr"
+version = "0.1.0"
+description = "Byte-exact, dependency-light serde XDR (RFC 4506) codec + TXDR frame for the TrueNAS JSON-RPC stack"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { version = "1", default-features = false, features = ["std"] }
+thiserror = { workspace = true }
+truenas-xdr-derive = { path = "../truenas-xdr-derive", optional = true }
+
+[dev-dependencies]
+# `serde` with `derive` is a dev-dependency so the codec lib itself needs no
+# `serde_derive`, while tests can still `#[derive(Serialize, Deserialize)]` fixtures.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[features]
+default = ["derive"]
+# Pull the `#[derive(XdrEnum)]` / `#[derive(XdrUnion)]` proc-macros. Opt out with
+# `default-features = false` to drop the proc-macro crate entirely (then encode
+# enums/unions with the manual `XdrEnum<E>` wrapper).
+derive = ["dep:truenas-xdr-derive"]
+
+[lints]
+workspace = true

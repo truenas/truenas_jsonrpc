@@ -1,0 +1,122 @@
+//! End-to-end demo: a consumer crate that generates server bindings from `json-idl/demo.json`
+//! and dispatches through the live `truenas-jsonrpc` core — proving the generated code
+//! compiles against the core and works over both the JSON and XDR wires. Also serves as the
+//! reference for the documented consumer layout (`json-idl/` + build.rs → include! → impl
+//! `Handlers` → register → dispatch).
+
+// The generated server bindings (structs + `Handlers` trait + `register`). Wrapped in a
+// module so any leading inner attributes are well-formed and clippy is silenced on generated
+// code, then re-exported at the crate root.
+#[allow(clippy::all, clippy::pedantic, missing_docs)]
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/server_gen.rs"));
+}
+pub use generated::*;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use serde_json::{json, Value};
+    use truenas_jsonrpc::{
+        tnfilter, CompiledFilters, CompiledOptions, Dispatched, Filtered, JsonRpcError,
+        JsonRpcProtocol, NullOutbound, RequestCtx, Session,
+    };
+
+    const RID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
+
+    /// Hand-written handlers — one method per non-subscription/non-python RPC. A missing or
+    /// mistyped method here is a compile error (the point of the generated `Handlers` trait).
+    struct DemoHandlers;
+
+    impl Handlers<()> for DemoHandlers {
+        fn greet(&self, req: GreetArgs, _cx: &RequestCtx<()>) -> Result<GreetResult, JsonRpcError> {
+            Ok(GreetResult { message: format!("hi {}", req.name) })
+        }
+        fn login(&self, req: LoginArgs, _cx: &RequestCtx<()>) -> Result<LoginResult, JsonRpcError> {
+            // `password` is a `Secret<String>` (deref to read); `token` is `Secret<String>`.
+            Ok(LoginResult { token: format!("tok-{}", &*req.password).into(), ok: !req.user.is_empty() })
+        }
+        fn add(&self, req: AddArgs, _cx: &RequestCtx<()>) -> Result<AddResult, JsonRpcError> {
+            Ok(AddResult { sum: req.a + req.b })
+        }
+        fn query(
+            &self,
+            _req: QueryArgs,
+            _cx: &RequestCtx<()>,
+            f: &CompiledFilters,
+            o: &CompiledOptions,
+        ) -> Result<Filtered, JsonRpcError> {
+            let rows = vec![
+                json!({"id": 1, "name": "a"}),
+                json!({"id": 2, "name": "b"}),
+                json!({"id": 3, "name": "a"}),
+            ];
+            Ok(tnfilter(rows, f, o)?)
+        }
+    }
+
+    fn proto() -> JsonRpcProtocol<()> {
+        register(JsonRpcProtocol::<()>::builder("demo", "1.0.0"), Arc::new(DemoHandlers))
+            .expect("register")
+            .build()
+    }
+
+    fn session(p: &JsonRpcProtocol<()>) -> Arc<Session<()>> {
+        p.new_session(Some(()), Arc::new(NullOutbound))
+    }
+
+    async fn json_call(p: &JsonRpcProtocol<()>, method: &str, params: Value) -> Value {
+        let wire = json!({"jsonrpc": "2.0", "method": method, "id": RID, "params": params});
+        let s = session(p);
+        match p.dispatch(wire.to_string().as_bytes(), &s).await {
+            Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
+            Dispatched::Nothing => panic!("expected a reply"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_method_dispatches() {
+        let v = json_call(&proto(), "greet", json!({"name": "world"})).await;
+        assert_eq!(v["result"]["message"], "hi world");
+    }
+
+    #[tokio::test]
+    async fn secret_fields_round_trip() {
+        // `password` decodes from a JSON string into `Secret<String>`; `token` (also Secret)
+        // serializes transparently back to a JSON string.
+        let v = json_call(&proto(), "login", json!({"user": "u", "password": "pw"})).await;
+        assert_eq!(v["result"]["ok"], true);
+        assert_eq!(v["result"]["token"], "tok-pw");
+    }
+
+    #[tokio::test]
+    async fn filterable_method_applies_the_query() {
+        let v = json_call(&proto(), "items.query", json!({"query-filters": [["name", "=", "a"]]})).await;
+        let rows = v["result"].as_array().unwrap();
+        assert_eq!(rows.len(), 2); // id 1 and 3
+        assert_eq!(rows[0]["id"], 1);
+        assert_eq!(rows[1]["id"], 3);
+    }
+
+    #[tokio::test]
+    async fn add_dispatches_over_json_and_xdr() {
+        let p = proto();
+
+        // JSON wire.
+        let v = json_call(&p, "add", json!({"a": 2, "b": 3})).await;
+        assert_eq!(v["result"]["sum"], 5);
+
+        // XDR binary wire — the same generated `add` method, addressed by its proc-id (1001).
+        let id = [0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40, 0x00];
+        let params = truenas_xdr::to_bytes(&AddArgs { a: 2, b: 3 }).unwrap();
+        let request = truenas_xdr::frame::build_request(1001, Some(id), &params).unwrap();
+        let s = session(&p);
+        let reply = p.dispatch(&request, &s).await.into_bytes().unwrap();
+        let parsed = truenas_xdr::frame::parse_reply(&reply).unwrap();
+        assert_eq!(parsed.status, truenas_xdr::frame::STATUS_OK);
+        let result: AddResult = truenas_xdr::from_bytes(parsed.body).unwrap();
+        assert_eq!(result.sum, 5);
+    }
+}

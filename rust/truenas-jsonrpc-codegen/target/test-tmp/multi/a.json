@@ -1,0 +1,1 @@
+{"name":"svc","version":"1","$defs":{"A":{"type":"object","properties":{"x":{"type":"integer"}},"required":["x"]}},"methods":{"m1":{"handler":"m1","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"}}}}

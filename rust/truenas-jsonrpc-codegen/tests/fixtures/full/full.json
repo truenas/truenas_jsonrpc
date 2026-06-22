@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "Exercises the emitter branches sample.json doesn't: a subscription, pre_auth/cancellable/roles/audit-only, an xdr method whose params have an optional (xdr-reachable → no skip_serializing_if), and every default kind.",
+  "name": "full",
+  "version": "2.0.0",
+  "$defs": {
+    "Sub": { "type": "object", "properties": {}, "additionalProperties": false },
+    "Event": {
+      "type": "object",
+      "properties": { "kind": { "type": "string" } },
+      "required": ["kind"],
+      "additionalProperties": false
+    },
+    "PingArgs": {
+      "type": "object",
+      "properties": {
+        "note": { "type": "string" },
+        "evt": { "$ref": "#/$defs/Event" }
+      },
+      "required": ["evt"],
+      "additionalProperties": false
+    },
+    "PingResult": {
+      "type": "object",
+      "properties": {
+        "ok": { "type": "boolean" },
+        "codes": { "type": "array", "items": { "type": "integer" } },
+        "evt": { "$ref": "#/$defs/Event" }
+      },
+      "required": ["ok", "codes", "evt"],
+      "additionalProperties": false
+    },
+    "OptArgs": {
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "default": "anon" },
+        "label": { "type": "string", "default": "" },
+        "level": { "type": "integer", "default": 0 },
+        "count": { "type": "integer", "default": 7 },
+        "active": { "type": "boolean", "default": true },
+        "flag": { "type": "boolean", "default": false },
+        "ratio": { "type": "number", "default": 2.5 },
+        "tags": { "type": "array", "items": { "type": "string" }, "default": [] },
+        "mode": { "type": "string", "enum": ["fast", "slow"], "default": "fast" }
+      },
+      "additionalProperties": false
+    },
+    "OptResult": {
+      "type": "object",
+      "properties": {
+        "done": { "type": "boolean" },
+        "event": { "$ref": "#/$defs/Event" }
+      },
+      "required": ["done", "event"],
+      "additionalProperties": false
+    }
+  },
+  "methods": {
+    "ev.sub": {
+      "summary": "Subscribe to events.",
+      "params": { "$ref": "#/$defs/Sub" },
+      "notifies": { "$ref": "#/$defs/Event" },
+      "handler": "events",
+      "direction": "server_client"
+    },
+    "secure.do": {
+      "params": { "$ref": "#/$defs/OptArgs" },
+      "result": { "$ref": "#/$defs/OptResult" },
+      "handler": "secure_do",
+      "preAuth": true,
+      "cancellable": true,
+      "roles": ["admin", "ops"],
+      "audit": true
+    },
+    "fast.ping": {
+      "params": { "$ref": "#/$defs/PingArgs" },
+      "result": { "$ref": "#/$defs/PingResult" },
+      "handler": "fast_ping",
+      "xdr": true,
+      "xdr_id": 2001
+    }
+  }
+}

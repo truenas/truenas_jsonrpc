@@ -1,0 +1,26 @@
+# `truenas-jsonrpc-codegen` — json-idl -> Rust (server + client) + OpenRPC generator.
+#
+# Used as a `build-dependency` from a consumer's `server-gen` / `client-gen` crate (see the
+# README), or as an optional standalone CLI (`--features cli`). It emits source TEXT (it is
+# NOT a proc-macro), so its only dependencies are `serde` + `serde_json` — both already in
+# the workspace, i.e. zero new transitive crates.
+[package]
+name = "truenas-jsonrpc-codegen"
+version = "0.1.0"
+description = "json-idl -> Rust (server + client) + OpenRPC code generator for the TrueNAS JSON-RPC stack"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# The standalone CLI ships as an example (`cargo run --example codegen -- ...`) — a thin
+# wrapper over the covered `run_cli` lib fn — rather than a feature-gated `[[bin]]`, so the
+# uncoverable `main` isn't pulled into the `--all-features` coverage run.
+
+[lints]
+workspace = true

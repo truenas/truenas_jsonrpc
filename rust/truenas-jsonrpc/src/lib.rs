@@ -20,13 +20,16 @@
 
 mod envelope;
 mod error;
+mod meta;
 mod method;
 mod protocol;
+mod pydispatch;
 mod request;
 mod session;
 mod types;
 
 pub use error::{BuildResult, Error, ErrorCode, JsonRpcError};
+pub use meta::Secret;
 pub use method::{
     AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcMethod, MethodDef, SubscriptionDef,
 };
@@ -34,6 +37,7 @@ pub use protocol::{
     AuditSink, Authorizer, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
     JsonRpcProtocolBuilder, ServerInfoHandler,
 };
+pub use pydispatch::{PyDispatcher, PyOutcome, PyResult};
 pub use request::RequestCtx;
 pub use session::{Clock, IdGen, NullOutbound, Outbound, Session, SessionId, SystemClock, UuidGen};
 pub use types::{

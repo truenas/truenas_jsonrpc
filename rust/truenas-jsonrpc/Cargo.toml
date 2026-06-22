@@ -19,6 +19,8 @@ tokio = { workspace = true }
 async-trait.workspace = true
 # The query-filters / query-options engine, for filterable (query) methods.
 truenas-filter.workspace = true
+# The XDR codec + TXDR frame, for the binary wire (`xdr:true` methods).
+truenas-xdr.workspace = true
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

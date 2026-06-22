@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "python_sample",
+  "version": "1.0.0",
+  "$comment": "Spec for the python-backed-method feature: api-specs/gen.py --python-out -> zig/conformance/py/rpc_py.py (the msgspec types + dispatch() the embedded-CPython bridge imports). Kept separate from sample.json so the python feature (a Python artifact) doesn't perturb the rpc_gen.zig/openrpc.json pipeline. Handler bodies are hand-written in zig/conformance/py/handlers.py, bound by symbol. The byte-exact A/B drives the SAME rpc_py.dispatch via a real embedded interpreter (Zig) and plain CPython (oracle).",
+  "$defs": {
+    "GreetArgs": {
+      "type": "object",
+      "properties": { "name": { "type": "string" } },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "GreetResult": {
+      "type": "object",
+      "$comment": "Echoes the request name + a field read from the session-state view, proving both cross the FFI.",
+      "properties": {
+        "greeting": { "type": "string" },
+        "lifecycle": { "type": "string" }
+      },
+      "required": ["greeting", "lifecycle"],
+      "additionalProperties": false
+    },
+    "AddArgs": {
+      "type": "object",
+      "properties": {
+        "a": { "type": "integer" },
+        "b": { "type": "integer" }
+      },
+      "required": ["a", "b"],
+      "additionalProperties": false
+    },
+    "AddResult": {
+      "type": "object",
+      "properties": { "sum": { "type": "integer" } },
+      "required": ["sum"],
+      "additionalProperties": false
+    },
+    "FailArgs": {
+      "type": "object",
+      "properties": {},
+      "additionalProperties": false
+    },
+    "BoolResult": {
+      "type": "object",
+      "properties": { "ok": { "type": "boolean" } },
+      "required": ["ok"],
+      "additionalProperties": false
+    }
+  },
+  "methods": {
+    "py.greet": {
+      "summary": "A Python-backed greeting; reads the session-state view and sets an audit message.",
+      "params": { "$ref": "#/$defs/GreetArgs" },
+      "result": { "$ref": "#/$defs/GreetResult" },
+      "handler": "greet",
+      "python": true,
+      "audit": true,
+      "auditMessage": "greeting"
+    },
+    "py.add": {
+      "summary": "A Python-backed integer add (exercises scalar decode/encode across the boundary).",
+      "params": { "$ref": "#/$defs/AddArgs" },
+      "result": { "$ref": "#/$defs/AddResult" },
+      "handler": "add",
+      "python": true
+    },
+    "py.boom": {
+      "summary": "Raises a JsonRpcError (exercises the error-mapping path).",
+      "params": { "$ref": "#/$defs/FailArgs" },
+      "result": { "$ref": "#/$defs/BoolResult" },
+      "handler": "boom",
+      "python": true
+    }
+  }
+}
