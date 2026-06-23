@@ -38,6 +38,50 @@ standalone if you want just that piece:
   *must* be its own crate (a language rule), so you never depend on it directly — you enable
   `truenas-xdr`'s `derive` feature and the macros are re-exported for you.
 
+## Dependency graph
+
+Arrows are Cargo dependencies (`A --> B` means A depends on B). `[opt]` marks an optional
+add-on, pulled only for that capability. A typical consumer names only `truenas-jsonrpc`
+(runtime) and `truenas-jsonrpc-codegen` (build-dependency); the rest are transitive or opt-in.
+
+```text
+                          consumer service crate
+                    (generated Handlers, json-idl/ spec)
+                       |                          |
+              build-dep|                          | runtime
+                       v                          |
+       +------------------------------+           |
+       | truenas-jsonrpc-codegen      |           |
+       | json-idl -> Rust (build time;|           |
+       | output uses truenas-jsonrpc) |           |
+       +------------------------------+           |
+                                                  v
+    +------------------------+ [opt]   +-----------------------+
+    | truenas-jsonrpc-server |-------->|    truenas-jsonrpc    |
+    | (AF_UNIX / TCP)        |         |    (dispatch core)    |
+    +------------------------+         |                       |
+    +------------------------+ [opt]   |                       |
+    | truenas-jsonrpc-pyo3   |-------->|                       |
+    | (embedded CPython)     |         +-----+-----------+-----+
+    +------------------------+               |           |
+                                            v           v
+                                  +----------------+  +--------------------+
+                                  | truenas-filter |  |     truenas-xdr    |
+                                  | (query engine) |  |  (XDR codec+frame) |
+                                  +----------------+  +---------+----------+
+                                                                |
+                                                       "derive" | feature
+                                                                v
+                                                      +---------------------+
+                                                      | truenas-xdr-derive  |
+                                                      | (proc-macro)        |
+                                                      +---------------------+
+```
+
+`truenas-jsonrpc-codegen` runs at build time only; it is never linked into the runtime — its
+*generated code* uses `truenas-jsonrpc`. `truenas-jsonrpc` re-exports the `truenas-filter` API,
+so a filterable handler needs only the core crate.
+
 ## Parity & proof
 
 A/B **differential conformance** against the Python reference is the gating proof: Python
