@@ -94,6 +94,39 @@ fn server() -> JsonRpcServer<()> {
             },
         ))
         .unwrap()
+        // download via sendfile(2): stream `n` pattern bytes from a temp file (zero-copy).
+        .fd_transfer_method(JsonRpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
+            MethodDef::new("x.download_sf"),
+            TransferDirection::Download,
+            |a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DownloadReady { size: a.n }),
+            |a: Args, ft: &dyn FileTransfer| {
+                let path = std::env::temp_dir().join(format!("tnrpc-sf-{}.bin", std::process::id()));
+                let data: Vec<u8> = (0..a.n).map(pattern_byte).collect();
+                std::fs::write(&path, &data).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                let f = std::fs::File::open(&path).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                let sent = ft.sendfile(f.as_raw_fd(), 0, a.n).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                let _ = std::fs::remove_file(&path);
+                Ok(DownloadDone { sent })
+            },
+        ))
+        .unwrap()
+        // upload via recvfile(2): splice `n` bytes into a temp file, then checksum it.
+        .fd_transfer_method(JsonRpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
+            MethodDef::new("x.upload_rf"),
+            TransferDirection::Upload,
+            |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
+            |a: Args, ft: &dyn FileTransfer| {
+                let path = std::env::temp_dir().join(format!("tnrpc-rf-{}.bin", std::process::id()));
+                let f = std::fs::File::create(&path).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                let got = ft.recvfile(f.as_raw_fd(), a.n).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                drop(f);
+                let content = std::fs::read(&path).unwrap_or_default();
+                let _ = std::fs::remove_file(&path);
+                let sum: u64 = content.iter().map(|&b| u64::from(b)).sum();
+                Ok(UploadDone { received: got, sum })
+            },
+        ))
+        .unwrap()
         .build();
     JsonRpcServer::<()>::builder("xfer-server").protocol("main", proto).build()
 }
@@ -208,6 +241,48 @@ async fn fd_pass_upload_passes_a_descriptor() {
     let fin = read_framed(&mut c).await;
     assert_eq!(fin["result"]["content"], "hello-fd-pass");
     assert_eq!(fin["id"], UUID);
+
+    task.abort();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn download_via_sendfile() {
+    let (mut c, path, task) = connect("dlsf").await;
+    negotiate(&mut c).await;
+
+    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.download_sf","id":UUID,"params":{"n":N}})).await;
+    let ready = read_framed(&mut c).await;
+    assert_eq!(ready["params"]["direction"], "download");
+
+    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"$/transferGo"})).await;
+    let mut buf = vec![0u8; N];
+    c.read_exact(&mut buf).await.unwrap();
+    assert!(buf.iter().enumerate().all(|(i, &b)| b == pattern_byte(i)), "sendfile stream mismatch");
+
+    let fin = read_framed(&mut c).await;
+    assert_eq!(fin["result"]["sent"], N);
+
+    task.abort();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn upload_via_recvfile() {
+    let (mut c, path, task) = connect("ulrf").await;
+    negotiate(&mut c).await;
+
+    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.upload_rf","id":UUID,"params":{"n":N}})).await;
+    let ready = read_framed(&mut c).await;
+    assert_eq!(ready["params"]["direction"], "upload");
+
+    let data: Vec<u8> = (0..N).map(pattern_byte).collect();
+    c.write_all(&data).await.unwrap();
+
+    let fin = read_framed(&mut c).await;
+    assert_eq!(fin["result"]["received"], N);
+    let expected: u64 = (0..N).map(|i| u64::from(pattern_byte(i))).sum();
+    assert_eq!(fin["result"]["sum"], expected);
 
     task.abort();
     let _ = std::fs::remove_file(&path);

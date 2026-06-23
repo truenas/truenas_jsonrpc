@@ -41,6 +41,18 @@ pub trait FileTransferExt: FileTransfer {
     /// only**); the returned fds are owned by the caller. Errors if the ancillary data was
     /// truncated (the peer sent more than `max_fds`).
     fn recv_fds(&self, max_fds: usize) -> std::io::Result<Vec<OwnedFd>>;
+    /// Zero-copy send `count` bytes from `file_fd` (a regular file), starting at `offset`, to
+    /// the stream via `sendfile(2)`. Returns the number sent (`< count` only if the peer closed
+    /// early). Works over a kTLS connection — the kernel encrypts.
+    fn sendfile(&self, file_fd: RawFd, offset: u64, count: usize) -> std::io::Result<usize>;
+    /// Receive `count` bytes from the stream into `file_fd`, zero-copy via `splice(2)` through a
+    /// kernel pipe (so the payload never enters the process). This stays zero-copy over a kTLS
+    /// connection too — `tls_sw_splice_read` decrypts and splices the plaintext. It falls back
+    /// to a buffered copy only where `splice` can't apply: non-Linux, or when the kernel hands
+    /// back a non-data TLS record (kTLS `splice` returns `EINVAL` for control records — alerts,
+    /// key-updates — which must be read via `recvmsg`). Returns the number received (`< count`
+    /// only if the peer closed early).
+    fn recvfile(&self, file_fd: RawFd, count: usize) -> std::io::Result<usize>;
 }
 
 impl<T: FileTransfer + ?Sized> FileTransferExt for T {
@@ -119,4 +131,122 @@ impl<T: FileTransfer + ?Sized> FileTransferExt for T {
         }
         Ok(out)
     }
+
+    fn sendfile(&self, file_fd: RawFd, offset: u64, count: usize) -> std::io::Result<usize> {
+        let out = self.as_raw_fd();
+        let mut off = offset as libc::off_t;
+        let mut sent = 0;
+        while sent < count {
+            // SAFETY: out/file_fd are live; `off` is a valid out-param that sendfile advances.
+            #[allow(unsafe_code)]
+            let n = unsafe { libc::sendfile(out, file_fd, &mut off, count - sent) };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if n == 0 {
+                break; // peer closed
+            }
+            sent += n as usize;
+        }
+        Ok(sent)
+    }
+
+    fn recvfile(&self, file_fd: RawFd, count: usize) -> std::io::Result<usize> {
+        let in_fd = self.as_raw_fd();
+        match splice_to_fd(in_fd, file_fd, count)? {
+            Some(moved) => return Ok(moved), // zero-copy path
+            None => {}                        // unsupported here → buffered fallback
+        }
+        let mut buf = vec![0u8; 1 << 16];
+        let mut got = 0;
+        while got < count {
+            let want = (count - got).min(buf.len());
+            // SAFETY: in_fd is live; buf is valid for `want` bytes.
+            #[allow(unsafe_code)]
+            let n = unsafe { libc::read(in_fd, buf.as_mut_ptr().cast(), want) };
+            if n < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if n == 0 {
+                break;
+            }
+            write_all_fd(file_fd, &buf[..n as usize])?;
+            got += n as usize;
+        }
+        Ok(got)
+    }
+}
+
+/// Move up to `count` bytes `src` → `dst` zero-copy via `splice(2)` through a kernel pipe
+/// (`splice` needs one end to be a pipe, so socket → pipe → fd; this is zero-copy over kTLS
+/// too — the kernel decrypts in `tls_sw_splice_read`). Returns the number moved, or `None` —
+/// *before consuming anything* — when the first `splice` is rejected, so the caller can fall
+/// back to a buffered copy: non-Linux, or a kTLS socket whose next record is a control message
+/// (`splice` returns `EINVAL` for non-data records). A failure after partial progress is a real
+/// I/O error. Mirrors Python's `_splice_socket_to_fd`.
+fn splice_to_fd(src: RawFd, dst: RawFd, count: usize) -> std::io::Result<Option<usize>> {
+    let mut pipe = [0 as libc::c_int; 2];
+    // SAFETY: `pipe` is a 2-element array `pipe(2)` fills with the read/write ends.
+    #[allow(unsafe_code)]
+    if unsafe { libc::pipe(pipe.as_mut_ptr()) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let (r, w) = (pipe[0], pipe[1]);
+    let result = splice_loop(src, dst, count, r, w);
+    // SAFETY: closing the pipe ends we created.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::close(r);
+        libc::close(w);
+    }
+    result
+}
+
+fn splice_loop(src: RawFd, dst: RawFd, count: usize, r: RawFd, w: RawFd) -> std::io::Result<Option<usize>> {
+    let mut moved = 0;
+    while moved < count {
+        // SAFETY: src/w are live fds; null offsets mean "use the fds' own positions".
+        #[allow(unsafe_code)]
+        let n = unsafe {
+            libc::splice(src, std::ptr::null_mut(), w, std::ptr::null_mut(), count - moved, 0)
+        };
+        if n < 0 {
+            // First call rejected (unsupported fds, or a kTLS control record → EINVAL) →
+            // signal a buffered fallback; a failure mid-stream is a real I/O error.
+            return if moved == 0 { Ok(None) } else { Err(std::io::Error::last_os_error()) };
+        }
+        if n == 0 {
+            break; // peer closed
+        }
+        let mut off = 0;
+        while off < n {
+            // SAFETY: r/dst are live fds; drain the n buffered bytes pipe → dst.
+            #[allow(unsafe_code)]
+            let m = unsafe {
+                libc::splice(r, std::ptr::null_mut(), dst, std::ptr::null_mut(), (n - off) as usize, 0)
+            };
+            if m < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            off += m;
+        }
+        moved += n as usize;
+    }
+    Ok(Some(moved))
+}
+
+fn write_all_fd(fd: RawFd, mut buf: &[u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        // SAFETY: fd is live; buf is valid for `len`.
+        #[allow(unsafe_code)]
+        let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if n == 0 {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        buf = &buf[n as usize..];
+    }
+    Ok(())
 }
