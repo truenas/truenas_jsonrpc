@@ -69,6 +69,8 @@ default build pulls none of them. The crate sets `unsafe_code = "deny"` (not the
 BIO + `getsockopt`); the cmsg/SCM_RIGHTS construction is `nix`'s.
 
 Not in the workspace `default-members` (its socket / kTLS / `SCM_RIGHTS` I/O can't be
-unit-tested deterministically): it is covered behaviorally (`tests/{roundtrip,transfer,tls}.rs`,
-real sockets) and excluded from the line-coverage gate. Build/test it with
+unit-tested deterministically): it is covered behaviorally (`tests/{roundtrip,transfer,tls,
+cross_lang}.rs`, real sockets) and excluded from the line-coverage gate. `cross_lang` drives
+the Rust server with the canonical **Python** client (`truenas_pyjsonrpc_client`) to prove
+on-wire interop, and is skipped when Python isn't available. Build/test it with
 `cargo {build,test,clippy} -p truenas-jsonrpc-server` (add `--features tls` for the TLS paths).
