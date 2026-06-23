@@ -26,6 +26,10 @@ libc = "0.2"
 # Cancel-safe framed reads: an accumulation buffer fed by tokio's `read_buf` (so a frame is
 # never lost when the read loop's select! picks another branch). Already in the lock via tokio.
 bytes = "1"
+# SCM_RIGHTS fd passing: nix's safe sendmsg/recvmsg + ControlMessage::ScmRights, instead of
+# hand-rolling the cmsg buffer math. Its 4 deps (libc/bitflags/cfg-if/memoffset) are already
+# in the lock, so this adds exactly one crate.
+nix = { version = "0.29", features = ["socket", "uio"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

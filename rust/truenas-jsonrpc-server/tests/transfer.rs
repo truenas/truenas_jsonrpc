@@ -3,13 +3,16 @@
 //! callback, and writes the final response — exercising the connection takeover, the writer
 //! gate, and the blocking byte-stream helpers. (SCM_RIGHTS fd passing is a later sub-phase.)
 
+use std::io::Read;
+use std::os::fd::{AsRawFd, RawFd};
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_jsonrpc::{
-    FileTransfer, JsonRpcError, JsonRpcFdTransferMethod, JsonRpcProtocol, MethodDef, RequestCtx,
-    TransferDirection,
+    FileTransfer, JsonRpcError, JsonRpcFdPassMethod, JsonRpcFdTransferMethod, JsonRpcProtocol,
+    MethodDef, RequestCtx, TransferDirection,
 };
 use truenas_jsonrpc_server::{framing, FileTransferExt, JsonRpcServer, UnixConfig};
 
@@ -34,6 +37,10 @@ struct UploadReady {}
 struct UploadDone {
     received: usize,
     sum: u64,
+}
+#[derive(Serialize)]
+struct FdDone {
+    content: String,
 }
 
 /// Byte `i` of the test stream.
@@ -68,8 +75,36 @@ fn server() -> JsonRpcServer<()> {
             },
         ))
         .unwrap()
+        // fd-pass upload: the client passes an fd; the server reads the file it points to.
+        .fd_pass_method(JsonRpcFdPassMethod::<Args, UploadReady, FdDone, _, _>::new(
+            MethodDef::new("x.recvfd"),
+            TransferDirection::Upload,
+            |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
+            |_a: Args, ft: &dyn FileTransfer| {
+                let fds = ft.recv_fds(1).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                let passed = fds
+                    .into_iter()
+                    .next()
+                    .ok_or_else(|| JsonRpcError::request_failed("no fd received"))?;
+                let mut content = String::new();
+                std::fs::File::from(passed)
+                    .read_to_string(&mut content)
+                    .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                Ok(FdDone { content })
+            },
+        ))
+        .unwrap()
         .build();
     JsonRpcServer::<()>::builder("xfer-server").protocol("main", proto).build()
+}
+
+/// Send one fd to `sock` via `SCM_RIGHTS` (the client side of fd passing).
+fn send_one_fd(sock: RawFd, fd: RawFd) {
+    use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags, UnixAddr};
+    let fds = [fd];
+    let iov = [std::io::IoSlice::new(&[0u8])];
+    let cmsgs = [ControlMessage::ScmRights(&fds)];
+    sendmsg::<UnixAddr>(sock, &iov, &cmsgs, MsgFlags::empty(), None).unwrap();
 }
 
 fn unique(tag: &str) -> std::path::PathBuf {
@@ -148,6 +183,30 @@ async fn upload_consumes_stream_then_final_response() {
     assert_eq!(fin["result"]["received"], N);
     let expected: u64 = (0..N).map(|i| u64::from(pattern_byte(i))).sum();
     assert_eq!(fin["result"]["sum"], expected);
+    assert_eq!(fin["id"], UUID);
+
+    task.abort();
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn fd_pass_upload_passes_a_descriptor() {
+    let (mut c, path, task) = connect("fd").await;
+    negotiate(&mut c).await;
+
+    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.recvfd","id":UUID,"params":{"n":0}})).await;
+    let ready = read_framed(&mut c).await;
+    assert_eq!(ready["params"]["direction"], "upload");
+
+    // A pipe holding a known payload; pass its read end to the server via SCM_RIGHTS.
+    let (r, w) = nix::unistd::pipe().unwrap();
+    nix::unistd::write(&w, b"hello-fd-pass").unwrap();
+    drop(w); // close the write end so the server's read sees EOF after the payload
+    send_one_fd(c.as_raw_fd(), r.as_raw_fd());
+    drop(r); // the kernel dup'd it for the peer; our copy is no longer needed
+
+    let fin = read_framed(&mut c).await;
+    assert_eq!(fin["result"]["content"], "hello-fd-pass");
     assert_eq!(fin["id"], UUID);
 
     task.abort();
