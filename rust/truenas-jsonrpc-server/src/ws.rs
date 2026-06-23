@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
-use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio::sync::mpsc::unbounded_channel;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
@@ -45,12 +46,53 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     }
 }
 
+#[cfg(feature = "tls")]
+impl<S: Send + Sync + 'static> JsonRpcServer<S> {
+    /// Accept WebSocket-over-TLS (`wss://`) connections on a bound TCP `listener` until an
+    /// accept error occurs. The TLS handshake is **userspace** (the WebSocket library owns the
+    /// stream, so kTLS doesn't apply); raw-fd transfer is refused on these connections. The
+    /// [`TlsConfig`](crate::TlsConfig)'s mode is ignored here — always userspace.
+    pub async fn serve_wss_listener(
+        &self,
+        listener: TcpListener,
+        tls: crate::tls::TlsConfig,
+    ) -> std::io::Result<()> {
+        let acceptor = tls.acceptor();
+        loop {
+            let (tcp, addr) = listener.accept().await?;
+            let _ = tcp.set_nodelay(true);
+            let acceptor = acceptor.clone();
+            let shared = self.shared.clone();
+            tokio::spawn(async move {
+                let Some(tls_stream) = crate::tls::userspace_accept(&acceptor, tcp).await else {
+                    return;
+                };
+                let Ok(ws) = tokio_tungstenite::accept_async(tls_stream).await else { return };
+                let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(addr) };
+                serve_ws(ws, peer, shared).await;
+            });
+        }
+    }
+
+    /// Bind a TCP `addr` and serve `wss://` on it (bind + accept loop). Runs forever on the
+    /// happy path — spawn it to run alongside other transports.
+    pub async fn serve_wss(
+        &self,
+        addr: impl ToSocketAddrs,
+        tls: crate::tls::TlsConfig,
+    ) -> std::io::Result<()> {
+        let listener = TcpListener::bind(addr).await?;
+        self.serve_wss_listener(listener, tls).await
+    }
+}
+
 /// Serve one WebSocket connection: negotiate, then pump dispatch. Each message is a JSON-RPC
 /// frame; replies + pub/sub notifications go out as text messages. Dispatch is pipelined (each
 /// frame spawned), so `$/cancelRequest` is read while a handler runs.
-async fn serve_ws<S>(ws: WebSocketStream<TcpStream>, peer: Peer, shared: Arc<ServerShared<S>>)
+async fn serve_ws<S, IO>(ws: WebSocketStream<IO>, peer: Peer, shared: Arc<ServerShared<S>>)
 where
     S: Send + Sync + 'static,
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut sink, mut stream) = ws.split();
     let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();

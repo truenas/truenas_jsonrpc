@@ -27,7 +27,8 @@ connection with `$/negotiate`, and pumps the dispatch loop.
   fd, zero-copy `sendfile` / `recvfile` (`sendfile(2)` / `splice(2)`, staying zero-copy over
   kTLS), and `send_fds` / `recv_fds` (`SCM_RIGHTS`) for a `JsonRpcFdPassMethod` over AF_UNIX.
 - *(feature `websocket`)* `serve_websocket` / `serve_websocket_listener` — JSON-RPC over
-  `ws://` (one frame per WebSocket message; raw-fd transfer is refused on these connections).
+  `ws://` (one frame per WebSocket message; raw-fd transfer is refused on these connections);
+  with `tls` too, `serve_wss` / `serve_wss_listener` for `wss://` (WebSocket over userspace TLS).
 
 ## Behaviour
 
@@ -48,9 +49,9 @@ TLS** (kTLS — handshake in userspace, then the raw kernel-encrypted fd, so the
 stays out of userspace and raw-fd transfer works over the encrypted link; fails closed if
 kTLS doesn't engage) or a **userspace** `tokio-openssl` pump (works anywhere, but no raw-fd
 transfer); zero-copy `sendfile` / `recvfile` (the bulk path stays out of userspace, including
-over kTLS); and **WebSocket** (`ws://`, the `websocket` feature — one JSON-RPC frame per WS
-message, no raw-fd transfer over it). All planned transport work is in; `wss://` (WebSocket
-over TLS) is the main remaining option.
+over kTLS); and **WebSocket** — `ws://` (the `websocket` feature) and `wss://` (WebSocket over
+userspace TLS, with `tls` + `websocket`), one JSON-RPC frame per WS message, no raw-fd transfer
+over either. All planned transport work is in.
 
 ## Usage
 

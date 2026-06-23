@@ -81,6 +81,14 @@ impl TlsConfig {
         }
         Ok(TlsConfig { acceptor: Arc::new(builder.build()), mode })
     }
+
+    /// The configured acceptor — used by the WebSocket-over-TLS (`wss`) path, which always
+    /// does a userspace handshake (the `mode` is irrelevant there, since the WebSocket library
+    /// reads/writes the stream rather than a detached kTLS fd).
+    #[cfg(feature = "websocket")]
+    pub(crate) fn acceptor(&self) -> Arc<SslAcceptor> {
+        self.acceptor.clone()
+    }
 }
 
 impl<S: Send + Sync + 'static> JsonRpcServer<S> {
@@ -122,11 +130,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                         connection::serve(stream, Some(fd), peer, shared).await;
                     }
                     TlsMode::Userspace => {
-                        let Ok(ssl) = Ssl::new(acceptor.context()) else { return };
-                        let Ok(mut stream) = SslStream::new(ssl, tcp) else { return };
-                        if std::pin::Pin::new(&mut stream).accept().await.is_err() {
-                            return;
-                        }
+                        let Some(stream) = userspace_accept(&acceptor, tcp).await else { return };
                         // Userspace TLS: ciphertext on the fd → no raw-fd transfer (None).
                         connection::serve(stream, None, peer, shared).await;
                     }
@@ -141,6 +145,19 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         let listener = TcpListener::bind(addr).await?;
         self.serve_tls_listener(listener, tls).await
     }
+}
+
+/// Userspace TLS handshake (a `tokio-openssl` `SslStream`) — the data path stays in userspace
+/// (ciphertext on the fd). Returns the handshaked stream, or `None` on failure. Used by
+/// [`TlsMode::Userspace`] and, with the `websocket` feature, the `wss` path.
+pub(crate) async fn userspace_accept(
+    acceptor: &SslAcceptor,
+    tcp: TcpStream,
+) -> Option<SslStream<TcpStream>> {
+    let ssl = Ssl::new(acceptor.context()).ok()?;
+    let mut stream = SslStream::new(ssl, tcp).ok()?;
+    std::pin::Pin::new(&mut stream).accept().await.ok()?;
+    Some(stream)
 }
 
 /// Blocking kTLS handshake on `tcp` over a socket BIO (so OpenSSL holds the fd and installs
