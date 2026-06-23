@@ -20,6 +20,9 @@ serde_json = { workspace = true }
 # `net` pulls mio + socket2 (the only new transitive crates for AF_UNIX/TCP — tokio's own
 # networking foundation); `io-util` gives the framed read/write helpers.
 tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "macros", "time"] }
+# Unix peer credentials (SO_PEERCRED); also the syscall surface for kTLS / SCM_RIGHTS / splice
+# in later phases. Already in the lock (transitive via tokio/mio on unix), so no new crate.
+libc = "0.2"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

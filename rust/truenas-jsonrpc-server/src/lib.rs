@@ -16,3 +16,10 @@
 //! and tests without it.
 
 pub mod framing;
+mod connection;
+mod negotiate;
+mod peer;
+mod server;
+
+pub use peer::{Peer, Transport, Ucred};
+pub use server::{JsonRpcServer, JsonRpcServerBuilder, UnixConfig};
