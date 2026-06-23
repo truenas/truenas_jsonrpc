@@ -21,6 +21,9 @@ connection with `$/negotiate`, and pumps the dispatch loop.
 - `UnixConfig` (path + post-bind `mode`).
 - `framing` — the wire: a 4-byte big-endian length prefix over compact JSON (`frame`,
   `read_message`, `DEFAULT_LIMIT`), byte-identical to the Python server.
+- `FileTransferExt` — blocking `write_all` / `read_exact` on a transfer's fd, for the
+  `transfer` callback of a `JsonRpcFdTransferMethod` (download writes the stream, upload reads
+  it).
 
 ## Behaviour
 
@@ -33,8 +36,10 @@ connection with `$/negotiate`, and pumps the dispatch loop.
 ## Status
 
 Implemented: AF_UNIX + plain TCP, length-prefixed JSON, `$/negotiate`, `SO_PEERCRED`, pub/sub
-push, pipelined dispatch/cancel. Not yet: TLS + kTLS, the raw-fd transfer takeover (a
-`Transfer` directive is currently refused with `REQUEST_FAILED`), and WebSocket.
+push, pipelined dispatch/cancel, and the raw-fd **transfer takeover** — the
+`$/transferReady` / `$/transferGo` handshake and the blocking fd handoff for byte-stream
+download/upload over plain Unix or TCP. Not yet: the `SCM_RIGHTS` fd-passing helpers
+(`send_fds` / `recv_fds`) and zero-copy `sendfile` / `splice`, TLS + kTLS, and WebSocket.
 
 ## Usage
 

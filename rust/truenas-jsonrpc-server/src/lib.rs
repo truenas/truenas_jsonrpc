@@ -20,6 +20,8 @@ mod connection;
 mod negotiate;
 mod peer;
 mod server;
+mod transfer;
 
 pub use peer::{Peer, Transport, Ucred};
 pub use server::{JsonRpcServer, JsonRpcServerBuilder, UnixConfig};
+pub use transfer::FileTransferExt;

@@ -23,6 +23,9 @@ tokio = { workspace = true, features = ["net", "io-util", "sync", "rt", "macros"
 # Unix peer credentials (SO_PEERCRED); also the syscall surface for kTLS / SCM_RIGHTS / splice
 # in later phases. Already in the lock (transitive via tokio/mio on unix), so no new crate.
 libc = "0.2"
+# Cancel-safe framed reads: an accumulation buffer fed by tokio's `read_buf` (so a frame is
+# never lost when the read loop's select! picks another branch). Already in the lock via tokio.
+bytes = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

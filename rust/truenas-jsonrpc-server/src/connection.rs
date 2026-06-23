@@ -1,28 +1,43 @@
-//! Per-connection handling: the `$/negotiate` → bound-dispatch state machine and the
-//! async I/O pump (port of `connection.py`, minus the raw-fd transfer takeover, which lands
-//! in a later phase).
+//! Per-connection handling: the `$/negotiate` → bound-dispatch state machine, the async I/O
+//! pump, and the raw-fd transfer takeover (port of `connection.py`).
 //!
-//! The read loop **pipelines**: each bound message's `dispatch` is spawned and the loop keeps
-//! reading, so a `$/cancelRequest` can be processed while a long handler runs. All outbound
-//! bytes — dispatch replies plus pub/sub notifications pushed in through the session's
-//! [`Outbound`] — funnel through one per-connection unbounded channel drained by a writer
-//! task, so there is a single ordered writer and backpressure is awaited on the runtime.
+//! Inbound bytes accumulate in a buffer fed by the cancel-safe [`AsyncReadExt::read_buf`];
+//! complete length-prefixed frames are extracted from it. The loop `select!`s between reading
+//! more bytes and receiving a completed dispatch outcome — because `read_buf` is cancel-safe,
+//! choosing the outcome branch never drops buffered bytes. Dispatch is **pipelined**: each
+//! bound message is spawned and its [`Dispatched`] returns over a channel, so a
+//! `$/cancelRequest` is read while a long handler runs.
+//!
+//! All outbound bytes (replies + pub/sub notifications pushed through the session's
+//! [`Outbound`]) go through one channel drained by a writer task; the `WriteHalf` sits behind
+//! a mutex so a transfer can gate it. A [`Dispatched::Transfer`] triggers [`run_transfer`],
+//! which holds that mutex (no notification interleaves the raw stream), runs the
+//! `$/transferReady` → (`$/transferGo`) handshake, hands the blocking fd to the handler's
+//! `transfer` callback on a blocking worker, then writes the final response.
 
+use std::os::fd::RawFd;
 use std::sync::Arc;
 
+use bytes::{Bytes, BytesMut};
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
-use tokio::io::{split, AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{split, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use truenas_jsonrpc::{Dispatched, ErrorCode, JsonRpcProtocol, Outbound, Session};
+use tokio::sync::Mutex;
+use tokio::io::AsyncRead;
+use truenas_jsonrpc::{
+    Dispatched, ErrorCode, JsonRpcProtocol, Outbound, Session, Transfer, TransferDirection,
+};
 
-use crate::framing::{self, FrameError};
 use crate::negotiate::{NegotiateParams, NegotiateResult, NEGOTIATE_METHOD};
-use crate::peer::Peer;
+use crate::peer::{set_blocking, Peer, Transport};
 use crate::server::ServerShared;
+use crate::transfer::ConnFileTransfer;
 
 const VERSION: &str = "2.0";
+const TRANSFER_GO_METHOD: &str = "$/transferGo";
+const HEADER: usize = 4;
 
 /// The per-connection [`Outbound`]: pub/sub + `$/progress` messages the core pushes are
 /// enqueued (non-blocking) onto the connection's writer channel. Replaces Python's
@@ -34,87 +49,136 @@ struct ConnOutbound {
 
 impl Outbound for ConnOutbound {
     fn send(&self, message: Vec<u8>) {
-        // Unbounded + non-blocking: only fails if the connection (receiver) is gone.
         let _ = self.tx.send(message);
     }
 }
 
-/// Drain the outbound channel, framing and writing each payload in order until the channel
-/// closes (the connection is shutting down and every sender — the loop plus any in-flight
-/// dispatch task — has dropped its handle).
-async fn write_loop<W: AsyncWrite + Unpin>(mut w: W, mut rx: UnboundedReceiver<Vec<u8>>) {
-    while let Some(payload) = rx.recv().await {
-        if w.write_all(&framing::frame(&payload)).await.is_err() {
-            break;
+/// Extract one length-prefixed frame from `acc` if a whole one is buffered: `Ok(Some(body))`,
+/// `Ok(None)` if more bytes are needed, `Err(len)` if the declared length exceeds `limit`.
+fn take_frame(acc: &mut BytesMut, limit: usize) -> Result<Option<Bytes>, usize> {
+    if acc.len() < HEADER {
+        return Ok(None);
+    }
+    let len = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
+    if len > limit {
+        return Err(len);
+    }
+    if acc.len() < HEADER + len {
+        return Ok(None);
+    }
+    let _ = acc.split_to(HEADER); // drop the length prefix
+    Ok(Some(acc.split_to(len).freeze()))
+}
+
+/// Read frames until one is available (used inside a transfer, which has paused the main
+/// loop). `None` on EOF or an oversized frame.
+async fn next_frame<IO: AsyncRead + Unpin>(
+    reader: &mut ReadHalf<IO>,
+    acc: &mut BytesMut,
+    limit: usize,
+) -> Option<Bytes> {
+    loop {
+        match take_frame(acc, limit) {
+            Ok(Some(frame)) => return Some(frame),
+            Ok(None) => {}
+            Err(_) => return None,
         }
-        if w.flush().await.is_err() {
+        match reader.read_buf(acc).await {
+            Ok(0) | Err(_) => return None,
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Frame `payload` and write it (with a flush), through `w`.
+async fn write_framed<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> std::io::Result<()> {
+    w.write_all(&crate::framing::frame(payload)).await?;
+    w.flush().await
+}
+
+/// Drain the outbound channel, writing each payload in order under the shared write mutex (so
+/// a transfer in progress, which holds that mutex, pauses notifications), until it closes.
+async fn write_loop<IO: AsyncWrite + Unpin>(
+    writer: Arc<Mutex<WriteHalf<IO>>>,
+    mut rx: UnboundedReceiver<Vec<u8>>,
+) {
+    while let Some(payload) = rx.recv().await {
+        let mut w = writer.lock().await;
+        if write_framed(&mut *w, &payload).await.is_err() {
             break;
         }
     }
 }
 
-/// Serve one accepted connection to completion: negotiate a protocol, then pump dispatch.
-pub(crate) async fn serve<S, IO>(stream: IO, peer: Peer, shared: Arc<ServerShared<S>>)
+/// Serve one accepted connection to completion. `raw_fd` is the connection's socket fd, used
+/// for the raw-fd transfer handoff.
+pub(crate) async fn serve<S, IO>(stream: IO, raw_fd: RawFd, peer: Peer, shared: Arc<ServerShared<S>>)
 where
     S: Send + Sync + 'static,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (mut reader, writer) = split(stream);
+    let writer = Arc::new(Mutex::new(writer));
     let (out_tx, out_rx) = unbounded_channel::<Vec<u8>>();
-    let writer_task = tokio::spawn(write_loop(writer, out_rx));
+    let writer_task = tokio::spawn(write_loop(writer.clone(), out_rx));
 
     let outbound: Arc<dyn Outbound> = Arc::new(ConnOutbound { tx: out_tx.clone() });
+    let (outcome_tx, mut outcome_rx) = unbounded_channel::<Dispatched>();
     let mut bound: Option<BoundConn<S>> = None;
+    let mut acc = BytesMut::with_capacity(8 * 1024);
 
-    loop {
-        let msg = match framing::read_message(&mut reader, shared.limit).await {
-            Ok(Some(m)) => m,
-            Ok(None) => break, // clean EOF
-            Err(FrameError::TooLarge { len, limit }) => {
-                let _ = out_tx.send(error_envelope(
-                    None,
-                    ErrorCode::InvalidRequest.code(),
-                    "Message too large",
-                    Some(json!(format!("frame of {len} bytes exceeds limit of {limit}"))),
-                ));
-                break;
-            }
-            Err(FrameError::Io(_)) => break,
-        };
-
-        match &bound {
-            // BOUND: pipeline the dispatch so the read loop keeps going (cancel-while-busy).
-            Some((proto, session)) => {
-                let proto = proto.clone();
-                let session = session.clone();
-                let out_tx = out_tx.clone();
-                tokio::spawn(async move {
-                    match proto.dispatch(&msg, &session).await {
-                        Dispatched::Reply(bytes) => {
-                            let _ = out_tx.send(bytes);
-                        }
-                        Dispatched::Nothing => {}
-                        // Raw-fd transfer takeover is a later phase; until then the server
-                        // can't drive the handshake, so refuse rather than hang the wire.
-                        Dispatched::Transfer(t) => {
-                            let _ = out_tx.send(error_envelope(
-                                Some(t.request_id()),
-                                ErrorCode::RequestFailed.code(),
-                                "Request failed",
-                                Some(json!("raw-fd transfer is not yet supported by this server")),
-                            ));
-                        }
+    'conn: loop {
+        // Process every whole frame already buffered before awaiting more bytes.
+        loop {
+            match take_frame(&mut acc, shared.limit) {
+                Ok(Some(msg)) => match &bound {
+                    // BOUND: pipeline the dispatch; its outcome returns over `outcome_tx`.
+                    Some((proto, session)) => {
+                        let proto = proto.clone();
+                        let session = session.clone();
+                        let outcome_tx = outcome_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = outcome_tx.send(proto.dispatch(&msg, &session).await);
+                        });
                     }
-                });
-            }
-            // AWAIT_NEGOTIATE: bind a protocol (or reply with an error and keep waiting).
-            None => match handle_negotiate(&msg, &peer, &shared, &outbound) {
-                Ok((proto, session, reply)) => {
-                    let _ = out_tx.send(reply);
-                    bound = Some((proto, session));
+                    // AWAIT_NEGOTIATE: bind a protocol (or reply with an error and keep waiting).
+                    None => match handle_negotiate(&msg, &peer, &shared, &outbound) {
+                        Ok((proto, session, reply)) => {
+                            let _ = out_tx.send(reply);
+                            bound = Some((proto, session));
+                        }
+                        Err(reply) => {
+                            let _ = out_tx.send(reply);
+                        }
+                    },
+                },
+                Ok(None) => break, // need more bytes
+                Err(len) => {
+                    let _ = out_tx.send(error_envelope(
+                        None,
+                        ErrorCode::InvalidRequest.code(),
+                        "Message too large",
+                        Some(json!(format!("frame of {len} bytes exceeds limit of {}", shared.limit))),
+                    ));
+                    break 'conn;
                 }
-                Err(reply) => {
-                    let _ = out_tx.send(reply);
+            }
+        }
+
+        tokio::select! {
+            read = reader.read_buf(&mut acc) => match read {
+                Ok(0) | Err(_) => break 'conn,    // clean EOF or read error
+                Ok(_) => {}                        // got bytes; loop to extract frames
+            },
+            Some(outcome) = outcome_rx.recv() => match outcome {
+                Dispatched::Reply(bytes) => {
+                    let _ = out_tx.send(bytes);
+                }
+                Dispatched::Nothing => {}
+                // A transfer takes over the connection, handled inline: the main loop is
+                // paused for the handshake + blocking handoff. `reader`/`acc` are free here.
+                Dispatched::Transfer(t) => {
+                    run_transfer(t, &mut reader, &mut acc, &writer, raw_fd, &peer, shared.limit).await;
                 }
             },
         }
@@ -123,13 +187,94 @@ where
     if let Some((proto, session)) = &bound {
         proto.close_session(session);
     }
-    // Drop our sender; the writer finishes once every in-flight dispatch task has also
-    // dropped its clone (so queued replies still flush before close).
     drop(out_tx);
+    drop(outcome_tx);
     let _ = writer_task.await;
 }
 
-/// A permissive view of an inbound envelope, enough to drive `$/negotiate`.
+/// Drive the raw-fd transfer: gate the writer, run the `$/transferReady` (+ `$/transferGo` for
+/// a download) handshake, hand the blocking fd to the `transfer` callback, then write the
+/// final response. Mirrors Python's `_run_transfer`.
+async fn run_transfer<IO>(
+    t: Transfer,
+    reader: &mut ReadHalf<IO>,
+    acc: &mut BytesMut,
+    writer: &Arc<Mutex<WriteHalf<IO>>>,
+    raw_fd: RawFd,
+    peer: &Peer,
+    limit: usize,
+) where
+    IO: AsyncRead + AsyncWrite + Unpin,
+{
+    // Hold the write mutex for the whole transfer: it is the notification gate (so pub/sub
+    // can't interleave the raw stream) and the channel for the framed ready/final messages.
+    let mut w = writer.lock().await;
+
+    // SCM_RIGHTS fd passing is AF_UNIX-only.
+    if t.is_fd_pass() && peer.transport != Transport::Unix {
+        let _ = write_framed(
+            &mut *w,
+            &error_envelope(
+                Some(t.request_id()),
+                ErrorCode::RequestFailed.code(),
+                "Request failed",
+                Some(json!("fd passing requires an AF_UNIX connection")),
+            ),
+        )
+        .await;
+        return;
+    }
+    // (A userspace-TLS connection has ciphertext on the fd; the TLS phase will reject a raw
+    // transfer there. Plain and kTLS connections carry plaintext, so this is fine for now.)
+
+    if write_framed(&mut *w, t.ready_bytes()).await.is_err() {
+        return;
+    }
+
+    // A download (server produces) waits for the client's `$/transferGo` before streaming, so
+    // the client has paused its own reader and no stream byte is buffered out of reach.
+    if t.direction() == TransferDirection::Download {
+        let go = next_frame(reader, acc, limit).await;
+        if !matches!(&go, Some(bytes) if is_transfer_go(bytes)) {
+            let _ = write_framed(
+                &mut *w,
+                &error_envelope(
+                    Some(t.request_id()),
+                    ErrorCode::RequestFailed.code(),
+                    "Request failed",
+                    Some(json!("expected $/transferGo")),
+                ),
+            )
+            .await;
+            return;
+        }
+    }
+
+    // Hand the (now blocking) fd to the `transfer` callback on a blocking worker.
+    let rid = t.request_id().to_string();
+    let _ = set_blocking(raw_fd, true);
+    let ft = ConnFileTransfer { fd: raw_fd };
+    let final_bytes = match tokio::task::spawn_blocking(move || t.complete(&ft)).await {
+        Ok(bytes) => bytes,
+        Err(_panicked) => {
+            error_envelope(Some(&rid), ErrorCode::InternalError.code(), "Internal error", None)
+        }
+    };
+    let _ = set_blocking(raw_fd, false);
+
+    let _ = write_framed(&mut *w, &final_bytes).await;
+    // `w` (the gate) is released here; the writer task resumes draining notifications.
+}
+
+fn is_transfer_go(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Envelope>(bytes)
+        .ok()
+        .and_then(|e| e.method)
+        .as_deref()
+        == Some(TRANSFER_GO_METHOD)
+}
+
+/// A permissive view of an inbound envelope, enough to drive `$/negotiate` / `$/transferGo`.
 #[derive(serde::Deserialize)]
 struct Envelope {
     jsonrpc: Option<String>,
@@ -155,8 +300,9 @@ fn handle_negotiate<S>(
 where
     S: Send + Sync + 'static,
 {
-    let env: Envelope = serde_json::from_slice(msg)
-        .map_err(|e| error_envelope(None, ErrorCode::InvalidJson.code(), "Parse error", Some(json!(e.to_string()))))?;
+    let env: Envelope = serde_json::from_slice(msg).map_err(|e| {
+        error_envelope(None, ErrorCode::InvalidJson.code(), "Parse error", Some(json!(e.to_string())))
+    })?;
     let rid = env.id.as_ref().and_then(Value::as_str);
 
     if env.method.as_deref() != Some(NEGOTIATE_METHOD) {
@@ -167,7 +313,6 @@ where
             None,
         ));
     }
-    // `$/negotiate` requires jsonrpc "2.0" and a string id (it always replies).
     if env.jsonrpc.as_deref() != Some(VERSION) || rid.is_none() {
         return Err(error_envelope(
             rid,

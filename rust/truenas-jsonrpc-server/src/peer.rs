@@ -60,3 +60,23 @@ pub(crate) fn peer_cred(fd: std::os::fd::RawFd) -> Option<Ucred> {
 pub(crate) fn peer_cred(_fd: std::os::fd::RawFd) -> Option<Ucred> {
     None
 }
+
+/// Toggle `O_NONBLOCK` on `fd`. A raw-fd transfer hands the socket to a blocking handler
+/// callback, so the fd must be put in blocking mode for the duration and restored to
+/// non-blocking afterwards (tokio's reactor owns it again).
+pub(crate) fn set_blocking(fd: std::os::fd::RawFd, blocking: bool) -> std::io::Result<()> {
+    // SAFETY: `fd` is a live socket owned by the connection; `fcntl` here only reads and
+    // rewrites its status flags.
+    #[allow(unsafe_code)]
+    unsafe {
+        let flags = libc::fcntl(fd, libc::F_GETFL);
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let next = if blocking { flags & !libc::O_NONBLOCK } else { flags | libc::O_NONBLOCK };
+        if libc::fcntl(fd, libc::F_SETFL, next) < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+}

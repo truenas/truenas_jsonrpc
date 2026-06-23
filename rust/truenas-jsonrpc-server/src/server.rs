@@ -149,12 +149,9 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     pub async fn serve_unix_listener(&self, listener: UnixListener) -> std::io::Result<()> {
         loop {
             let (stream, _addr) = listener.accept().await?;
-            let peer = Peer {
-                transport: Transport::Unix,
-                ucred: peer::peer_cred(stream.as_raw_fd()),
-                addr: None,
-            };
-            tokio::spawn(connection::serve(stream, peer, self.shared.clone()));
+            let fd = stream.as_raw_fd();
+            let peer = Peer { transport: Transport::Unix, ucred: peer::peer_cred(fd), addr: None };
+            tokio::spawn(connection::serve(stream, fd, peer, self.shared.clone()));
         }
     }
 
@@ -172,9 +169,9 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let _ = stream.set_nodelay(true);
-            let peer =
-                Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
-            tokio::spawn(connection::serve(stream, peer, self.shared.clone()));
+            let fd = stream.as_raw_fd();
+            let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
+            tokio::spawn(connection::serve(stream, fd, peer, self.shared.clone()));
         }
     }
 
@@ -191,9 +188,9 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let _ = stream.set_nodelay(true);
-            let peer =
-                Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
-            tokio::spawn(connection::serve(stream, peer, self.shared.clone()));
+            let fd = stream.as_raw_fd();
+            let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
+            tokio::spawn(connection::serve(stream, fd, peer, self.shared.clone()));
         }
     }
 }
