@@ -23,6 +23,8 @@ mod server;
 #[cfg(feature = "tls")]
 mod tls;
 mod transfer;
+#[cfg(feature = "websocket")]
+mod ws;
 
 pub use peer::{Peer, Transport, Ucred};
 pub use server::{JsonRpcServer, JsonRpcServerBuilder, UnixConfig};

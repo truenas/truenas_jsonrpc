@@ -1,0 +1,121 @@
+//! WebSocket transport (the opt-in `websocket` feature) — JSON-RPC framed as WebSocket
+//! messages (`ws://`), via `tokio-tungstenite`. Mirrors Python's optional `websockets` extra.
+//!
+//! Each inbound WebSocket message is one JSON-RPC frame; replies/notifications are sent as text
+//! messages. The negotiate + dispatch logic is shared with the byte-stream pump
+//! ([`connection::handle_negotiate`] / [`connection::conn_outbound`]). Raw-fd transfer is
+//! **refused** on a WebSocket connection — the library owns the wire, so there's no plaintext
+//! fd to hand off.
+
+use std::sync::Arc;
+
+use futures_util::{SinkExt, StreamExt};
+use serde_json::json;
+use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
+use tokio::sync::mpsc::unbounded_channel;
+use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::WebSocketStream;
+use truenas_jsonrpc::{Dispatched, ErrorCode};
+
+use crate::connection::{self, BoundConn};
+use crate::peer::{Peer, Transport};
+use crate::server::{JsonRpcServer, ServerShared};
+
+impl<S: Send + Sync + 'static> JsonRpcServer<S> {
+    /// Accept WebSocket connections on a bound TCP `listener` until an accept error occurs. A
+    /// failed WebSocket handshake drops just that connection.
+    pub async fn serve_websocket_listener(&self, listener: TcpListener) -> std::io::Result<()> {
+        loop {
+            let (tcp, addr) = listener.accept().await?;
+            let _ = tcp.set_nodelay(true);
+            let shared = self.shared.clone();
+            tokio::spawn(async move {
+                let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(addr) };
+                serve_ws(ws, peer, shared).await;
+            });
+        }
+    }
+
+    /// Bind a TCP `addr` and serve WebSocket on it (bind + accept loop). Runs forever on the
+    /// happy path — spawn it to run alongside other transports.
+    pub async fn serve_websocket(&self, addr: impl ToSocketAddrs) -> std::io::Result<()> {
+        let listener = TcpListener::bind(addr).await?;
+        self.serve_websocket_listener(listener).await
+    }
+}
+
+/// Serve one WebSocket connection: negotiate, then pump dispatch. Each message is a JSON-RPC
+/// frame; replies + pub/sub notifications go out as text messages. Dispatch is pipelined (each
+/// frame spawned), so `$/cancelRequest` is read while a handler runs.
+async fn serve_ws<S>(ws: WebSocketStream<TcpStream>, peer: Peer, shared: Arc<ServerShared<S>>)
+where
+    S: Send + Sync + 'static,
+{
+    let (mut sink, mut stream) = ws.split();
+    let (out_tx, mut out_rx) = unbounded_channel::<Vec<u8>>();
+
+    // Writer task: each queued JSON frame goes out as one WebSocket text message.
+    let writer = tokio::spawn(async move {
+        while let Some(payload) = out_rx.recv().await {
+            let msg = match String::from_utf8(payload) {
+                Ok(text) => Message::Text(text),
+                Err(e) => Message::Binary(e.into_bytes()),
+            };
+            if sink.send(msg).await.is_err() {
+                break;
+            }
+        }
+        let _ = sink.close().await;
+    });
+
+    let outbound = connection::conn_outbound(out_tx.clone());
+    let mut bound: Option<BoundConn<S>> = None;
+
+    while let Some(msg) = stream.next().await {
+        let frame: Vec<u8> = match msg {
+            Ok(Message::Text(t)) => t.into_bytes(),
+            Ok(Message::Binary(b)) => b,
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(_) => continue, // ping/pong/frame — tungstenite answers pings itself
+        };
+        match &bound {
+            Some((proto, session)) => {
+                let proto = proto.clone();
+                let session = session.clone();
+                let out_tx = out_tx.clone();
+                tokio::spawn(async move {
+                    match proto.dispatch(&frame, &session).await {
+                        Dispatched::Reply(bytes) => {
+                            let _ = out_tx.send(bytes);
+                        }
+                        Dispatched::Nothing => {}
+                        Dispatched::Transfer(t) => {
+                            let _ = out_tx.send(connection::error_envelope(
+                                Some(t.request_id()),
+                                ErrorCode::RequestFailed.code(),
+                                "Request failed",
+                                Some(json!("raw-fd transfer is not supported over WebSocket")),
+                            ));
+                        }
+                    }
+                });
+            }
+            None => match connection::handle_negotiate(&frame, &peer, &shared, &outbound) {
+                Ok((proto, session, reply)) => {
+                    let _ = out_tx.send(reply);
+                    bound = Some((proto, session));
+                }
+                Err(reply) => {
+                    let _ = out_tx.send(reply);
+                }
+            },
+        }
+    }
+
+    if let Some((proto, session)) = &bound {
+        proto.close_session(session);
+    }
+    drop(out_tx);
+    let _ = writer.await;
+}

@@ -24,8 +24,10 @@ connection with `$/negotiate`, and pumps the dispatch loop.
 - *(feature `tls`)* `TlsConfig` (+ `TlsMode::{Kernel, Userspace}`) and
   `serve_tls` / `serve_tls_listener` — encrypted TCP via system OpenSSL.
 - `FileTransferExt` — for a `transfer` callback: blocking `write_all` / `read_exact` on the
-  fd (download writes the stream, upload reads it), plus `send_fds` / `recv_fds` (`SCM_RIGHTS`)
-  for a `JsonRpcFdPassMethod` over AF_UNIX.
+  fd, zero-copy `sendfile` / `recvfile` (`sendfile(2)` / `splice(2)`, staying zero-copy over
+  kTLS), and `send_fds` / `recv_fds` (`SCM_RIGHTS`) for a `JsonRpcFdPassMethod` over AF_UNIX.
+- *(feature `websocket`)* `serve_websocket` / `serve_websocket_listener` — JSON-RPC over
+  `ws://` (one frame per WebSocket message; raw-fd transfer is refused on these connections).
 
 ## Behaviour
 
@@ -45,8 +47,10 @@ AF_UNIX, and **TLS** via system OpenSSL (the `tls` feature) in two modes (`TlsMo
 TLS** (kTLS — handshake in userspace, then the raw kernel-encrypted fd, so the bulk transfer
 stays out of userspace and raw-fd transfer works over the encrypted link; fails closed if
 kTLS doesn't engage) or a **userspace** `tokio-openssl` pump (works anywhere, but no raw-fd
-transfer). Not yet: zero-copy `sendfile` / `splice` (the byte-stream path works without them),
-and WebSocket.
+transfer); zero-copy `sendfile` / `recvfile` (the bulk path stays out of userspace, including
+over kTLS); and **WebSocket** (`ws://`, the `websocket` feature — one JSON-RPC frame per WS
+message, no raw-fd transfer over it). All planned transport work is in; `wss://` (WebSocket
+over TLS) is the main remaining option.
 
 ## Usage
 
@@ -63,14 +67,16 @@ server.serve_unix(UnixConfig::new("/run/my.sock")).await?;
 Default: `truenas-jsonrpc`, `serde`, `serde_json`, `tokio` (`net` etc. → `mio` + `socket2`),
 `libc` (`SO_PEERCRED`, the kTLS `getsockopt` probe, the blocking-fd toggle), `bytes` (the
 cancel-safe read buffer), and `nix` (`SCM_RIGHTS` `sendmsg`/`recvmsg`). The `tls` feature adds
-the system-OpenSSL crates (`openssl`, `openssl-sys`, `tokio-openssl`, `foreign-types`); a
-default build pulls none of them. The crate sets `unsafe_code = "deny"` (not the workspace
+the system-OpenSSL crates (`openssl`, `openssl-sys`, `tokio-openssl`, `foreign-types`); the
+`websocket` feature adds `tokio-tungstenite` (+ its WebSocket deps). A default build pulls none
+of these. The crate sets `unsafe_code = "deny"` (not the workspace
 `forbid`) for its audited syscall / FFI blocks (peercred, fd blocking-mode, the kTLS socket
 BIO + `getsockopt`); the cmsg/SCM_RIGHTS construction is `nix`'s.
 
 Not in the workspace `default-members` (its socket / kTLS / `SCM_RIGHTS` I/O can't be
-unit-tested deterministically): it is covered behaviorally (`tests/{roundtrip,transfer,tls,
+unit-tested deterministically): it is covered behaviorally (`tests/{roundtrip,transfer,tls,ws,
 cross_lang}.rs`, real sockets) and excluded from the line-coverage gate. `cross_lang` drives
 the Rust server with the canonical **Python** client (`truenas_pyjsonrpc_client`) to prove
 on-wire interop, and is skipped when Python isn't available. Build/test it with
-`cargo {build,test,clippy} -p truenas-jsonrpc-server` (add `--features tls` for the TLS paths).
+`cargo {build,test,clippy} -p truenas-jsonrpc-server` (add `--features "tls websocket"` for the
+TLS / WebSocket paths).

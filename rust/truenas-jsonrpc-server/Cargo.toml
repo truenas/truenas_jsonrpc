@@ -38,11 +38,17 @@ openssl = { version = "0.10", optional = true }
 openssl-sys = { version = "0.9", optional = true } # socket-BIO FFI for the kTLS handshake
 tokio-openssl = { version = "0.6", optional = true } # the userspace-TLS SslStream pump
 foreign-types = { version = "0.3", optional = true } # ForeignType::as_ptr for the raw SSL*
+# WebSocket transport: JSON-RPC framed as WebSocket messages (the library owns the framing, so
+# no raw-fd transfer). Mirrors Python's optional `websockets` extra.
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", optional = true } # Stream/Sink + .split() for the WS stream
 
 [features]
 # Encrypted TCP via system OpenSSL (kernel TLS or a userspace pump, per TlsMode). Off by
 # default: the default build pulls no openssl crates.
 tls = ["dep:openssl", "dep:openssl-sys", "dep:tokio-openssl", "dep:foreign-types"]
+# WebSocket transport (ws://). Off by default.
+websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

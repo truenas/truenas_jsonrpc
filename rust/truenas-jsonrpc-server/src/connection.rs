@@ -53,6 +53,12 @@ impl Outbound for ConnOutbound {
     }
 }
 
+/// Build the per-connection [`Outbound`] sink over `tx` — shared by the byte-stream pump and
+/// (feature `websocket`) the WebSocket pump.
+pub(crate) fn conn_outbound(tx: UnboundedSender<Vec<u8>>) -> Arc<dyn Outbound> {
+    Arc::new(ConnOutbound { tx })
+}
+
 /// Extract one length-prefixed frame from `acc` if a whole one is buffered: `Ok(Some(body))`,
 /// `Ok(None)` if more bytes are needed, `Err(len)` if the declared length exceeds `limit`.
 fn take_frame(acc: &mut BytesMut, limit: usize) -> Result<Option<Bytes>, usize> {
@@ -127,7 +133,7 @@ pub(crate) async fn serve<S, IO>(
     let (out_tx, out_rx) = unbounded_channel::<Vec<u8>>();
     let writer_task = tokio::spawn(write_loop(writer.clone(), out_rx));
 
-    let outbound: Arc<dyn Outbound> = Arc::new(ConnOutbound { tx: out_tx.clone() });
+    let outbound = conn_outbound(out_tx.clone());
     let (outcome_tx, mut outcome_rx) = unbounded_channel::<Dispatched>();
     let mut bound: Option<BoundConn<S>> = None;
     let mut acc = BytesMut::with_capacity(8 * 1024);
@@ -303,14 +309,14 @@ struct Envelope {
 }
 
 /// A bound connection: the negotiated protocol and its session.
-type BoundConn<S> = (Arc<JsonRpcProtocol<S>>, Arc<Session<S>>);
+pub(crate) type BoundConn<S> = (Arc<JsonRpcProtocol<S>>, Arc<Session<S>>);
 
 /// A successful `$/negotiate`: the bound protocol, its new session, and the reply bytes.
-type Bound<S> = (Arc<JsonRpcProtocol<S>>, Arc<Session<S>>, Vec<u8>);
+pub(crate) type Bound<S> = (Arc<JsonRpcProtocol<S>>, Arc<Session<S>>, Vec<u8>);
 
 /// Handle one `$/negotiate` message: validate, bind a named protocol, create the session, and
 /// return `(protocol, session, reply-bytes)`; on any failure return the error reply bytes.
-fn handle_negotiate<S>(
+pub(crate) fn handle_negotiate<S>(
     msg: &[u8],
     peer: &Peer,
     shared: &ServerShared<S>,
@@ -379,7 +385,7 @@ fn success_envelope<T: Serialize>(id: Option<&str>, result: &T) -> Vec<u8> {
         .expect("encoding a negotiate reply cannot fail")
 }
 
-fn error_envelope(id: Option<&str>, code: i32, message: &str, data: Option<Value>) -> Vec<u8> {
+pub(crate) fn error_envelope(id: Option<&str>, code: i32, message: &str, data: Option<Value>) -> Vec<u8> {
     let mut error = json!({ "code": code, "message": message });
     if let Some(data) = data {
         error["data"] = data;
