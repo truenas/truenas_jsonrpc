@@ -20,8 +20,12 @@ mod connection;
 mod negotiate;
 mod peer;
 mod server;
+#[cfg(feature = "tls")]
+mod tls;
 mod transfer;
 
 pub use peer::{Peer, Transport, Ucred};
 pub use server::{JsonRpcServer, JsonRpcServerBuilder, UnixConfig};
 pub use transfer::FileTransferExt;
+#[cfg(feature = "tls")]
+pub use tls::{TlsConfig, TlsMode};

@@ -110,10 +110,15 @@ async fn write_loop<IO: AsyncWrite + Unpin>(
     }
 }
 
-/// Serve one accepted connection to completion. `raw_fd` is the connection's socket fd, used
-/// for the raw-fd transfer handoff.
-pub(crate) async fn serve<S, IO>(stream: IO, raw_fd: RawFd, peer: Peer, shared: Arc<ServerShared<S>>)
-where
+/// Serve one accepted connection to completion. `transfer_fd` is the connection's socket fd
+/// **iff it carries plaintext** (a plain or kTLS connection) — `None` for a userspace-TLS
+/// connection, where the fd holds ciphertext and a raw-fd transfer must be refused.
+pub(crate) async fn serve<S, IO>(
+    stream: IO,
+    transfer_fd: Option<RawFd>,
+    peer: Peer,
+    shared: Arc<ServerShared<S>>,
+) where
     S: Send + Sync + 'static,
     IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -178,7 +183,7 @@ where
                 // A transfer takes over the connection, handled inline: the main loop is
                 // paused for the handshake + blocking handoff. `reader`/`acc` are free here.
                 Dispatched::Transfer(t) => {
-                    run_transfer(t, &mut reader, &mut acc, &writer, raw_fd, &peer, shared.limit).await;
+                    run_transfer(t, &mut reader, &mut acc, &writer, transfer_fd, &peer, shared.limit).await;
                 }
             },
         }
@@ -200,7 +205,7 @@ async fn run_transfer<IO>(
     reader: &mut ReadHalf<IO>,
     acc: &mut BytesMut,
     writer: &Arc<Mutex<WriteHalf<IO>>>,
-    raw_fd: RawFd,
+    transfer_fd: Option<RawFd>,
     peer: &Peer,
     limit: usize,
 ) where
@@ -209,6 +214,22 @@ async fn run_transfer<IO>(
     // Hold the write mutex for the whole transfer: it is the notification gate (so pub/sub
     // can't interleave the raw stream) and the channel for the framed ready/final messages.
     let mut w = writer.lock().await;
+
+    // A raw-fd transfer needs a plaintext fd: a userspace-TLS connection (ciphertext on the
+    // fd) has none, so refuse. Plain and kTLS connections carry plaintext.
+    let Some(raw_fd) = transfer_fd else {
+        let _ = write_framed(
+            &mut *w,
+            &error_envelope(
+                Some(t.request_id()),
+                ErrorCode::RequestFailed.code(),
+                "Request failed",
+                Some(json!("raw-fd transfer requires a plain or kTLS connection")),
+            ),
+        )
+        .await;
+        return;
+    };
 
     // SCM_RIGHTS fd passing is AF_UNIX-only.
     if t.is_fd_pass() && peer.transport != Transport::Unix {
@@ -224,8 +245,6 @@ async fn run_transfer<IO>(
         .await;
         return;
     }
-    // (A userspace-TLS connection has ciphertext on the fd; the TLS phase will reject a raw
-    // transfer there. Plain and kTLS connections carry plaintext, so this is fine for now.)
 
     if write_framed(&mut *w, t.ready_bytes()).await.is_err() {
         return;

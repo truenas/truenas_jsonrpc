@@ -113,7 +113,7 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
 /// A runnable server. Cheap to clone (an `Arc` handle), so a clone can be moved into each
 /// transport's accept task.
 pub struct JsonRpcServer<S> {
-    shared: Arc<ServerShared<S>>,
+    pub(crate) shared: Arc<ServerShared<S>>,
 }
 
 impl<S> Clone for JsonRpcServer<S> {
@@ -151,7 +151,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             let (stream, _addr) = listener.accept().await?;
             let fd = stream.as_raw_fd();
             let peer = Peer { transport: Transport::Unix, ucred: peer::peer_cred(fd), addr: None };
-            tokio::spawn(connection::serve(stream, fd, peer, self.shared.clone()));
+            tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
         }
     }
 
@@ -171,7 +171,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             let _ = stream.set_nodelay(true);
             let fd = stream.as_raw_fd();
             let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
-            tokio::spawn(connection::serve(stream, fd, peer, self.shared.clone()));
+            tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
         }
     }
 
@@ -190,7 +190,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             let _ = stream.set_nodelay(true);
             let fd = stream.as_raw_fd();
             let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
-            tokio::spawn(connection::serve(stream, fd, peer, self.shared.clone()));
+            tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
         }
     }
 }
