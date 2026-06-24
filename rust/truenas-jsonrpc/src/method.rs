@@ -82,6 +82,23 @@ pub(crate) trait ErasedAsync<S>: Send + Sync {
     fn decode(&self, params: Option<&RawValue>) -> Result<Box<dyn Any + Send>, JsonRpcError>;
     async fn run(&self, decoded: Box<dyn Any + Send>, cx: RequestCtx<S>)
         -> Result<Box<RawValue>, JsonRpcError>;
+    /// XDR analogue of [`decode`](Self::decode) — typed-decode XDR params and, when `want_value`,
+    /// reflect them to a JSON `Value` for authz / audit (see [`ErasedSync::xdr_decode`]).
+    fn xdr_decode(
+        &self,
+        params: &[u8],
+        want_value: bool,
+    ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError>;
+    /// XDR analogue of [`run`](Self::run): await the handler and XDR-encode the result; when
+    /// `want_value`, also reflect the typed result to a JSON `Value` for the audit record. Run
+    /// inline on the runtime (the async handler yields), so — unlike the sync XDR path — there is
+    /// no `spawn_blocking` hop.
+    async fn xdr_run(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: RequestCtx<S>,
+        want_value: bool,
+    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError>;
 }
 
 struct ClosureSync<A, R, F> {
@@ -145,7 +162,7 @@ struct ClosureAsync<A, R, Fut, F> {
 impl<S, A, R, Fut, F> ErasedAsync<S> for ClosureAsync<A, R, Fut, F>
 where
     S: Send + Sync + 'static,
-    A: DeserializeOwned + Send + 'static,
+    A: DeserializeOwned + Serialize + Send + 'static,
     R: Serialize + Send,
     Fut: Future<Output = Result<R, JsonRpcError>> + Send,
     F: Fn(A, RequestCtx<S>) -> Fut + Send + Sync,
@@ -162,6 +179,30 @@ where
             .expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx).await?;
         encode_result(&result)
+    }
+    fn xdr_decode(
+        &self,
+        params: &[u8],
+        want_value: bool,
+    ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError> {
+        let accepts: A = truenas_xdr::from_bytes(params)
+            .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        let value =
+            if want_value { serde_json::to_value(&accepts).unwrap_or(Value::Null) } else { Value::Null };
+        Ok((Box::new(accepts), value))
+    }
+    async fn xdr_run(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: RequestCtx<S>,
+        want_value: bool,
+    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError> {
+        let accepts = *decoded.downcast::<A>().expect("decoded params type matches the method");
+        let result = (self.f)(accepts, cx).await?;
+        let bytes = truenas_xdr::to_bytes(&result)
+            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))?;
+        let value = want_value.then(|| serde_json::to_value(&result).unwrap_or(Value::Null));
+        Ok((bytes, value))
     }
 }
 
@@ -640,7 +681,7 @@ impl<F> AsyncJsonRpcMethod<F> {
     pub(crate) fn erase<S, A, R, Fut>(self) -> Method<S>
     where
         S: Send + Sync + 'static,
-        A: DeserializeOwned + Send + 'static,
+        A: DeserializeOwned + Serialize + Send + 'static,
         R: Serialize + Send + 'static,
         Fut: Future<Output = Result<R, JsonRpcError>> + Send + 'static,
         F: Fn(A, RequestCtx<S>) -> Fut + Send + Sync + 'static,

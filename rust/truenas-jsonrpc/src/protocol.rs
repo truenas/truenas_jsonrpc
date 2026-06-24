@@ -318,7 +318,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     pub fn async_method<F, A, R, Fut>(mut self, method: AsyncJsonRpcMethod<F>) -> BuildResult<Self>
     where
         F: Fn(A, RequestCtx<S>) -> Fut + Send + Sync + 'static,
-        A: DeserializeOwned + Send + 'static,
+        A: DeserializeOwned + Serialize + Send + 'static,
         R: Serialize + Send + 'static,
         Fut: Future<Output = Result<R, JsonRpcError>> + Send + 'static,
     {
@@ -706,34 +706,45 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             );
         }
 
-        // Canonicalize the 16 raw id bytes to the UUID string the shared authz / audit machinery
-        // keys on (the JSON wire's `id`).
-        let id_str = rid.map(|b| uuid::Uuid::from_bytes(b).to_string());
+        // The id is needed only by the audit record; authorization never reads it, and a handler
+        // reads it lazily through `cx` (which keeps the raw bytes and formats the UUID on demand).
+        // So materialize the canonical string into the authz/audit snapshot only when this method
+        // is audited — the wire reply frames the raw `rid` regardless.
+        let audit_id =
+            if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
         let req = JsonRpcRequest {
             method: method.meta.name.to_string(),
-            id: id_str.clone(),
-            // Filled by `run_xdr` with the reflected params when authz/audit needs them.
+            id: audit_id.clone(),
+            // Filled by `run_xdr*` with the reflected params when authz/audit needs them.
             params: Value::Null,
             roles: method.meta.roles.to_vec(),
         };
-        let cx = RequestCtx::new(id_str.clone(), session.clone(), self.never_cancel.clone());
+        // An async method runs inline (it yields, so it can't stall the reactor — parity with the
+        // JSON async path); a sync/filterable method runs on the blocking pool.
+        let is_async = matches!(method.imp, MethodImpl::Async(_));
+        let cx = RequestCtx::new_xdr(rid, session.clone(), self.never_cancel.clone());
         let pipeline = Pipeline {
             method,
             session: session.clone(),
             req,
-            rid: id_str,
+            rid: audit_id,
             authorizer: self.authorizer.clone(),
             audit_sink: self.audit_sink.clone(),
             py_dispatcher: None,
         };
-        // Decode → authorize → run → audit on the blocking pool — parity with the JSON sync path
+        // Decode → authorize → run → audit. Async: inline on the runtime (no `spawn_blocking` hop,
+        // no params copy). Sync/filterable: on the blocking pool — parity with the JSON sync path
         // (`run_sync`) — so a CPU-bound or blocking handler can't stall the async runtime.
-        let params = request.params.to_vec();
-        let outcome = match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
-            Ok(result) => result,
-            // A handler panic unwinds the worker thread; reply INTERNAL_ERROR (the JSON sync
-            // path does the same via `run_blocking`).
-            Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+        let outcome = if is_async {
+            pipeline.run_xdr_async(request.params, cx).await
+        } else {
+            let params = request.params.to_vec();
+            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
+                Ok(result) => result,
+                // A handler panic unwinds the worker thread; reply INTERNAL_ERROR (the JSON sync
+                // path does the same via `run_blocking`).
+                Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+            }
         };
         let reply = match outcome {
             Ok(result_bytes) => {
@@ -1586,6 +1597,46 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         outcome
     }
 
+    /// Inline async XDR pipeline (the async-wire analogue of [`run_xdr`](Self::run_xdr)): XDR
+    /// decode (INVALID_PARAMS, before authz) → authorize → **await** run → audit, run directly on
+    /// the runtime (the async handler yields, so no `spawn_blocking` hop). The reply stays XDR
+    /// bytes; params/result reflect to JSON `Value`s for the authorizer / audit record exactly as
+    /// the sync path does.
+    async fn run_xdr_async(mut self, params: &[u8], cx: RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+        let MethodImpl::Async(erased) = &self.method.imp else {
+            unreachable!("run_xdr_async on a non-async method")
+        };
+        let audit_detail = cx.audit_handle();
+        let need_params = self.authorizer.is_some() || self.method.meta.audit;
+        let want_audit = self.method.meta.audit && self.audit_sink.is_some();
+        // Decode before authz; a decode failure returns here, before the audit point (matching the
+        // JSON path's early return), so it is not audited.
+        let (decoded, params_value) = erased.xdr_decode(params, need_params)?;
+        if need_params {
+            self.req.params = params_value;
+        }
+        let (outcome, result_value) =
+            match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+                Err(denied) => (Err(denied), None),
+                Ok(()) => match erased.xdr_run(decoded, cx, want_audit).await {
+                    Ok((bytes, value)) => (Ok(bytes), value),
+                    Err(e) => (Err(e), None),
+                },
+            };
+        if want_audit {
+            let response = match &outcome {
+                Ok(_) => {
+                    let value = result_value.expect("xdr_run reflects the result when auditing");
+                    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": self.rid.clone(), "result": value }))
+                        .unwrap_or_default()
+                }
+                Err(e) => envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+            };
+            self.do_audit(&response, &audit_detail);
+        }
+        outcome
+    }
+
     /// Audit one call (success / handler error / authz denial — never a decode failure):
     /// redacts the method's `secret_fields` in both params and result. A no-op when the
     /// method isn't audited or no sink is configured.
@@ -1669,6 +1720,15 @@ mod tests {
         let session = dummy_session();
         let cx = dummy_cx(&session);
         let _ = pipeline(method).run_async(None, cx).await;
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "run_xdr_async on a non-async")]
+    async fn run_xdr_async_on_sync_method_panics() {
+        let method = JsonRpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
+        let session = dummy_session();
+        let cx = dummy_cx(&session);
+        let _ = pipeline(method).run_xdr_async(&[], cx).await;
     }
 
     // (The subscribe-without-id guard and all pub/sub behavior are covered via the real

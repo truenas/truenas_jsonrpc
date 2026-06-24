@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    AuthorizationResponse, Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest,
-    MethodDef, NullOutbound, RequestCtx, Session, SessionLifecycle,
+    AsyncJsonRpcMethod, AuthorizationResponse, Dispatched, JsonRpcError, JsonRpcMethod,
+    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Session, SessionLifecycle,
 };
 use truenas_xdr::frame::{self, build_request};
 use truenas_xdr::to_bytes;
@@ -276,6 +276,160 @@ async fn python_method_is_not_on_the_xdr_wire() {
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32601); // METHOD_NOT_FOUND
+}
+
+// --- async methods over the XDR wire ----------------------------------------
+//
+// An async method with an `xdr_id` is dispatched **inline** (no `spawn_blocking` hop) — the
+// binary-wire peer of the JSON async path. The wire is oblivious to the dispatch model, so an
+// async method's reply is byte-identical to the sync golden; the rest exercise the async
+// pipeline's decode / authz / audit / error branches (mirrors of the sync cases above).
+
+/// An async `xdr.add` (proc 1001), same signature as [`add_proto`]'s sync conformance method.
+fn add_proto_async() -> JsonRpcProtocol<()> {
+    JsonRpcProtocol::<()>::builder("conf", "1")
+        .async_method(AsyncJsonRpcMethod::new(
+            MethodDef::new("xdr.add").xdr(1001),
+            |a: AddArgs, _cx: RequestCtx<()>| async move {
+                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+            },
+        ))
+        .unwrap()
+        .build()
+}
+
+#[tokio::test]
+async fn async_add_dispatch_matches_sync_golden() {
+    // The same request + golden as `add_dispatch_matches_golden`: an inline-dispatched async
+    // method produces the byte-identical XDR reply — only the server-side scheduling differs.
+    let request = unhex(
+        "5458445200000001000003e900000001123e4567e89b12d3a4564266141740000000000200000003",
+    );
+    let golden_reply = unhex(
+        "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000005000000026f6b0000",
+    );
+    let reply = dispatch(&add_proto_async(), &request).await.into_bytes().unwrap();
+    assert_eq!(reply, golden_reply, "async xdr.add reply matches the sync golden");
+}
+
+#[tokio::test]
+async fn async_malformed_params_are_invalid_params() {
+    // proc 1001 expects two i32 (8 bytes); supply only 4 → the async XDR decode underruns,
+    // returning before authz/audit.
+    let request = build_request(1001, Some(TEST_ID), &[0, 0, 0, 2]).unwrap();
+    let reply = dispatch(&add_proto_async(), &request).await.into_bytes().unwrap();
+    let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
+    assert_eq!(code, -32602); // INVALID_PARAMS
+}
+
+#[tokio::test]
+async fn async_handler_error_is_request_failed() {
+    let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .async_method(AsyncJsonRpcMethod::new(
+            MethodDef::new("xdr.afail").xdr(2012),
+            |_a: AddArgs, _cx: RequestCtx<()>| async move {
+                Err::<AddResult, _>(JsonRpcError::request_failed("nope"))
+            },
+        ))
+        .unwrap()
+        .build();
+    let request = build_request(2012, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
+    let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
+    assert_eq!(code, -32803); // REQUEST_FAILED
+}
+
+#[tokio::test]
+async fn async_unencodable_result_is_internal_error() {
+    let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .async_method(AsyncJsonRpcMethod::new(
+            MethodDef::new("xdr.amap").xdr(2013),
+            |_a: AddArgs, _cx: RequestCtx<()>| async move {
+                Ok::<_, JsonRpcError>(MapResult { m: BTreeMap::from([("k".to_string(), 1)]) })
+            },
+        ))
+        .unwrap()
+        .build();
+    let request = build_request(2013, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
+    let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
+    assert_eq!(code, -32603); // INTERNAL_ERROR (XDR can't encode a map)
+}
+
+#[tokio::test]
+async fn async_audited_xdr_call_emits_redacted_audit_record() {
+    // Audit parity on the async path: the typed params + result reflect to JSON for the sink
+    // (with `secret_fields` redacted), and the audit record's id is the lazily-formatted UUID.
+    let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
+    let cap = captured.clone();
+    let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .async_method(AsyncJsonRpcMethod::new(
+            MethodDef::new("xdr.secret").xdr(2010).audit_message("did the secret thing").secret_fields(["a"]),
+            |a: AddArgs, _cx: RequestCtx<()>| async move {
+                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+            },
+        ))
+        .unwrap()
+        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, msg: Option<&str>| {
+            *cap.lock().unwrap() = Some(json!({ "params": req.params, "resp": resp, "msg": msg }));
+        })
+        .build();
+    let request = build_request(2010, Some(TEST_ID), &to_bytes(&AddArgs { a: 2, b: 40 }).unwrap()).unwrap();
+    let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
+    assert_eq!(frame::parse_reply(&reply).unwrap().status, frame::STATUS_OK);
+    let rec = captured.lock().unwrap().take().expect("the audit sink fired");
+    assert_eq!(rec["params"]["a"], "********"); // secret field redacted
+    assert_eq!(rec["params"]["b"], 40);
+    assert_eq!(rec["resp"]["result"]["sum"], 42);
+    assert_eq!(rec["resp"]["id"], "123e4567-e89b-12d3-a456-426614174000"); // id materialized for audit
+    assert_eq!(rec["msg"], "did the secret thing");
+}
+
+#[tokio::test]
+async fn async_audited_denial_is_audited() {
+    // A denied async XDR call: NOT_AUTHORIZED on the wire, and still audited (params reflected
+    // even on denial, since decode precedes authz) — exercises the audit error-envelope branch.
+    let captured: Arc<Mutex<Option<(Value, Value)>>> = Arc::new(Mutex::new(None));
+    let cap = captured.clone();
+    let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .async_method(AsyncJsonRpcMethod::new(
+            MethodDef::new("xdr.guarded").xdr(2011).audit(),
+            |a: AddArgs, _cx: RequestCtx<()>| async move {
+                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+            },
+        ))
+        .unwrap()
+        .authorizer(|_r: &_, _s: &Session<()>, _t| AuthorizationResponse::deny("nope"))
+        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, _m: Option<&str>| {
+            *cap.lock().unwrap() = Some((req.params.clone(), resp.clone()));
+        })
+        .build();
+    let request = build_request(2011, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
+    let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
+    let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
+    assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire
+    let (params, resp) = captured.lock().unwrap().take().expect("the denial was audited");
+    assert_eq!(params["a"], 1); // params reflected even on denial (decode precedes authz)
+    assert_eq!(resp["error"]["code"], -32000);
+}
+
+#[tokio::test]
+async fn xdr_handler_reads_lazy_request_id() {
+    // The handler reads `cx.id()` — on the XDR wire this lazily formats the raw 16 id bytes to the
+    // canonical UUID string (the hot path never calls it, so it's never formatted).
+    let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .method(JsonRpcMethod::new(
+            MethodDef::new("xdr.whoami").xdr(2030),
+            |_a: AddArgs, cx: &RequestCtx<()>| {
+                Ok::<_, JsonRpcError>(AddResult { sum: 0, label: cx.id().unwrap_or("none").into() })
+            },
+        ))
+        .unwrap()
+        .build();
+    let request = build_request(2030, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
+    let result: AddResult = truenas_xdr::from_bytes(frame::parse_reply(&reply).unwrap().body).unwrap();
+    assert_eq!(result.label, "123e4567-e89b-12d3-a456-426614174000"); // TEST_ID, formatted lazily
 }
 
 #[test]
