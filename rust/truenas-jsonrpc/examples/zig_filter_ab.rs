@@ -18,7 +18,7 @@ use truenas_jsonrpc::{
     JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct QueryArgs {}
 
 #[derive(Serialize)]

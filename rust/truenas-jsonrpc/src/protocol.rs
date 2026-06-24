@@ -307,7 +307,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     pub fn method<F, A, R>(mut self, method: JsonRpcMethod<F>) -> BuildResult<Self>
     where
         F: Fn(A, &RequestCtx<S>) -> Result<R, JsonRpcError> + Send + Sync + 'static,
-        A: DeserializeOwned + Send + 'static,
+        A: DeserializeOwned + Serialize + Send + 'static,
         R: Serialize + 'static,
     {
         self.insert(method.erase::<S, A, R>())?;
@@ -350,7 +350,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             + Send
             + Sync
             + 'static,
-        A: DeserializeOwned + Send + 'static,
+        A: DeserializeOwned + Serialize + Send + 'static,
         E: Serialize + 'static,
     {
         self.insert(method.erase::<S>())?;
@@ -652,7 +652,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // A leading 4-byte TXDR magic selects the binary wire; a JSON envelope always
         // begins with `{` (0x7B), so the discriminator is unambiguous.
         if truenas_xdr::frame::is_xdr(wire) {
-            return self.dispatch_xdr(wire, session);
+            return self.dispatch_xdr(wire, session).await;
         }
         let parsed = match envelope::parse(wire) {
             Ok(p) => p,
@@ -662,13 +662,15 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         self.dispatch_parsed(parsed, session).await
     }
 
-    /// Dispatch an XDR binary-wire frame (the [`is_xdr`](truenas_xdr::frame::is_xdr) magic
-    /// was already matched). v1 scope: plain methods only (filterable/subscription/python
-    /// over XDR return method-not-found); params are **not** surfaced to the authorizer and
-    /// XDR calls are **not** audited (both are JSON-wire features deferred for the binary
-    /// wire); and the body runs inline on the calling task (offloading like the JSON sync
-    /// path is deferred to the server layer). The session gate + authorization still apply.
-    fn dispatch_xdr(&self, wire: &[u8], session: &Arc<Session<S>>) -> Dispatched {
+    /// Dispatch an XDR binary-wire frame (the [`is_xdr`](truenas_xdr::frame::is_xdr) magic was
+    /// already matched). v1 scope: plain + filterable methods (subscription/python over XDR reply
+    /// method-not-found). Routes through [`Pipeline::run_xdr`], which mirrors the JSON sync path
+    /// (`run_sync`): decode → authorize → run → audit, on the blocking pool so a slow or blocking
+    /// body can't stall the async runtime. Params are typed-decoded *before* authz (INVALID_PARAMS
+    /// precedes NOT_AUTHORIZED) and reflected to a JSON `Value` for the authorizer and the
+    /// (redacted) audit record — XDR is non-self-describing, but the type is known here, so we
+    /// reflect the decoded value (the binary-wire analogue of `raw_to_value`).
+    async fn dispatch_xdr(&self, wire: &[u8], session: &Arc<Session<S>>) -> Dispatched {
         use truenas_xdr::frame;
         let request = match frame::parse_request(wire) {
             Ok(r) => r,
@@ -704,25 +706,34 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             );
         }
 
-        // The 16 raw id bytes canonicalize to a UUID string for the string-keyed authz hook.
+        // Canonicalize the 16 raw id bytes to the UUID string the shared authz / audit machinery
+        // keys on (the JSON wire's `id`).
         let id_str = rid.map(|b| uuid::Uuid::from_bytes(b).to_string());
         let req = JsonRpcRequest {
             method: method.meta.name.to_string(),
             id: id_str.clone(),
+            // Filled by `run_xdr` with the reflected params when authz/audit needs them.
             params: Value::Null,
             roles: method.meta.roles.to_vec(),
         };
-        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, None) {
-            return finish(note, self.xdr_error(rid, &denied));
-        }
-
-        let cx = RequestCtx::new(id_str, session.clone(), self.never_cancel.clone());
-        let outcome = match &method.imp {
-            MethodImpl::Sync(erased) | MethodImpl::Filterable(erased) => {
-                erased.xdr_run(request.params, &cx)
-            }
-            // Subscription / python methods are not callable over the binary wire.
-            _ => Err(JsonRpcError::method_not_found("Method not found")),
+        let cx = RequestCtx::new(id_str.clone(), session.clone(), self.never_cancel.clone());
+        let pipeline = Pipeline {
+            method,
+            session: session.clone(),
+            req,
+            rid: id_str,
+            authorizer: self.authorizer.clone(),
+            audit_sink: self.audit_sink.clone(),
+            py_dispatcher: None,
+        };
+        // Decode → authorize → run → audit on the blocking pool — parity with the JSON sync path
+        // (`run_sync`) — so a CPU-bound or blocking handler can't stall the async runtime.
+        let params = request.params.to_vec();
+        let outcome = match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
+            Ok(result) => result,
+            // A handler panic unwinds the worker thread; reply INTERNAL_ERROR (the JSON sync
+            // path does the same via `run_blocking`).
+            Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
         };
         let reply = match outcome {
             Ok(result_bytes) => {
@@ -1527,6 +1538,52 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let response = response_bytes(self.rid.as_deref(), &outcome);
         self.do_audit(&response, &audit_detail);
         response
+    }
+
+    /// XDR pipeline (blocking pool): XDR decode (INVALID_PARAMS, before authz) → authorize → run
+    /// → audit — the binary-wire analogue of [`run_sync`](Self::run_sync). The reply stays XDR
+    /// bytes (returned for the caller to frame); params/result are reflected to JSON `Value`s for
+    /// the authorizer and the (redacted) audit record, since XDR is non-self-describing (see
+    /// [`ErasedSync::xdr_decode`]). A subscription/python method that opted into an xdr_id is not
+    /// callable here → method-not-found.
+    fn run_xdr(mut self, params: &[u8], cx: RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+        let (MethodImpl::Sync(erased) | MethodImpl::Filterable(erased)) = &self.method.imp else {
+            // Subscription / python methods are not callable over the binary wire.
+            return Err(JsonRpcError::method_not_found("Method not found"));
+        };
+        let audit_detail = cx.audit_handle();
+        // Reflect params for the authorizer and/or audit (mirrors the JSON `need_snapshot`);
+        // reflect the result only when the call is actually audited.
+        let need_params = self.authorizer.is_some() || self.method.meta.audit;
+        let want_audit = self.method.meta.audit && self.audit_sink.is_some();
+        // Decode before authz; a decode failure returns here, before the audit point, so it is
+        // not audited (matching the JSON path's early return).
+        let (decoded, params_value) = erased.xdr_decode(params, need_params)?;
+        if need_params {
+            self.req.params = params_value;
+        }
+        let (outcome, result_value) =
+            match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+                Err(denied) => (Err(denied), None),
+                Ok(()) => match erased.xdr_run(decoded, &cx, want_audit) {
+                    Ok((bytes, value)) => (Ok(bytes), value),
+                    Err(e) => (Err(e), None),
+                },
+            };
+        if want_audit {
+            // Synthesize the JSON response envelope (reflected result on success, the error
+            // otherwise) for the shared redaction + sink call — the wire reply itself is XDR.
+            let response = match &outcome {
+                Ok(_) => {
+                    let value = result_value.expect("xdr_run reflects the result when auditing");
+                    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": self.rid.clone(), "result": value }))
+                        .unwrap_or_default()
+                }
+                Err(e) => envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+            };
+            self.do_audit(&response, &audit_detail);
+        }
+        outcome
     }
 
     /// Audit one call (success / handler error / authz denial — never a decode failure):

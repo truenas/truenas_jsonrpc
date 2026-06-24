@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
     tnfilter, AuthorizationResponse, CancelTarget, CompiledFilters, CompiledOptions, Dispatched,
@@ -17,7 +17,7 @@ use truenas_jsonrpc::{
 
 const RID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NoArgs {}
 
 /// The fixed source a query streams through `tnfilter` (mirrors `test_filterable.py`'s `_DATA`).

@@ -18,7 +18,7 @@ const SID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"; // a subscribe-request
 const CID: &str = "00000000-0000-0000-0000-000000000002"; // a cancel-request id
 const PINNED: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"; // a pinned sub/session id
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct NoArgs {}
 #[derive(Serialize, Deserialize)]
 struct Event {

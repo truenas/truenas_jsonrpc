@@ -20,7 +20,7 @@ use truenas_jsonrpc_server::{FileTransferExt, JsonRpcServer, TlsConfig, TlsMode}
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct AddArgs {
     a: i64,
     b: i64,

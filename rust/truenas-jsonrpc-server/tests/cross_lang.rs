@@ -12,7 +12,7 @@ use serde_json::Value;
 use truenas_jsonrpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
 use truenas_jsonrpc_server::{JsonRpcServer, UnixConfig};
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct AddArgs {
     a: i64,
     b: i64,

@@ -5,12 +5,13 @@
 //! string), the filter engine, and the result encoding (count → hyper, rows → count+entries)
 //! are all wire-compatible with the Python/Zig implementations.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use truenas_jsonrpc::{
     tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod, JsonRpcError,
-    JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
+    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Session,
 };
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -88,4 +89,42 @@ async fn xdr_filter_goldens() {
         };
         assert_eq!(got, unhex(reply), "{name}: filterable XDR reply mismatch");
     }
+}
+
+#[tokio::test]
+async fn audited_filterable_xdr_call_emits_audit_record() {
+    // An audited filterable XDR call: the base params, the (reduced) query-filters/options, and
+    // the result are reflected to JSON for the audit sink — for both the rows and count shapes,
+    // even though they ride the binary wire.
+    let records: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+    let rec = records.clone();
+    let p = JsonRpcProtocol::<()>::builder("conf", "1")
+        .filterable(FilterableJsonRpcMethod::<QueryArgs, FEntry, _>::new(
+            MethodDef::new("xdr.query").xdr(1003).audit_message("queried"),
+            |_a: QueryArgs, _cx: &RequestCtx<()>, f: &CompiledFilters, o: &CompiledOptions| {
+                Ok::<_, JsonRpcError>(tnfilter(dataset(), f, o)?)
+            },
+        ))
+        .unwrap()
+        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, _m: Option<&str>| {
+            rec.lock().unwrap().push(json!({ "params": req.params, "resp": resp }));
+        })
+        .build();
+    // `xdr_filter_eq` → the matching rows; `xdr_filter_count` → the integer count. Auditing each
+    // exercises both the `Rows` and `Count` result-reflection arms (the wire bytes themselves are
+    // covered byte-for-byte by `xdr_filter_goldens`).
+    let rows_req = unhex("5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000000000000000000000000000000000000000000000000000165b5b226e616d65222c223d222c22616c706861225d5d0000");
+    let count_req = unhex("5458445200000001000003eb00000001123e4567e89b12d3a456426614174000000000010000000000000000000000000000000000000000000000165b5b226e616d65222c223d222c22616c706861225d5d0000");
+    for req in [rows_req, count_req] {
+        let s = p.new_session(Some(()), Arc::new(NullOutbound));
+        let _ = p.dispatch(&req, &s).await;
+    }
+    let recs = records.lock().unwrap();
+    // Rows shape: the reflected query + an array result.
+    assert_eq!(recs[0]["params"]["query-filters"], json!([["name", "=", "alpha"]]));
+    assert!(recs[0]["resp"]["result"].is_array());
+    assert_eq!(recs[0]["resp"]["result"][0]["name"], "alpha");
+    // Count shape: the reflected integer.
+    assert_eq!(recs[1]["params"]["query-options"]["count"], true);
+    assert_eq!(recs[1]["resp"]["result"], 2);
 }

@@ -14,14 +14,14 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Instant;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use truenas_jsonrpc::{
     compile_filters, tnfilter, tnmatch, CompiledFilters, CompiledOptions, Dispatched,
     FilterableJsonRpcMethod, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Empty {}
 
 const DATA_PATH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../bench/filter_data.json");

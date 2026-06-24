@@ -27,7 +27,7 @@ use truenas_jsonrpc::{
 
 const GOLDEN: &str = include_str!("conformance/golden.json");
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Empty {}
 #[derive(Deserialize, Serialize)]
 struct EchoArgs {
@@ -37,7 +37,7 @@ struct EchoArgs {
 struct EchoResult {
     echo: String,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct AddArgs {
     a: i64,
     b: i64,
@@ -54,7 +54,7 @@ struct OkResult {
 struct PingResult {
     pong: bool,
 }
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct AuditArgs {
     user: String,
     password: String,

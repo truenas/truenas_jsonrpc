@@ -56,10 +56,25 @@ pub(crate) trait ErasedSync<S>: Send + Sync {
     fn decode(&self, params: Option<&RawValue>) -> Result<Box<dyn Any + Send>, JsonRpcError>;
     fn run(&self, decoded: Box<dyn Any + Send>, cx: &RequestCtx<S>)
         -> Result<Box<RawValue>, JsonRpcError>;
-    /// Decode XDR-encoded params, run the handler, and XDR-encode the result — the binary
-    /// wire's analogue of `decode` + `run`. (Only plain methods support it; filterable
-    /// returns method-not-found.)
-    fn xdr_run(&self, params: &[u8], cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError>;
+    /// XDR analogue of [`decode`](Self::decode): typed-decode XDR-encoded params into the boxed
+    /// value [`xdr_run`](Self::xdr_run) consumes, and — when `want_value` — reflect them to a
+    /// JSON `Value` for authorization / audit. XDR is non-self-describing, but the type is known
+    /// here, so we reflect the decoded typed value (the analogue of the JSON wire's
+    /// `raw_to_value`). INVALID_PARAMS on malformed bytes.
+    fn xdr_decode(
+        &self,
+        params: &[u8],
+        want_value: bool,
+    ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError>;
+    /// XDR analogue of [`run`](Self::run): run the handler on the decoded params and XDR-encode
+    /// the result for the wire; when `want_value`, also reflect the typed result to a JSON
+    /// `Value` for the audit record.
+    fn xdr_run(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: &RequestCtx<S>,
+        want_value: bool,
+    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError>;
 }
 
 #[async_trait]
@@ -77,7 +92,7 @@ struct ClosureSync<A, R, F> {
 impl<S, A, R, F> ErasedSync<S> for ClosureSync<A, R, F>
 where
     S: Send + Sync + 'static,
-    A: DeserializeOwned + Send + 'static,
+    A: DeserializeOwned + Serialize + Send + 'static,
     R: Serialize,
     F: Fn(A, &RequestCtx<S>) -> Result<R, JsonRpcError> + Send + Sync,
 {
@@ -94,12 +109,29 @@ where
         let result = (self.f)(accepts, cx)?;
         encode_result(&result)
     }
-    fn xdr_run(&self, params: &[u8], cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+    fn xdr_decode(
+        &self,
+        params: &[u8],
+        want_value: bool,
+    ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError> {
         let accepts: A = truenas_xdr::from_bytes(params)
             .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        let value =
+            if want_value { serde_json::to_value(&accepts).unwrap_or(Value::Null) } else { Value::Null };
+        Ok((Box::new(accepts), value))
+    }
+    fn xdr_run(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: &RequestCtx<S>,
+        want_value: bool,
+    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError> {
+        let accepts = *decoded.downcast::<A>().expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx)?;
-        truenas_xdr::to_bytes(&result)
-            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))
+        let bytes = truenas_xdr::to_bytes(&result)
+            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))?;
+        let value = want_value.then(|| serde_json::to_value(&result).unwrap_or(Value::Null));
+        Ok((bytes, value))
     }
 }
 
@@ -196,7 +228,7 @@ struct FilterableErased<A, E, F> {
 impl<S, A, E, F> ErasedSync<S> for FilterableErased<A, E, F>
 where
     S: Send + Sync + 'static,
-    A: DeserializeOwned + Send + 'static,
+    A: DeserializeOwned + Serialize + Send + 'static,
     E: Serialize + 'static,
     F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
         + Send
@@ -221,18 +253,58 @@ where
         let out = (self.f)(aug.base, cx, &cf, &co)?;
         finalize_json(out, &aug.query_options)
     }
-    fn xdr_run(&self, params: &[u8], cx: &RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+    fn xdr_decode(
+        &self,
+        params: &[u8],
+        want_value: bool,
+    ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError> {
         // The XDR filterable request is XDR<base> + XDR<XdrQueryOptions> + XDR<query-filters
         // as a JSON-text string> (query-filters are dynamic, so they ride as JSON text on the
-        // binary wire). The result is the Zig/Python count-or-(count+entries) shape.
+        // binary wire).
         let (base, xopts, filters_json): (A, XdrQueryOptions, String) =
             truenas_xdr::from_bytes(params).map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        // For audit/authz, reflect the base params back into the augmented JSON shape the JSON
+        // wire would carry (base + the reduced `query-filters`/`query-options`).
+        let value = if want_value {
+            let mut v = serde_json::to_value(&base).unwrap_or(Value::Null);
+            if let Value::Object(map) = &mut v {
+                map.insert(
+                    "query-filters".to_string(),
+                    serde_json::from_str(&filters_json).unwrap_or(Value::Null),
+                );
+                map.insert(
+                    "query-options".to_string(),
+                    serde_json::to_value(&xopts).unwrap_or(Value::Null),
+                );
+            }
+            v
+        } else {
+            Value::Null
+        };
+        Ok((Box::new((base, xopts, filters_json)), value))
+    }
+    fn xdr_run(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: &RequestCtx<S>,
+        want_value: bool,
+    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError> {
+        let (base, xopts, filters_json) = *decoded
+            .downcast::<(A, XdrQueryOptions, String)>()
+            .expect("decoded params type matches the method");
         let filters: QueryFilters = serde_json::from_str(&filters_json)
             .map_err(|e| JsonRpcError::invalid_params(format!("query-filters: {e}")))?;
         let cf = compile_filters(&filters)?;
         let co = compile_options(&xopts.into_query_options())?;
         let out = (self.f)(base, cx, &cf, &co)?;
-        finalize_xdr(out)
+        // The result is the Zig/Python count-or-(count+entries) shape; reflect it (count → the
+        // integer, rows → the array) for the audit record before XDR-encoding for the wire.
+        let value = want_value.then(|| match &out {
+            Filtered::Count(n) => serde_json::to_value(n).unwrap_or(Value::Null),
+            Filtered::Rows(rows) => serde_json::to_value(rows).unwrap_or(Value::Null),
+        });
+        let bytes = finalize_xdr(out)?;
+        Ok((bytes, value))
     }
 }
 
@@ -274,7 +346,7 @@ fn finalize_xdr<E: Serialize>(out: Filtered<E>) -> Result<Vec<u8>, JsonRpcError>
 /// The reduced `query-options` carried on the XDR wire: `count`, `order_by`, and hyper
 /// `offset`/`limit` (no `get`/`select`). Field order matches the binary wire (and the Zig/
 /// Python `XdrQueryOptions`).
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct XdrQueryOptions {
     count: bool,
     order_by: Option<Vec<String>>,
@@ -541,7 +613,7 @@ impl<F> JsonRpcMethod<F> {
     pub(crate) fn erase<S, A, R>(self) -> Method<S>
     where
         S: Send + Sync + 'static,
-        A: DeserializeOwned + Send + 'static,
+        A: DeserializeOwned + Serialize + Send + 'static,
         R: Serialize + 'static,
         F: Fn(A, &RequestCtx<S>) -> Result<R, JsonRpcError> + Send + Sync + 'static,
     {
@@ -636,7 +708,7 @@ impl<A, E, F> FilterableJsonRpcMethod<A, E, F> {
     pub(crate) fn erase<S>(self) -> Method<S>
     where
         S: Send + Sync + 'static,
-        A: DeserializeOwned + Send + 'static,
+        A: DeserializeOwned + Serialize + Send + 'static,
         E: Serialize + 'static,
         F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
             + Send

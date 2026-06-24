@@ -21,7 +21,7 @@ use truenas_jsonrpc::{
     AsyncJsonRpcMethod, JsonRpcMethod, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
 };
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct Args {
     n: i64,
 }

@@ -137,8 +137,11 @@ the build script for the packaged build.
 
 ## Known parity gaps (v1)
 
-- **xdr methods** bind on both the JSON and XDR wires (`MethodDef::xdr(id)`); the binary-wire
-  path's v1 limitations are documented in `truenas-jsonrpc`.
+- **xdr methods** bind on both the JSON and XDR wires (`MethodDef::xdr(id)`). The binary wire
+  carries plain + filterable methods (with the full session-gate / authorization / audit +
+  redaction pipeline, same as JSON); subscription / python / transfer methods are JSON-only
+  (they reply method-not-found over XDR), and filterable-over-XDR uses the reduced
+  `query-options` (no `get` / `select`).
 - **python methods** are registered (`.python_method`) and listed in a generated
   `PYTHON_METHODS` table, but their bodies run via the `truenas-jsonrpc-pyo3` bridge — they
   are **not** in the `Handlers` trait.
