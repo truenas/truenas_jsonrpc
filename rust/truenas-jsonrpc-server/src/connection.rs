@@ -3,17 +3,19 @@
 //!
 //! Inbound bytes accumulate in a buffer fed by the cancel-safe [`AsyncReadExt::read_buf`];
 //! complete length-prefixed frames are extracted from it. The loop `select!`s between reading
-//! more bytes and receiving a completed dispatch outcome — because `read_buf` is cancel-safe,
-//! choosing the outcome branch never drops buffered bytes. Dispatch is **pipelined**: each
-//! bound message is spawned and its [`Dispatched`] returns over a channel, so a
-//! `$/cancelRequest` is read while a long handler runs.
+//! more bytes and taking a completed dispatch outcome — because `read_buf` is cancel-safe,
+//! choosing the outcome branch never drops buffered bytes. Dispatch is **pipelined without a task
+//! per request**: each bound message becomes an in-flight future in a [`FuturesUnordered`] set,
+//! polled in the same `select!` as the read, so a `$/cancelRequest` is read and dispatched while a
+//! prior handler is still running (cancellation is a cooperative flag in the core).
 //!
-//! All outbound bytes (replies + pub/sub notifications pushed through the session's
-//! [`Outbound`]) go through one channel drained by a writer task; the `WriteHalf` sits behind
-//! a mutex so a transfer can gate it. A [`Dispatched::Transfer`] triggers [`run_transfer`],
-//! which holds that mutex (no notification interleaves the raw stream), runs the
-//! `$/transferReady` → (`$/transferGo`) handshake, hands the blocking fd to the handler's
-//! `transfer` callback on a blocking worker, then writes the final response.
+//! All outbound bytes (replies + pub/sub notifications pushed through the session's [`Outbound`])
+//! go through one channel drained by a writer task that **coalesces everything queued into one
+//! write per burst**; the `WriteHalf` sits behind a mutex so a transfer can gate it. A
+//! [`Dispatched::Transfer`] triggers [`run_transfer`], which holds that mutex (no notification
+//! interleaves the raw stream), runs the `$/transferReady` → (`$/transferGo`) handshake, hands the
+//! blocking fd to the handler's `transfer` callback on a blocking worker, then writes the final
+//! response.
 
 use std::future::Future;
 use std::os::fd::RawFd;
