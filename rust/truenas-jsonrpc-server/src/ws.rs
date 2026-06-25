@@ -142,6 +142,16 @@ where
                                 Some(json!("raw-fd transfer is not supported over WebSocket")),
                             ));
                         }
+                        Dispatched::Passthrough(takeover) => {
+                            // No raw fd to hand off under WebSocket framing; refuse (the takeover is
+                            // dropped uncommitted, so the session stays unauthenticated).
+                            let _ = out_tx.send(connection::error_envelope(
+                                takeover.request_id(),
+                                ErrorCode::RequestFailed.code(),
+                                "Request failed",
+                                Some(json!("passthrough authentication is not supported over WebSocket")),
+                            ));
+                        }
                     }
                 });
             }

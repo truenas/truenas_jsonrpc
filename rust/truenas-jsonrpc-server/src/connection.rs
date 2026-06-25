@@ -27,7 +27,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::io::AsyncRead;
 use truenas_jsonrpc::{
-    Dispatched, ErrorCode, JsonRpcProtocol, Outbound, Session, Transfer, TransferDirection,
+    Dispatched, ErrorCode, JsonRpcProtocol, Outbound, Session, SetupTakeover, Transfer,
+    TransferDirection,
 };
 
 use crate::negotiate::{NegotiateParams, NegotiateResult, NEGOTIATE_METHOD};
@@ -191,6 +192,11 @@ pub(crate) async fn serve<S, IO>(
                 Dispatched::Transfer(t) => {
                     run_transfer(t, &mut reader, &mut acc, &writer, transfer_fd, &peer, shared.limit).await;
                 }
+                // Passthrough auth: hand the connection fd to the broker. Handled inline (reader
+                // paused) like a transfer; the broker conducts the client handshake on the fd.
+                Dispatched::Passthrough(takeover) => {
+                    run_passthrough(takeover, &writer, transfer_fd, &peer).await;
+                }
             },
         }
     }
@@ -289,6 +295,43 @@ async fn run_transfer<IO>(
 
     let _ = write_framed(&mut *w, &final_bytes).await;
     // `w` (the gate) is released here; the writer task resumes draining notifications.
+}
+
+/// Drive a passthrough takeover: gate the writer (the reader is already paused, since this runs
+/// inline in the main loop), check the transport, put the fd in blocking mode, and run the
+/// hand-off on a blocking worker. The broker conducts the client handshake on the fd and the core
+/// commits the verdict (lifecycle + identity); **no reply is written here** — the broker already
+/// replied to the client over the fd. Mirrors [`run_transfer`]'s gating.
+///
+/// Assumes the client waits for its `$/sessionSetup` reply (so no post-setup bytes are buffered in
+/// `acc` out of the broker's reach); the broker then owns the fd until it returns its verdict.
+async fn run_passthrough<IO>(
+    takeover: SetupTakeover,
+    writer: &Arc<Mutex<WriteHalf<IO>>>,
+    transfer_fd: Option<RawFd>,
+    peer: &Peer,
+) where
+    IO: AsyncWrite + Unpin,
+{
+    // Hold the write mutex for the whole hand-off: it gates pub/sub so nothing interleaves the
+    // broker's client I/O on the shared fd.
+    let _gate = writer.lock().await;
+
+    // Passthrough needs a plaintext fd (a userspace-TLS connection has none) and — for SCM_RIGHTS
+    // fd passing — an AF_UNIX transport. If either is missing, refuse: the session stays
+    // unauthenticated (the takeover directive is dropped without committing).
+    let Some(raw_fd) = transfer_fd else { return };
+    if takeover.requires_af_unix() && peer.transport != Transport::Unix {
+        return;
+    }
+
+    // The broker does blocking reads/writes on its dup of the fd (a dup shares the open file
+    // description, so its status flags too) → put the fd in blocking mode for the hand-off.
+    let _ = set_blocking(raw_fd, true);
+    let ft = ConnFileTransfer { fd: raw_fd };
+    let _ = tokio::task::spawn_blocking(move || takeover.run(&ft)).await;
+    let _ = set_blocking(raw_fd, false);
+    // `_gate` is released here; the main loop resumes reading the (now authenticated) connection.
 }
 
 fn is_transfer_go(bytes: &[u8]) -> bool {

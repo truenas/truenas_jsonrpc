@@ -27,6 +27,7 @@ use crate::method::{
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::RequestCtx;
 use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SystemClock, UuidGen};
+use crate::setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 use crate::transfer::{FileTransfer, Transfer, TransferDirection};
 use crate::types::{AuthorizationResponse, JsonRpcRequest, MessageDirection, SessionLifecycle};
 use truenas_filter::{CompiledFilters, CompiledOptions, Filtered};
@@ -49,6 +50,11 @@ pub enum Dispatched {
     /// handshake and fd handoff (see [`Transfer`]). Returned only by the JSON wire — the XDR
     /// binary wire does not offer transfer methods.
     Transfer(Transfer),
+    /// A `$/sessionSetup` handler took over the connection to finish authentication out-of-band
+    /// (passthrough): the server gates the connection and runs the [`SetupTakeover`] with the
+    /// connection's fd. The broker replies to the client over that fd, so there is no envelope to
+    /// send here. JSON wire only.
+    Passthrough(SetupTakeover),
 }
 
 impl Dispatched {
@@ -58,7 +64,7 @@ impl Dispatched {
     pub fn into_bytes(self) -> Option<Vec<u8>> {
         match self {
             Dispatched::Reply(b) => Some(b),
-            Dispatched::Nothing | Dispatched::Transfer(_) => None,
+            Dispatched::Nothing | Dispatched::Transfer(_) | Dispatched::Passthrough(_) => None,
         }
     }
 }
@@ -171,14 +177,18 @@ where
 /// session's server-internal identity as a side effect, and returns the next lifecycle +
 /// the client-facing result. Provided as a closure
 /// `Fn(Accepts, &Session<S>) -> Result<(SessionLifecycle, Returns), JsonRpcError>`.
-trait ErasedSetup<S>: Send + Sync {
-    fn handle(
-        &self,
-        params: Option<&RawValue>,
-        session: &Session<S>,
-    ) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError>;
+/// A setup handler's outcome with the reply already encoded: either commit synchronously, or take
+/// over the connection (passthrough).
+enum RawSetupOutcome {
+    Commit(SessionLifecycle, Box<RawValue>),
+    Takeover(SetupHandoff),
 }
 
+trait ErasedSetup<S>: Send + Sync {
+    fn handle(&self, params: Option<&RawValue>, session: &Arc<Session<S>>) -> Result<RawSetupOutcome, JsonRpcError>;
+}
+
+/// Adapter for a takeover-capable `$/sessionSetup` handler (returns a [`SetupOutcome`]).
 struct ClosureSetup<A, R, F> {
     f: F,
     _p: PhantomData<fn() -> (A, R)>,
@@ -189,18 +199,35 @@ where
     S: Send + Sync + 'static,
     A: DeserializeOwned + Send + 'static,
     R: Serialize,
-    F: Fn(A, &Session<S>) -> Result<(SessionLifecycle, R), JsonRpcError>
-        + Send
-        + Sync,
+    F: Fn(A, &Arc<Session<S>>) -> Result<SetupOutcome<R>, JsonRpcError> + Send + Sync,
 {
-    fn handle(
-        &self,
-        params: Option<&RawValue>,
-        session: &Session<S>,
-    ) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError> {
+    fn handle(&self, params: Option<&RawValue>, session: &Arc<Session<S>>) -> Result<RawSetupOutcome, JsonRpcError> {
+        let accepts: A = decode_params(params)?;
+        Ok(match (self.f)(accepts, session)? {
+            SetupOutcome::Commit(lifecycle, returns) => RawSetupOutcome::Commit(lifecycle, encode_result(&returns)?),
+            SetupOutcome::Takeover(handoff) => RawSetupOutcome::Takeover(handoff),
+        })
+    }
+}
+
+/// Adapter for a commit-only handler (`$/sessionSetupContinue`, which never takes over): the user
+/// closure returns `(lifecycle, R)` and gets `&Session<S>`.
+struct ClosureCommit<A, R, F> {
+    f: F,
+    _p: PhantomData<fn() -> (A, R)>,
+}
+
+impl<S, A, R, F> ErasedSetup<S> for ClosureCommit<A, R, F>
+where
+    S: Send + Sync + 'static,
+    A: DeserializeOwned + Send + 'static,
+    R: Serialize,
+    F: Fn(A, &Session<S>) -> Result<(SessionLifecycle, R), JsonRpcError> + Send + Sync,
+{
+    fn handle(&self, params: Option<&RawValue>, session: &Arc<Session<S>>) -> Result<RawSetupOutcome, JsonRpcError> {
         let accepts: A = decode_params(params)?;
         let (lifecycle, returns) = (self.f)(accepts, session)?;
-        Ok((lifecycle, encode_result(&returns)?))
+        Ok(RawSetupOutcome::Commit(lifecycle, encode_result(&returns)?))
     }
 }
 
@@ -444,7 +471,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     }
 
     /// Enable `$/sessionSetup` (and optionally `$/sessionSetupContinue`) authentication.
-    /// `def` carries audit/secret-field metadata (setup is always audited, redacted).
+    /// `def` carries audit/secret-field metadata (setup is always audited, redacted). The handler
+    /// finishes synchronously, returning `(lifecycle, reply)`. For a handler that may **take over**
+    /// the connection (passthrough), use [`session_setup_takeover`](Self::session_setup_takeover).
     pub fn session_setup<F, A, R>(mut self, def: MethodDef, handler: F) -> Self
     where
         F: Fn(A, &Session<S>) -> Result<(SessionLifecycle, R), JsonRpcError>
@@ -456,12 +485,32 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     {
         self.setup = Some(SetupSlot {
             meta: def.into_meta(MessageDirection::ClientServer),
+            handler: Arc::new(ClosureCommit { f: handler, _p: PhantomData }),
+        });
+        self
+    }
+
+    /// Enable `$/sessionSetup` with a handler that may **take over** the connection. The handler
+    /// returns a [`SetupOutcome`]: `Commit(lifecycle, reply)` for the synchronous case, or
+    /// `Takeover(handoff)` to hand the connection fd to an out-of-band authenticator (the
+    /// passthrough broker). It receives the session as an `&Arc` so a takeover closure can capture
+    /// it to commit the result once the fd is available. The synchronous
+    /// [`session_setup`](Self::session_setup) covers the common case.
+    pub fn session_setup_takeover<F, A, R>(mut self, def: MethodDef, handler: F) -> Self
+    where
+        F: Fn(A, &Arc<Session<S>>) -> Result<SetupOutcome<R>, JsonRpcError> + Send + Sync + 'static,
+        A: DeserializeOwned + Send + 'static,
+        R: Serialize + 'static,
+    {
+        self.setup = Some(SetupSlot {
+            meta: def.into_meta(MessageDirection::ClientServer),
             handler: Arc::new(ClosureSetup { f: handler, _p: PhantomData }),
         });
         self
     }
 
-    /// Set the multi-step `$/sessionSetupContinue` handler.
+    /// Set the multi-step `$/sessionSetupContinue` handler. A continue always finishes
+    /// synchronously (no takeover), so it returns `(lifecycle, reply)`.
     pub fn session_setup_continue<F, A, R>(mut self, def: MethodDef, handler: F) -> Self
     where
         F: Fn(A, &Session<S>) -> Result<(SessionLifecycle, R), JsonRpcError>
@@ -473,7 +522,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     {
         self.setup_continue = Some(SetupSlot {
             meta: def.into_meta(MessageDirection::ClientServer),
-            handler: Arc::new(ClosureSetup { f: handler, _p: PhantomData }),
+            handler: Arc::new(ClosureCommit { f: handler, _p: PhantomData }),
         });
         self
     }
@@ -1171,40 +1220,97 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // Setup bypasses authz; crypto is blocking → the blocking pool.
         let outcome = tokio::task::spawn_blocking(move || handler.handle(params.as_deref(), &session2)).await;
 
-        let bytes = match outcome {
-            Ok(Ok((new_lifecycle, raw))) => {
+        // The error / panic paths reply + audit synchronously; a successful outcome is either a
+        // synchronous commit or a connection takeover (passthrough). Setup is always audited.
+        let raw_outcome = match outcome {
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                let bytes = envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref());
+                self.audit_setup_bytes(&parsed.method, rid.as_deref(), snapshot, &slot.meta, &bytes, session);
+                return finish(note, bytes);
+            }
+            Err(_panicked) => {
+                let bytes =
+                    envelope::error(rid.as_deref(), ErrorCode::InternalError.code(), "Internal error", None);
+                self.audit_setup_bytes(&parsed.method, rid.as_deref(), snapshot, &slot.meta, &bytes, session);
+                return finish(note, bytes);
+            }
+        };
+
+        match raw_outcome {
+            RawSetupOutcome::Commit(new_lifecycle, raw) => {
                 session.set_lifecycle(new_lifecycle);
                 if let Ok(v) = serde_json::from_str::<Value>(raw.get()) {
                     session.set_external(v);
                 }
-                envelope::success(rid.as_deref(), &raw)
+                let bytes = envelope::success(rid.as_deref(), &raw);
+                self.audit_setup_bytes(&parsed.method, rid.as_deref(), snapshot, &slot.meta, &bytes, session);
+                finish(note, bytes)
             }
-            Ok(Err(e)) => envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref()),
-            Err(_panicked) => envelope::error(
-                rid.as_deref(),
-                ErrorCode::InternalError.code(),
-                "Internal error",
-                None,
-            ),
-        };
-
-        // Setup is always audited (credentials redacted).
-        if let Some(sink) = &self.audit_sink {
-            let mut req = JsonRpcRequest {
-                method: parsed.method.clone(),
-                id: rid.clone(),
-                params: snapshot,
-                roles: Vec::new(),
-            };
-            redact_value(&mut req.params, &slot.meta.secret_fields);
-            let mut resp_value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
-            if let Some(result) = resp_value.get_mut("result") {
-                redact_value(result, &slot.meta.secret_fields);
+            // Passthrough: defer the lifecycle commit + audit into a directive the server runs once
+            // it has gated the connection and supplied the fd (the broker replies to the client).
+            RawSetupOutcome::Takeover(handoff) => {
+                let session = session.clone();
+                let audit_sink = self.audit_sink.clone();
+                let method = parsed.method.clone();
+                let rid2 = rid.clone();
+                let secret_fields = slot.meta.secret_fields.clone();
+                let audit_message = slot.meta.audit_message.clone();
+                let af_unix = handoff.af_unix;
+                let complete = handoff.complete;
+                let run = Box::new(move |ft: &dyn FileTransfer| {
+                    let resp_value = match (complete)(ft) {
+                        Ok((new_lifecycle, raw)) => {
+                            session.set_lifecycle(new_lifecycle);
+                            let v: Value = serde_json::from_str(raw.get()).unwrap_or(Value::Null);
+                            if !v.is_null() {
+                                session.set_external(v.clone());
+                            }
+                            json!({ "result": v })
+                        }
+                        Err(e) => json!({ "error": { "code": e.code, "message": e.message } }),
+                    };
+                    if let Some(sink) = &audit_sink {
+                        audit_setup(
+                            sink.as_ref(),
+                            method,
+                            rid2,
+                            snapshot,
+                            &secret_fields,
+                            audit_message.as_deref(),
+                            resp_value,
+                            &session,
+                        );
+                    }
+                });
+                Dispatched::Passthrough(SetupTakeover::new(rid, af_unix, run))
             }
-            sink.audit(&req, &resp_value, session, slot.meta.audit_message.as_deref());
         }
+    }
 
-        finish(note, bytes)
+    /// Audit a setup call from its final reply bytes (the synchronous paths).
+    fn audit_setup_bytes(
+        &self,
+        method: &str,
+        rid: Option<&str>,
+        snapshot: Value,
+        meta: &MethodMeta,
+        bytes: &[u8],
+        session: &Session<S>,
+    ) {
+        if let Some(sink) = &self.audit_sink {
+            let resp_value: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
+            audit_setup(
+                sink.as_ref(),
+                method.to_string(),
+                rid.map(str::to_string),
+                snapshot,
+                &meta.secret_fields,
+                meta.audit_message.as_deref(),
+                resp_value,
+                session,
+            );
+        }
     }
 
     fn handle_close(&self, parsed: ParsedRequest, session: &Arc<Session<S>>) -> Dispatched {
@@ -1397,6 +1503,29 @@ fn join_audit_message(static_msg: Option<&str>, detail: Option<&str>) -> Option<
         (None, Some(d)) => Some(d.to_string()),
         (None, None) => None,
     }
+}
+
+/// Emit one `$/sessionSetup` / `$/sessionSetupContinue` audit record (credentials redacted). A free
+/// function (not a method) so the passthrough takeover closure — which runs later and can't borrow
+/// the protocol — can call it with cloned bits. `resp_value` is the response envelope value
+/// (`{"result": …}` or `{"error": …}`).
+#[allow(clippy::too_many_arguments)]
+fn audit_setup<S>(
+    sink: &dyn AuditSink<S>,
+    method: String,
+    rid: Option<String>,
+    mut snapshot: Value,
+    secret_fields: &[String],
+    audit_message: Option<&str>,
+    mut resp_value: Value,
+    session: &Session<S>,
+) {
+    redact_value(&mut snapshot, secret_fields);
+    let req = JsonRpcRequest { method, id: rid, params: snapshot, roles: Vec::new() };
+    if let Some(result) = resp_value.get_mut("result") {
+        redact_value(result, secret_fields);
+    }
+    sink.audit(&req, &resp_value, session, audit_message);
 }
 
 fn redact_value(value: &mut Value, secret_fields: &[String]) {

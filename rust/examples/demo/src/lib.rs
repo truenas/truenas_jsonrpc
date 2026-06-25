@@ -75,7 +75,9 @@ mod tests {
         match p.dispatch(wire.to_string().as_bytes(), &s).await {
             Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
             Dispatched::Nothing => panic!("expected a reply"),
-            Dispatched::Transfer(_) => unreachable!("the demo has no transfer methods"),
+            Dispatched::Transfer(_) | Dispatched::Passthrough(_) => {
+                unreachable!("the demo has no transfer / passthrough methods")
+            }
         }
     }
 

@@ -25,11 +25,16 @@ mod protocol;
 use std::os::fd::RawFd;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use truenas_jsonrpc::{FileTransfer, JsonRpcError, Session, SessionId, SessionLifecycle, SetupHandoff};
 
 use crate::channel::{Capability, Channel};
 use crate::mechanism::Mechanism;
 use crate::outcome::{AuthProgress, Outcome, RejectKind};
 use crate::stack::AuthStackBuilder;
+use crate::state::AuthSession;
+use crate::wire::{AuthResponse, AuthResult};
 
 pub use self::broker::BrokerServer;
 pub use self::context::{BrokerContext, BrokerVerdict, PeerCred};
@@ -77,10 +82,11 @@ impl Mechanism for Passthrough {
     }
 
     fn step(&self, _payload: &serde_json::Value, _channel: &Channel, _progress: Option<AuthProgress>) -> Outcome {
-        // The hand-off needs the connection's plaintext fd *with the reader paused* — see the
-        // module docs. The dispatch seam can't pause the reader from inside a `Mechanism` (it is
-        // concurrently draining the same fd), so refuse here; the takeover seam calls `handoff`.
-        Outcome::Reject(RejectKind::AuthErr)
+        // Passthrough can't finish inside `step` — it needs the connection's plaintext fd with the
+        // reader *paused* (the broker reads/writes that fd). So signal a takeover: the auth stack
+        // turns this into a `SetupOutcome::Takeover` the server runs once it has gated the
+        // connection and can supply the fd (see [`takeover`]).
+        Outcome::Passthrough(self.broker.clone())
     }
 }
 
@@ -90,4 +96,28 @@ impl AuthStackBuilder {
     pub fn passthrough(self, broker: impl Into<PathBuf>) -> Self {
         self.mechanism(PASSTHROUGH_TAG, Passthrough::new(broker))
     }
+}
+
+/// Build the [`SetupHandoff`] for a passthrough takeover. When the server gates the connection and
+/// supplies the fd, this hands it (plus the channel-derived [`BrokerContext`]) to the broker at
+/// `broker`, then commits the broker's verdict onto the session exactly as a synchronous mechanism
+/// would (lifecycle + identity). Called by the auth stack when a mechanism returns
+/// [`Outcome::Passthrough`].
+pub(crate) fn takeover(
+    broker: PathBuf,
+    channel: &Channel,
+    session: Arc<Session<AuthSession>>,
+    session_id: SessionId,
+) -> SetupHandoff {
+    let ctx = BrokerContext::from_channel(channel);
+    SetupHandoff::new(true, move |ft: &dyn FileTransfer| {
+        let outcome = Passthrough::new(&broker).handoff(ft.as_raw_fd(), &ctx);
+        let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
+            Some(auth) => crate::stack::commit(auth, outcome, session_id),
+            None => (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }),
+        });
+        let raw = serde_json::value::to_raw_value(&result)
+            .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+        Ok((lifecycle, raw))
+    })
 }

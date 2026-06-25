@@ -15,7 +15,9 @@ use std::sync::Arc;
 use std::thread;
 
 use serde_json::{json, Value};
-use truenas_jsonrpc::{JsonRpcProtocol, NullOutbound, Session, SessionLifecycle};
+use truenas_jsonrpc::{
+    Dispatched, FileTransfer, JsonRpcProtocol, NullOutbound, Session, SessionLifecycle,
+};
 use truenas_jsonrpc_auth::{
     install, AuthSession, AuthStack, BrokerContext, BrokerServer, BrokerVerdict, Channel, Outcome,
     Passthrough, RejectKind,
@@ -23,6 +25,14 @@ use truenas_jsonrpc_auth::{
 use truenas_jsonrpc_server::{Peer, Ucred};
 
 const ID: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+/// Stand-in for the connection's fd that the server would supply to the takeover.
+struct FakeFt(i32);
+impl FileTransfer for FakeFt {
+    fn as_raw_fd(&self) -> i32 {
+        self.0
+    }
+}
 
 fn sock_path(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("tn-passthrough-{}-{tag}.sock", std::process::id()));
@@ -154,16 +164,55 @@ fn rtype(v: &Value) -> &str {
     v["result"]["response"]["response_type"].as_str().unwrap()
 }
 
-/// AF_UNIX satisfies the `Local` capability, so dispatch reaches `step` — which refuses (`AUTH_ERR`)
-/// until the connection-takeover seam can call `handoff`.
+/// The full takeover, end to end: over AF_UNIX, `$/sessionSetup{PASSTHROUGH}` yields a
+/// `Dispatched::Passthrough` directive (the session uncommitted); running it (as the server would,
+/// with the connection fd) hands the fd to a live broker, which talks to the client over it and
+/// returns a verdict — and the session is then committed `Established` with the broker's identity.
 #[tokio::test]
-async fn passthrough_over_unix_reaches_step_and_is_stubbed() {
-    let path = sock_path("unused");
+async fn passthrough_over_unix_takes_over_and_authenticates() {
+    let path = sock_path("e2e");
+    let listener = UnixListener::bind(&path).unwrap();
+    // The broker authenticates by the peer creds in the context, and proves it holds the real
+    // client fd by writing a line the client end will read.
+    let broker = thread::spawn(move || {
+        let server = BrokerServer::new(|ctx: BrokerContext, fd| {
+            let mut client = UnixStream::from(fd);
+            client.write_all(b"hello-from-broker").unwrap();
+            BrokerVerdict::Authenticated { identity: json!({ "uid": ctx.peercred.unwrap().uid }), user_info: None }
+        });
+        let (conn, _) = listener.accept().unwrap();
+        server.serve_conn(&conn).unwrap();
+    });
+
     let proto = proto(&path);
-    let s = session(&proto, &Peer::unix(Some(Ucred { pid: 1, uid: 0, gid: 0 })));
-    let r = setup(&proto, &s).await;
-    assert_eq!(rtype(&r), "AUTH_ERR");
+    let s = session(&proto, &Peer::unix(Some(Ucred { pid: 1, uid: 1000, gid: 1000 })));
+
+    // dispatch → a passthrough takeover directive; nothing committed yet.
+    let wire = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "method": "$/sessionSetup", "id": ID,
+        "params": { "mechanism": { "mechanism": "PASSTHROUGH" } },
+    }))
+    .unwrap();
+    let Dispatched::Passthrough(takeover) = proto.dispatch(&wire, &s).await else {
+        panic!("expected a passthrough takeover directive");
+    };
+    assert!(takeover.requires_af_unix());
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
+
+    // The server runs the takeover with the connection fd; here a socketpair stands in for the
+    // client connection (we pass one end; the other plays the client).
+    let (conn_fd, mut client_end) = UnixStream::pair().unwrap();
+    takeover.run(&FakeFt(conn_fd.as_raw_fd()));
+
+    // The broker held the real fd (the client end received its line), and the session committed.
+    let mut buf = [0u8; 17];
+    client_end.read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, b"hello-from-broker");
+    assert_eq!(s.lifecycle(), SessionLifecycle::Established);
+    assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "uid": 1000 })));
+
+    broker.join().unwrap();
+    let _ = std::fs::remove_file(&path);
 }
 
 /// Over TCP the `Local` capability is absent, so the gate refuses (`DENIED`) before `step` runs —

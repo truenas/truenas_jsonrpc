@@ -333,7 +333,7 @@ def dispatch(name, params, session):
         match proto.dispatch(wire.as_bytes(), &s).await {
             Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
             Dispatched::Nothing => panic!("expected a reply"),
-            Dispatched::Transfer(_) => panic!("unexpected transfer"),
+            Dispatched::Transfer(_) | Dispatched::Passthrough(_) => panic!("unexpected transfer/passthrough"),
         }
     }
 

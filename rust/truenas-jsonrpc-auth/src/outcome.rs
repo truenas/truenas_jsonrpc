@@ -38,6 +38,12 @@ pub enum Outcome {
     },
     /// Authentication failed.
     Reject(RejectKind),
+    /// Take over the connection: hand the client fd to the passthrough broker at this AF_UNIX path,
+    /// which conducts the handshake and returns the verdict. The auth stack turns this into a
+    /// connection takeover ([`SetupOutcome::Takeover`](truenas_jsonrpc::SetupOutcome)) rather than a
+    /// synchronous commit. Produced only by the passthrough mechanism.
+    #[cfg(feature = "passthrough")]
+    Passthrough(std::path::PathBuf),
 }
 
 impl Outcome {

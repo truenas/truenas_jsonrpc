@@ -43,7 +43,9 @@ keyring = ["scram", "dep:truenas-keyring"]
 passthrough = ["truenas-jsonrpc-server/passthrough"]
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["rt", "macros"] }
+# `net`/`io-util`/`time`/`rt-multi-thread` drive the full passthrough integration test (a real
+# `JsonRpcServer` over AF_UNIX with an async client + a timeout).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
 
 # Pure-Rust state machine + (later) OpenSSL's safe API — no syscalls/FFI of its own, so it keeps
 # the workspace's `unsafe_code = "forbid"`. (The keyring / pwenc syscalls live in their own crates.)

@@ -26,6 +26,7 @@ mod protocol;
 mod pydispatch;
 mod request;
 mod session;
+mod setup;
 mod transfer;
 mod types;
 
@@ -39,6 +40,7 @@ pub use protocol::{
     AuditSink, Authorizer, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
     JsonRpcProtocolBuilder, ServerInfoHandler,
 };
+pub use setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 pub use transfer::{FileTransfer, Transfer, TransferDirection};
 pub use pydispatch::{PyDispatcher, PyOutcome, PyResult};
 pub use request::RequestCtx;

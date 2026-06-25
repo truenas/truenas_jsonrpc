@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use truenas_jsonrpc::{
     JsonRpcError, JsonRpcProtocolBuilder, MethodDef, Session, SessionId, SessionLifecycle,
+    SetupOutcome,
 };
 use truenas_jsonrpc_server::Transport;
 
@@ -71,21 +72,51 @@ impl AuthStack {
         handler.step(mech, channel, progress)
     }
 
-    /// `$/sessionSetup` handler (valid only at `None`, enforced by the core).
+    /// `$/sessionSetup` handler (valid only at `None`, enforced by the core). Most mechanisms
+    /// commit synchronously; passthrough instead returns a [`SetupOutcome::Takeover`] so the server
+    /// can hand the connection fd to the broker.
     fn on_setup(
         &self,
         args: SetupArgs,
-        session: &Session<AuthSession>,
-    ) -> Result<(SessionLifecycle, AuthResult), JsonRpcError> {
+        session: &Arc<Session<AuthSession>>,
+    ) -> Result<SetupOutcome<AuthResult>, JsonRpcError> {
         let session_id = session.id();
-        session.with_internal_mut(|slot| {
-            let auth = slot.as_mut().ok_or_else(missing_state)?;
-            let outcome = match &args.mechanism {
-                None => self.peercred_default(&auth.channel),
-                Some(mech) => self.dispatch(mech, &auth.channel, None),
-            };
-            Ok(commit(auth, outcome, session_id))
-        })
+        // The channel is immutable; clone it out so the mechanism (and any takeover closure) can use
+        // it without holding the session lock.
+        let channel = session
+            .with_internal(|slot| slot.map(|a| a.channel.clone()))
+            .ok_or_else(missing_state)?;
+        let outcome = match &args.mechanism {
+            None => self.peercred_default(&channel),
+            Some(mech) => self.dispatch(mech, &channel, None),
+        };
+        Ok(self.build_setup_outcome(outcome, session, session_id, &channel))
+    }
+
+    /// Map a mechanism [`Outcome`] onto the core's [`SetupOutcome`]: a passthrough becomes a
+    /// connection takeover; everything else commits synchronously in place.
+    fn build_setup_outcome(
+        &self,
+        outcome: Outcome,
+        session: &Arc<Session<AuthSession>>,
+        session_id: SessionId,
+        channel: &Channel,
+    ) -> SetupOutcome<AuthResult> {
+        #[cfg(feature = "passthrough")]
+        if let Outcome::Passthrough(broker) = outcome {
+            return SetupOutcome::Takeover(crate::passthrough::takeover(
+                broker,
+                channel,
+                session.clone(),
+                session_id,
+            ));
+        }
+        let _ = channel;
+        let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
+            Some(auth) => commit(auth, outcome, session_id),
+            None => (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }),
+        });
+        SetupOutcome::Commit(lifecycle, result)
     }
 
     /// `$/sessionSetupContinue` handler (valid only at `Init`, enforced by the core).
@@ -152,9 +183,9 @@ pub fn install(
     let setup = stack.clone();
     let cont = stack;
     builder
-        .session_setup(
+        .session_setup_takeover(
             MethodDef::new("$/sessionSetup").secret_fields(["mechanism"]),
-            move |args: SetupArgs, session: &Session<AuthSession>| setup.on_setup(args, session),
+            move |args: SetupArgs, session: &Arc<Session<AuthSession>>| setup.on_setup(args, session),
         )
         .session_setup_continue(
             MethodDef::new("$/sessionSetupContinue").secret_fields(["mechanism"]),
@@ -174,8 +205,9 @@ fn missing_state() -> JsonRpcError {
 }
 
 /// Map a mechanism [`Outcome`] onto the `(lifecycle, reply)` the core commits, advancing the
-/// session's auth state in place. `session_id` is returned to the client on success.
-fn commit(
+/// session's auth state in place. `session_id` is returned to the client on success. (Shared with
+/// the passthrough takeover closure, which commits the broker's verdict the same way.)
+pub(crate) fn commit(
     auth: &mut AuthSession,
     outcome: Outcome,
     session_id: SessionId,
@@ -194,6 +226,13 @@ fn commit(
         Outcome::Reject(kind) => {
             auth.state = AuthSessionState::Unauthenticated;
             (SessionLifecycle::None, AuthResult { response: kind.into() })
+        }
+        // Passthrough is intercepted before `commit` (it becomes a takeover, not a sync commit);
+        // this arm only keeps the match exhaustive.
+        #[cfg(feature = "passthrough")]
+        Outcome::Passthrough(_) => {
+            auth.state = AuthSessionState::Unauthenticated;
+            (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr })
         }
     }
 }
