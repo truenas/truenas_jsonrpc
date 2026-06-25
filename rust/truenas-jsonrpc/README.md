@@ -24,10 +24,14 @@ reply bytes (or a directive); it owns no socket. For a runnable transport see
   `roles`, `doc`, `secret_fields`, and `xdr(proc_id)` (also expose over the binary wire).
 - Control messages: `$/serverInfo`, `$/sessionSetup` (+`Continue`), `$/sessionClose`,
   `$/cancelRequest`, `$/describe`.
+- Authorization is a native role gate, not a callback: `Roles` interns role *names* to a
+  `RoleMask` — a `u64` bitset, so **at most 64 roles**. A method's `roles` become its required
+  mask, a session's granted mask is set once at `sessionSetup`, and dispatch checks
+  `required ⊆ granted` (subset / AND semantics). `RoleMask::FULL_ADMIN` (all-ones) satisfies
+  every gate and may cancel anything; resource / parameter checks are the handler's job.
 - Wires: JSON-RPC (text) and XDR (binary, selected by a leading TXDR magic).
-- Seams: `Authorizer`, `AuditSink`, `Canceller`, `ServerInfoHandler`, `Outbound` (the
-  pub/sub / `$/progress` back-channel), `PyDispatcher` (runs `python:true` bodies),
-  `Secret<T>` (audit redaction).
+- Seams: `AuditSink`, `Canceller`, `ServerInfoHandler`, `Outbound` (the pub/sub / `$/progress`
+  back-channel), `PyDispatcher` (runs `python:true` bodies), `Secret<T>` (audit redaction).
 
 ## Dependencies
 
