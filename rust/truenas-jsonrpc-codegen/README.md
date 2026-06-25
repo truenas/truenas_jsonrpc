@@ -89,7 +89,7 @@ missing/mistyped handler is a **compile error**, the Rust analogue of Zig's `H.<
 
 ```rust
 use std::sync::Arc;
-use truenas_jsonrpc::{JsonRpcProtocol, RequestCtx, JsonRpcError};
+use truenas_jsonrpc::{JsonRpcProtocol, RequestCtx, JsonRpcError, Roles};
 use server_gen::{register, Handlers, LoginArgs, LoginResult};
 
 struct MyHandlers;
@@ -101,10 +101,13 @@ impl Handlers<MyState> for MyHandlers {
 }
 
 fn build() -> JsonRpcProtocol<MyState> {
-    register(JsonRpcProtocol::<MyState>::builder("myservice", "1.0.0"), Arc::new(MyHandlers))
-        .expect("register")
-        .authorizer(/* ... */)
-        .build()
+    // Register the role taxonomy *before* the methods: `register` interns each method's declared
+    // `roles` (json-idl) into this registry, so authorization is a native gate (`required ⊆
+    // granted`). Omit `.roles(...)` if no method declares any. The session's granted mask is set
+    // per connection at `$/sessionSetup` by the auth layer (`truenas-jsonrpc-auth`).
+    let builder = JsonRpcProtocol::<MyState>::builder("myservice", "1.0.0")
+        .roles(Roles::new(["READONLY", "SHARING_WRITE"]));
+    register(builder, Arc::new(MyHandlers)).expect("register").build()
 }
 ```
 
