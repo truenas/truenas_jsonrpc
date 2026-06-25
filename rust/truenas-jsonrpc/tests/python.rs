@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::value::to_raw_value;
 use serde_json::Value;
 use truenas_jsonrpc::{
-    AuthorizationResponse, JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound,
-    PyOutcome, PyResult, Session,
+    JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, PyOutcome, PyResult,
+    Roles, Session,
 };
 
 const ID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -94,12 +94,12 @@ async fn python_without_dispatcher_is_internal_error() {
 
 #[tokio::test]
 async fn python_respects_authorization() {
-    // A denying authorizer blocks the body (the dispatcher is never consulted).
+    // A method whose required role the session lacks is gated (the dispatcher is never consulted).
     let proto = JsonRpcProtocol::<()>::builder("t", "1")
-        .python_method(MethodDef::new("py.echo"))
+        .roles(Roles::new(["AUTH"]))
+        .python_method(MethodDef::new("py.echo").roles(["AUTH"]))
         .unwrap()
         .python_dispatcher(mock)
-        .authorizer(|_r: &JsonRpcRequest, _s: &Session<()>, _t| AuthorizationResponse::deny("nope"))
         .build();
     let wire = format!(r#"{{"jsonrpc":"2.0","method":"py.echo","id":"{ID}","params":{{}}}}"#);
     let v = dispatch(&proto, &wire).await;

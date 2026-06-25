@@ -11,9 +11,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    AsyncJsonRpcMethod, AuthorizationResponse, CancelTarget, Clock, Dispatched, Error, ErrorCode,
-    IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound,
-    RequestCtx, Session, SessionId, SessionLifecycle,
+    AsyncJsonRpcMethod, Clock, Dispatched, Error, ErrorCode, IdGen, JsonRpcError, JsonRpcMethod,
+    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, RoleMask, Roles, Session,
+    SessionId, SessionLifecycle,
 };
 
 const ID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -149,10 +149,12 @@ async fn method_def_setters_are_all_usable() {
         .doc("the full method")
         .secret_fields(["secret"]);
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
+        .roles(Roles::new(["admin", "ops"]))
         .method(JsonRpcMethod::new(def, |a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(a)))
         .unwrap()
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
+    s.set_roles(RoleMask::FULL_ADMIN); // satisfies the method's ["admin", "ops"] requirement
     // cancellable + id → run_method registers/removes the in-flight entry.
     let resp = call(&proto, &s, &req("full", Some(json!({ "secret": "x" })), Some(ID))).await.unwrap();
     assert_eq!(resp["result"]["secret"], "x");
@@ -383,42 +385,74 @@ async fn sync_handler_panic_is_internal_error() {
 // --- authz + audit branches --------------------------------------------------
 
 #[tokio::test]
-async fn authz_empty_message_defaults_and_data_attaches() {
+async fn unauthorized_call_is_not_authorized() {
+    // A method whose required role the session lacks → NOT_AUTHORIZED (the native role gate).
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("m"), |_a: Value, _c: &RequestCtx<()>| {
+        .roles(Roles::new(["AUTH"]))
+        .method(JsonRpcMethod::new(MethodDef::new("m").roles(["AUTH"]), |_a: Value, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .authorizer(|_req: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>| AuthorizationResponse {
-            authorized: false,
-            message: String::new(),
-            data: Some(json!({ "reason": "x" })),
-        })
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     let resp = call(&proto, &s, &req("m", Some(json!({})), Some(ID))).await.unwrap();
     assert_eq!(resp["error"]["code"], -32000);
     assert_eq!(resp["error"]["message"], "Not authorized");
-    assert_eq!(resp["error"]["data"], json!({ "reason": "x" }));
 }
 
 #[tokio::test]
-async fn authorized_request_without_params_snapshots_empty_object() {
+async fn audited_request_without_params_snapshots_empty_object() {
+    // The params snapshot (now feeding only audit) reflects no-params as `{}`, not null.
     let seen = Arc::new(Mutex::new(Value::Null));
     let sp = seen.clone();
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("noargs"), |_a: Value, _c: &RequestCtx<()>| {
+        .method(JsonRpcMethod::new(MethodDef::new("noargs").audit(), |_a: Value, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .authorizer(move |req: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>| {
+        .audit_sink(move |req: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, _m: Option<&str>| {
             *sp.lock().unwrap() = req.params.clone();
-            AuthorizationResponse::allow()
         })
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     call(&proto, &s, &req("noargs", None, Some(ID))).await.unwrap();
     assert_eq!(*seen.lock().unwrap(), json!({}));
+}
+
+#[test]
+fn role_mask_and_registry_basics() {
+    assert!(RoleMask::NONE.is_empty());
+    assert!(!RoleMask::FULL_ADMIN.is_empty());
+    let roles = Roles::new(["a", "b", "c"]);
+    let a = roles.get("a").unwrap();
+    let b = roles.get("b").unwrap();
+    let ab = roles.mask(["a", "b"]).unwrap();
+    assert!(ab.satisfies(a)); // {a,b} ⊇ {a}
+    assert!(!a.satisfies(ab)); // {a} ⊉ {a,b}
+    assert!(a.satisfies(RoleMask::NONE)); // empty requirement is always satisfied
+    assert_eq!(a.union(b), ab); // union (hierarchy expansion)
+    assert!(roles.get("z").is_none()); // unknown name
+    assert_eq!(roles.mask(["a", "z"]).unwrap_err(), "z"); // unknown name → Err
+}
+
+#[test]
+fn method_with_roles_but_no_registry_is_a_build_error() {
+    let r = JsonRpcProtocol::<()>::builder("p", "1").method(JsonRpcMethod::new(
+        MethodDef::new("m").roles(["x"]),
+        |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+    ));
+    assert!(matches!(r, Err(Error::Config(_))), "expected a Config build error");
+}
+
+#[test]
+fn method_with_unregistered_role_is_a_build_error() {
+    let r = JsonRpcProtocol::<()>::builder("p", "1")
+        .roles(Roles::new(["known"]))
+        .method(JsonRpcMethod::new(
+            MethodDef::new("m").roles(["unknown"]),
+            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+        ));
+    assert!(matches!(r, Err(Error::Config(_))), "expected a Config build error");
 }
 
 #[tokio::test]
@@ -491,10 +525,22 @@ async fn cancel_missing_target_id_is_invalid_params() {
 
 #[tokio::test]
 async fn cancel_unknown_target_is_request_failed() {
+    // A FULL_ADMIN passes the owner-or-admin gate and reaches the existence check → not-found.
+    let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
+    let s = proto.new_session(Some(()), Arc::new(NullOutbound));
+    s.set_roles(RoleMask::FULL_ADMIN);
+    let r = call(&proto, &s, &req("$/cancelRequest", Some(json!({ "target_id": ID2 })), Some(ID))).await.unwrap();
+    assert_eq!(r["error"]["code"], -32803);
+}
+
+#[tokio::test]
+async fn cancel_unknown_target_by_non_admin_is_not_authorized() {
+    // A non-owner/non-admin is denied *before* the existence check (no existence leak).
     let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     let r = call(&proto, &s, &req("$/cancelRequest", Some(json!({ "target_id": ID2 })), Some(ID))).await.unwrap();
-    assert_eq!(r["error"]["code"], -32803);
+    assert_eq!(r["error"]["code"], -32000);
+    assert_eq!(r["error"]["message"], "Not authorized");
 }
 
 /// Spawn a cancellable request whose handler parks until `proceed`, returning handles to
@@ -503,11 +549,10 @@ fn parking_proto(
     started: Arc<AtomicBool>,
     proceed: Arc<AtomicBool>,
     canceller_called: Arc<AtomicBool>,
-    deny_cancel: bool,
 ) -> Arc<JsonRpcProtocol<()>> {
     let (st, pr) = (started.clone(), proceed.clone());
     let cc = canceller_called;
-    let mut b = JsonRpcProtocol::<()>::builder("p", "1")
+    let b = JsonRpcProtocol::<()>::builder("p", "1")
         .method(JsonRpcMethod::new(MethodDef::new("slow").cancellable(), move |_a: Value, cx: &RequestCtx<()>| {
             st.store(true, Ordering::SeqCst);
             while !pr.load(Ordering::SeqCst) {
@@ -518,15 +563,6 @@ fn parking_proto(
         }))
         .unwrap()
         .cancellation(move |_req: &JsonRpcRequest, _s: &Session<()>| cc.store(true, Ordering::SeqCst));
-    if deny_cancel {
-        b = b.authorizer(|_req: &JsonRpcRequest, _s: &Session<()>, target: Option<CancelTarget>| {
-            if target.is_some() {
-                AuthorizationResponse::deny("no cancel for you")
-            } else {
-                AuthorizationResponse::allow()
-            }
-        });
-    }
     Arc::new(b.build())
 }
 
@@ -535,7 +571,7 @@ async fn cancel_in_flight_request_sets_flag_and_calls_canceller() {
     let started = Arc::new(AtomicBool::new(false));
     let proceed = Arc::new(AtomicBool::new(false));
     let canceller = Arc::new(AtomicBool::new(false));
-    let proto = parking_proto(started.clone(), proceed.clone(), canceller.clone(), false);
+    let proto = parking_proto(started.clone(), proceed.clone(), canceller.clone());
     let session = proto.new_session(Some(()), Arc::new(NullOutbound));
 
     let work = {
@@ -558,25 +594,27 @@ async fn cancel_in_flight_request_sets_flag_and_calls_canceller() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn cancel_denied_by_authorizer() {
+async fn cancel_by_a_different_non_admin_session_is_denied() {
     let started = Arc::new(AtomicBool::new(false));
     let proceed = Arc::new(AtomicBool::new(false));
     let canceller = Arc::new(AtomicBool::new(false));
-    let proto = parking_proto(started.clone(), proceed.clone(), canceller.clone(), true);
-    let session = proto.new_session(Some(()), Arc::new(NullOutbound));
+    let proto = parking_proto(started.clone(), proceed.clone(), canceller.clone());
+    let owner = proto.new_session(Some(()), Arc::new(NullOutbound));
+    let other = proto.new_session(Some(()), Arc::new(NullOutbound)); // different session, no roles
 
     let work = {
-        let (p, s, wire) = (proto.clone(), session.clone(), req("slow", Some(json!({})), Some(ID)));
+        let (p, s, wire) = (proto.clone(), owner.clone(), req("slow", Some(json!({})), Some(ID)));
         tokio::spawn(async move { p.dispatch(&wire, &s).await.into_bytes() })
     };
     while !started.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    let cancel = call(&proto, &session, &req("$/cancelRequest", Some(json!({ "target_id": ID })), Some(ID2)))
+    // `other` is neither the owner nor FULL_ADMIN → it cannot cancel the owner's request.
+    let cancel = call(&proto, &other, &req("$/cancelRequest", Some(json!({ "target_id": ID })), Some(ID2)))
         .await
         .unwrap();
     assert_eq!(cancel["error"]["code"], -32000);
-    assert_eq!(cancel["error"]["message"], "no cancel for you");
+    assert_eq!(cancel["error"]["message"], "Not authorized");
     assert!(!canceller.load(Ordering::SeqCst));
 
     proceed.store(true, Ordering::SeqCst);
@@ -588,27 +626,24 @@ async fn cancel_denied_by_authorizer() {
 #[tokio::test]
 async fn async_pipeline_decode_and_authz_branches() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .async_method(AsyncJsonRpcMethod::new(MethodDef::new("aecho"), |a: EchoArgs, _cx: RequestCtx<()>| async move {
+        .roles(Roles::new(["AUTH"]))
+        .async_method(AsyncJsonRpcMethod::new(MethodDef::new("aecho").roles(["AUTH"]), |a: EchoArgs, _cx: RequestCtx<()>| async move {
             Ok::<_, JsonRpcError>(EchoResult { echo: a.msg })
         }))
         .unwrap()
-        .authorizer(|req: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>| {
-            if req.params.get("msg").and_then(Value::as_str) == Some("deny") {
-                AuthorizationResponse::deny("nope")
-            } else {
-                AuthorizationResponse::allow()
-            }
-        })
         .build();
+    // A session without the required role.
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    // bad params → INVALID_PARAMS (async decode-error branch)
+    // bad params → INVALID_PARAMS (async decode-error branch, before the gate)
     let bad = call(&proto, &s, &req("aecho", Some(json!({})), Some(ID))).await.unwrap();
     assert_eq!(bad["error"]["code"], -32602);
-    // good params, denied → NOT_AUTHORIZED (async authz-denied branch)
-    let denied = call(&proto, &s, &req("aecho", Some(json!({ "msg": "deny" })), Some(ID))).await.unwrap();
+    // good params but the role isn't granted → NOT_AUTHORIZED (async authz-denied branch)
+    let denied = call(&proto, &s, &req("aecho", Some(json!({ "msg": "x" })), Some(ID))).await.unwrap();
     assert_eq!(denied["error"]["code"], -32000);
-    // allowed → result
-    let ok = call(&proto, &s, &req("aecho", Some(json!({ "msg": "hi" })), Some(ID))).await.unwrap();
+    // a FULL_ADMIN session → allowed → result (async run branch)
+    let admin = proto.new_session(Some(()), Arc::new(NullOutbound));
+    admin.set_roles(RoleMask::FULL_ADMIN);
+    let ok = call(&proto, &admin, &req("aecho", Some(json!({ "msg": "hi" })), Some(ID))).await.unwrap();
     assert_eq!(ok["result"]["echo"], "hi");
 }
 

@@ -26,10 +26,11 @@ use crate::method::{
 };
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::RequestCtx;
+use crate::role::{RoleMask, Roles};
 use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SystemClock, UuidGen};
 use crate::setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 use crate::transfer::{FileTransfer, Transfer, TransferDirection};
-use crate::types::{AuthorizationResponse, JsonRpcRequest, MessageDirection, SessionLifecycle};
+use crate::types::{JsonRpcRequest, MessageDirection, SessionLifecycle};
 use truenas_filter::{CompiledFilters, CompiledOptions, Filtered};
 
 const CANCEL_METHOD: &str = "$/cancelRequest";
@@ -69,8 +70,8 @@ impl Dispatched {
     }
 }
 
-/// The target of a `$/cancelRequest`, passed to the authorizer so policy can enforce
-/// session-scoped "cancel only your own" rules.
+/// The resolved owner of a `$/cancelRequest`'s target — used by the native ownership check
+/// ("cancel only your own, unless `FULL_ADMIN`").
 #[derive(Clone, Copy, Debug)]
 pub enum CancelTarget {
     /// An in-flight request, owned by the given session.
@@ -86,33 +87,6 @@ pub enum CancelTarget {
 }
 
 // --- configurable hooks (mirroring Python's register_* handlers) -------------
-
-/// Authorizes a call. `target` is `Some` only for `$/cancelRequest`. Returning a denial
-/// yields `NOT_AUTHORIZED` and skips the handler. Implemented for any matching closure.
-pub trait Authorizer<S>: Send + Sync {
-    /// Decide whether `request` is allowed on `session` (`target` is `Some` only for
-    /// `$/cancelRequest`).
-    fn authorize(
-        &self,
-        request: &JsonRpcRequest,
-        session: &Session<S>,
-        target: Option<CancelTarget>,
-    ) -> AuthorizationResponse;
-}
-
-impl<S, F> Authorizer<S> for F
-where
-    F: Fn(&JsonRpcRequest, &Session<S>, Option<CancelTarget>) -> AuthorizationResponse + Send + Sync,
-{
-    fn authorize(
-        &self,
-        request: &JsonRpcRequest,
-        session: &Session<S>,
-        target: Option<CancelTarget>,
-    ) -> AuthorizationResponse {
-        (self)(request, session, target)
-    }
-}
 
 /// Audit sink. Called for every audited method call + control op (success, error, or
 /// denial). `response` is the response envelope as a `Value`, with secret fields redacted.
@@ -263,7 +237,8 @@ pub struct JsonRpcProtocolBuilder<S> {
     methods: HashMap<Arc<str>, Arc<Method<S>>>,
     /// XDR-enabled methods, keyed by proc-id (a subset of `methods`, sharing the `Arc`).
     xdr_methods: HashMap<u32, Arc<Method<S>>>,
-    authorizer: Option<Arc<dyn Authorizer<S>>>,
+    /// The role registry: interns each method's declared role names → a `required` mask at build.
+    role_registry: Option<Roles>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     canceller: Option<Arc<dyn Canceller<S>>>,
     server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
@@ -283,7 +258,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             version: version.into(),
             methods: HashMap::new(),
             xdr_methods: HashMap::new(),
-            authorizer: None,
+            role_registry: None,
             audit_sink: None,
             canceller: None,
             server_info: None,
@@ -296,13 +271,24 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
         }
     }
 
-    fn insert(&mut self, method: Method<S>) -> BuildResult<()> {
+    fn insert(&mut self, mut method: Method<S>) -> BuildResult<()> {
         let name = method.meta.name.clone();
         if name.starts_with("rpc.") || name.starts_with("$/") {
             return Err(Error::ReservedName(name.to_string()));
         }
         if self.methods.contains_key(&name) {
             return Err(Error::DuplicateMethod(name.to_string()));
+        }
+        // Intern the declared role names into the method's `required` subset-gate mask.
+        if !method.meta.roles.is_empty() {
+            let registry = self.role_registry.as_ref().ok_or_else(|| {
+                Error::Config(format!(
+                    "method {name:?} declares roles but no role registry is set; call .roles(...) first"
+                ))
+            })?;
+            method.meta.required = registry.mask(method.meta.roles.iter()).map_err(|unknown| {
+                Error::Config(format!("method {name:?} requires unregistered role {unknown:?}"))
+            })?;
         }
         match method.meta.xdr_id {
             None => {
@@ -421,9 +407,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
         Ok(self)
     }
 
-    /// Set the authorization handler.
-    pub fn authorizer(mut self, authorizer: impl Authorizer<S> + 'static) -> Self {
-        self.authorizer = Some(Arc::new(authorizer));
+    /// Set the role registry — the canonical role taxonomy. Each registered method's declared role
+    /// names are interned against it into a `required` [`RoleMask`] at registration, and the
+    /// per-call gate checks `required ⊆ granted`. Must be set **before** registering methods that
+    /// declare roles (a declared role with no registry, or an unregistered name, is a build error).
+    pub fn roles(mut self, roles: Roles) -> Self {
+        self.role_registry = Some(roles);
         self
     }
 
@@ -547,7 +536,6 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             version: self.version,
             methods: self.methods,
             xdr_methods: self.xdr_methods,
-            authorizer: self.authorizer,
             audit_sink: self.audit_sink,
             canceller: self.canceller,
             server_info: self.server_info,
@@ -574,7 +562,6 @@ pub struct JsonRpcProtocol<S> {
     version: Arc<str>,
     methods: HashMap<Arc<str>, Arc<Method<S>>>,
     xdr_methods: HashMap<u32, Arc<Method<S>>>,
-    authorizer: Option<Arc<dyn Authorizer<S>>>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     canceller: Option<Arc<dyn Canceller<S>>>,
     server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
@@ -761,12 +748,19 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // is audited — the wire reply frames the raw `rid` regardless.
         let audit_id =
             if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
-        let req = JsonRpcRequest {
-            method: method.meta.name.to_string(),
-            id: audit_id.clone(),
-            // Filled by `run_xdr*` with the reflected params when authz/audit needs them.
-            params: Value::Null,
-            roles: method.meta.roles.to_vec(),
+        // The audit snapshot (`req`) is read only when the method is audited (`do_audit`). A plain
+        // method never touches it, so skip its per-request allocations — notably the method-name
+        // `String` — and pass an empty placeholder; `run_xdr*` fills `params` lazily under the same
+        // condition. (Authorization no longer needs it: the gate is a native role-mask subset test.)
+        let req = if method.meta.audit {
+            JsonRpcRequest {
+                method: method.meta.name.to_string(),
+                id: audit_id.clone(),
+                params: Value::Null,
+                roles: method.meta.roles.to_vec(),
+            }
+        } else {
+            JsonRpcRequest { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
         };
         // An async method runs inline (it yields, so it can't stall the reactor — parity with the
         // JSON async path); a sync/filterable method runs on the blocking pool.
@@ -777,7 +771,6 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             session: session.clone(),
             req,
             rid: audit_id,
-            authorizer: self.authorizer.clone(),
             audit_sink: self.audit_sink.clone(),
             py_dispatcher: None,
         };
@@ -920,7 +913,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let cx = RequestCtx::new(rid.clone(), session.clone(), cancel);
         // The authz/audit snapshot (a full re-parse of params into a `Value`) is only
         // needed when an authorizer or an audited method will actually read it.
-        let need_snapshot = self.authorizer.is_some() || method.meta.audit;
+        let need_snapshot = method.meta.audit;
         let req = JsonRpcRequest {
             method: parsed.method.clone(),
             id: rid.clone(),
@@ -942,7 +935,6 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             session,
             req,
             rid: rid.clone(),
-            authorizer: self.authorizer.clone(),
             audit_sink: self.audit_sink.clone(),
             py_dispatcher: self.py_dispatcher.clone(),
         };
@@ -991,7 +983,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
         // 2. The authz/audit snapshot (also stored on the subscription).
         let snapshot = raw_to_value(parsed.params.as_deref());
-        let need_snapshot = self.authorizer.is_some() || method.meta.audit;
+        let need_snapshot = method.meta.audit;
         let req = JsonRpcRequest {
             method: parsed.method,
             id: rid.clone(),
@@ -1000,7 +992,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         };
 
         // 3. Authorize (a subscribe is a normal request — no CancelTarget).
-        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, None) {
+        if let Err(denied) = role_gate(method.meta.required, session) {
             return finish(
                 note,
                 envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
@@ -1062,7 +1054,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             Err(e) => return Dispatched::Reply(response_bytes(Some(&rid), &Err(e))),
         };
 
-        let need_snapshot = self.authorizer.is_some() || method.meta.audit;
+        let need_snapshot = method.meta.audit;
         let req = JsonRpcRequest {
             method: parsed.method.clone(),
             id: Some(rid.clone()),
@@ -1071,7 +1063,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         };
 
         // Authorize; a denial is audited (like the normal path audits an authorized call).
-        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, None) {
+        if let Err(denied) = role_gate(method.meta.required, session) {
             let resp = response_bytes(Some(&rid), &Err(denied));
             if method.meta.audit {
                 if let Some(sink) = self.audit_sink.as_deref() {
@@ -1378,9 +1370,16 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             roles: Vec::new(),
         };
 
-        // Authorize with the resolved target (may be `None`) BEFORE any existence error, so an
-        // unauthorized caller is denied without learning whether the target exists.
-        if let Err(denied) = check_authz(self.authorizer.as_deref(), &req, session, cancel_target) {
+        // Authorize natively BEFORE any existence error, so an unauthorized caller is denied
+        // without learning whether the target exists: cancel only your own request / subscription,
+        // unless you are FULL_ADMIN (who may cancel anything).
+        let owns = matches!(
+            cancel_target,
+            Some(CancelTarget::Request { session_id } | CancelTarget::Subscription { session_id })
+                if session_id == session.id()
+        );
+        if !owns && !session.granted_roles().is_full_admin() {
+            let denied = JsonRpcError::not_authorized("Not authorized");
             return finish(
                 note,
                 envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
@@ -1458,31 +1457,14 @@ fn raw_to_value(params: Option<&RawValue>) -> Value {
     }
 }
 
-fn check_authz<S>(
-    authorizer: Option<&dyn Authorizer<S>>,
-    req: &JsonRpcRequest,
-    session: &Session<S>,
-    target: Option<CancelTarget>,
-) -> Result<(), JsonRpcError> {
-    match authorizer {
-        None => Ok(()),
-        Some(a) => {
-            let resp = a.authorize(req, session, target);
-            if resp.authorized {
-                Ok(())
-            } else {
-                let message = if resp.message.is_empty() {
-                    "Not authorized".to_string()
-                } else {
-                    resp.message
-                };
-                let mut e = JsonRpcError::not_authorized(message);
-                if let Some(data) = resp.data {
-                    e = e.with_data(data);
-                }
-                Err(e)
-            }
-        }
+/// The native authorization gate: a method's `required` roles must be a subset of the session's
+/// granted roles (`FULL_ADMIN` — all-ones — and an empty requirement both pass). No closure, no
+/// request materialization; resource/parameter-level checks are the handler's job.
+fn role_gate<S>(required: RoleMask, session: &Session<S>) -> Result<(), JsonRpcError> {
+    if session.granted_roles().satisfies(required) {
+        Ok(())
+    } else {
+        Err(JsonRpcError::not_authorized("Not authorized"))
     }
 }
 
@@ -1581,7 +1563,6 @@ struct Pipeline<S> {
     session: Arc<Session<S>>,
     req: JsonRpcRequest,
     rid: Option<String>,
-    authorizer: Option<Arc<dyn Authorizer<S>>>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     py_dispatcher: Option<Arc<dyn PyDispatcher>>,
 }
@@ -1611,7 +1592,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Ok(d) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
-        let outcome = match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+        let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => erased.run(decoded, &cx),
         };
@@ -1636,7 +1617,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
     /// validates, so an INVALID_PARAMS comes back from the body *after* authz (matching Zig).
     fn run_python(self, params: Option<&RawValue>, cx: RequestCtx<S>) -> Vec<u8> {
         let audit_detail = cx.audit_handle();
-        let outcome = match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+        let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => match &self.py_dispatcher {
                 None => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
@@ -1671,7 +1652,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Ok(d) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
-        let outcome = match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+        let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => erased.run(decoded, cx).await,
         };
@@ -1694,7 +1675,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let audit_detail = cx.audit_handle();
         // Reflect params for the authorizer and/or audit (mirrors the JSON `need_snapshot`);
         // reflect the result only when the call is actually audited.
-        let need_params = self.authorizer.is_some() || self.method.meta.audit;
+        let need_params = self.method.meta.audit;
         let want_audit = self.method.meta.audit && self.audit_sink.is_some();
         // Decode before authz; a decode failure returns here, before the audit point, so it is
         // not audited (matching the JSON path's early return).
@@ -1703,7 +1684,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             self.req.params = params_value;
         }
         let (outcome, result_value) =
-            match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+            match role_gate(self.method.meta.required, &self.session) {
                 Err(denied) => (Err(denied), None),
                 Ok(()) => match erased.xdr_run(decoded, &cx, want_audit) {
                     Ok((bytes, value)) => (Ok(bytes), value),
@@ -1736,7 +1717,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             unreachable!("run_xdr_async on a non-async method")
         };
         let audit_detail = cx.audit_handle();
-        let need_params = self.authorizer.is_some() || self.method.meta.audit;
+        let need_params = self.method.meta.audit;
         let want_audit = self.method.meta.audit && self.audit_sink.is_some();
         // Decode before authz; a decode failure returns here, before the audit point (matching the
         // JSON path's early return), so it is not audited.
@@ -1745,7 +1726,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             self.req.params = params_value;
         }
         let (outcome, result_value) =
-            match check_authz(self.authorizer.as_deref(), &self.req, &self.session, None) {
+            match role_gate(self.method.meta.required, &self.session) {
                 Err(denied) => (Err(denied), None),
                 Ok(()) => match erased.xdr_run(decoded, cx, want_audit).await {
                     Ok((bytes, value)) => (Ok(bytes), value),
@@ -1796,7 +1777,6 @@ mod tests {
             session: dummy_session(),
             req: JsonRpcRequest { method: "m".into(), id: None, params: Value::Null, roles: Vec::new() },
             rid: None,
-            authorizer: None,
             audit_sink: None,
             py_dispatcher: None,
         }

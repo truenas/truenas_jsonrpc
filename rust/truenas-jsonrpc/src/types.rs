@@ -48,28 +48,6 @@ pub struct JsonRpcRequest {
     pub roles: Vec<String>,
 }
 
-/// The result an authorizer must return. `authorized == false` skips the handler and
-/// yields a `NOT_AUTHORIZED` error built from `message`/`data`.
-#[derive(Clone, Debug)]
-pub struct AuthorizationResponse {
-    /// Whether the call is allowed (`false` skips the handler → `NOT_AUTHORIZED`).
-    pub authorized: bool,
-    /// Denial message (used to build the `NOT_AUTHORIZED` error).
-    pub message: String,
-    /// Optional structured data attached to a denial.
-    pub data: Option<serde_json::Value>,
-}
-
-impl AuthorizationResponse {
-    /// Allow the call.
-    pub fn allow() -> Self {
-        Self { authorized: true, message: String::new(), data: None }
-    }
-    /// Deny the call with a message (default Python message is "Not authorized").
-    pub fn deny(message: impl Into<String>) -> Self {
-        Self { authorized: false, message: message.into(), data: None }
-    }
-}
 
 /// Server identity for the `$/serverInfo` probe (LSP `serverInfo`).
 #[derive(Clone, Debug, Serialize, Deserialize)]

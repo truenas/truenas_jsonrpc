@@ -25,6 +25,7 @@ mod method;
 mod protocol;
 mod pydispatch;
 mod request;
+mod role;
 mod session;
 mod setup;
 mod transfer;
@@ -37,17 +38,16 @@ pub use method::{
     JsonRpcMethod, MethodDef, SubscriptionDef,
 };
 pub use protocol::{
-    AuditSink, Authorizer, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
-    JsonRpcProtocolBuilder, ServerInfoHandler,
+    AuditSink, CancelTarget, Canceller, Dispatched, JsonRpcProtocol, JsonRpcProtocolBuilder,
+    ServerInfoHandler,
 };
 pub use setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 pub use transfer::{FileTransfer, Transfer, TransferDirection};
 pub use pydispatch::{PyDispatcher, PyOutcome, PyResult};
 pub use request::RequestCtx;
+pub use role::{RoleMask, Roles};
 pub use session::{Clock, IdGen, NullOutbound, Outbound, Session, SessionId, SystemClock, UuidGen};
-pub use types::{
-    AuthorizationResponse, JsonRpcRequest, MessageDirection, ServerInfo, SessionLifecycle,
-};
+pub use types::{JsonRpcRequest, MessageDirection, ServerInfo, SessionLifecycle};
 // Re-exported from `truenas-filter` so consumers can write filterable (query) handlers
 // without a direct dependency on the engine crate.
 pub use truenas_filter::{

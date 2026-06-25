@@ -2,9 +2,10 @@
 //! injectable [`IdGen`] / [`Clock`] seams (default UUIDv4 / system time) that make
 //! dispatch deterministic for unit tests and the A/B harness.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 
+use crate::role::RoleMask;
 use crate::types::SessionLifecycle;
 
 /// A session / subscription / connection identifier.
@@ -103,6 +104,9 @@ pub struct Session<S> {
     lifecycle: AtomicLifecycle,
     internal: RwLock<Option<S>>,
     external: RwLock<Option<serde_json::Value>>,
+    // The granted-roles [`RoleMask`] (u64): written once at `sessionSetup` (`set_roles`), read
+    // lock-free on every gated call (`granted_roles`).
+    roles: AtomicU64,
     out: Arc<dyn Outbound>,
 }
 
@@ -119,6 +123,7 @@ impl<S> Session<S> {
             lifecycle: AtomicLifecycle::new(SessionLifecycle::None),
             internal: RwLock::new(internal),
             external: RwLock::new(None),
+            roles: AtomicU64::new(0),
             out,
         }
     }
@@ -166,6 +171,19 @@ impl<S> Session<S> {
 
     pub(crate) fn set_external(&self, value: serde_json::Value) {
         *self.external.write().unwrap_or_else(PoisonError::into_inner) = Some(value);
+    }
+
+    /// Set the session's granted roles. A `$/sessionSetup` handler calls this once it has
+    /// authenticated the identity (with any role hierarchy already expanded into `roles`); the
+    /// per-call authorization gate reads it via [`granted_roles`](Self::granted_roles).
+    pub fn set_roles(&self, roles: RoleMask) {
+        self.roles.store(roles.bits(), Ordering::Release);
+    }
+
+    /// The session's granted roles (empty until `sessionSetup` sets them). The dispatch gate checks
+    /// a method's required roles against this; a handler may also read it for resource-level checks.
+    pub fn granted_roles(&self) -> RoleMask {
+        RoleMask::from_bits(self.roles.load(Ordering::Acquire))
     }
 
     pub(crate) fn outbound(&self) -> &Arc<dyn Outbound> {

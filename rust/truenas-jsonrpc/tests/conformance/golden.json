@@ -405,7 +405,7 @@
           "response": {
             "error": {
               "code": -32000,
-              "message": "denied"
+              "message": "Not authorized"
             },
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0"
@@ -475,9 +475,8 @@
           "kind": "dispatch",
           "response": {
             "error": {
-              "code": -32803,
-              "data": "no active request or subscription with id 'f81d4fae-7dec-11d0-a765-00a0c91e6bf7'",
-              "message": "Request failed"
+              "code": -32000,
+              "message": "Not authorized"
             },
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0"
@@ -613,9 +612,8 @@
           "kind": "dispatch",
           "response": {
             "error": {
-              "code": -32803,
-              "data": "no active request or subscription with id 'f81d4fae-7dec-11d0-a765-00a0c91e6bf7'",
-              "message": "Request failed"
+              "code": -32000,
+              "message": "Not authorized"
             },
             "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6",
             "jsonrpc": "2.0"

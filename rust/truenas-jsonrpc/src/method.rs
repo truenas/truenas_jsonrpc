@@ -24,6 +24,7 @@ use truenas_filter::{
 
 use crate::error::{ErrorCode, JsonRpcError};
 use crate::request::RequestCtx;
+use crate::role::RoleMask;
 use crate::transfer::{FileTransfer, TransferDirection};
 use crate::types::MessageDirection;
 
@@ -485,6 +486,9 @@ pub(crate) struct MethodMeta {
     pub audit_message: Option<Arc<str>>,
     pub cancellable: bool,
     pub roles: Arc<[String]>,
+    /// The interned subset gate: `required ⊆ granted` to call. Computed from `roles` against the
+    /// protocol's role registry at registration (`NONE` here until then).
+    pub required: RoleMask,
     #[allow(dead_code)] // surfaced via codegen/OpenRPC; not used by dispatch
     pub doc: Option<Arc<str>>,
     pub secret_fields: Arc<[String]>,
@@ -549,7 +553,9 @@ impl MethodDef {
         self
     }
 
-    /// Role names the authorizer may require (OR-semantics; metadata only).
+    /// Role names required to call this method — *all* of them (subset gate). Interned to a mask
+    /// against the protocol's [`Roles`](crate::Roles) registry at registration and enforced
+    /// natively; an unregistered name is a build error.
     pub fn roles<I, T>(mut self, roles: I) -> Self
     where
         I: IntoIterator<Item = T>,
@@ -592,6 +598,7 @@ impl MethodDef {
             audit_message: self.audit_message,
             cancellable: self.cancellable,
             roles: self.roles.into(),
+            required: RoleMask::NONE,
             doc: self.doc,
             secret_fields: self.secret_fields.into(),
             xdr_id: self.xdr_id,

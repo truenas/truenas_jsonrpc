@@ -7,8 +7,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    AuthorizationResponse, CancelTarget, Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol,
-    JsonRpcRequest, MethodDef, NullOutbound, Outbound, RequestCtx, Session, SessionLifecycle,
+    Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
+    NullOutbound, Outbound, RequestCtx, Roles, Session, SessionLifecycle,
 };
 
 const ID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -141,18 +141,16 @@ async fn parse_and_structural_errors() {
 
 #[tokio::test]
 async fn invalid_params_precedes_not_authorized() {
-    // An authorizer that denies everything; a request with bad params must still get
-    // INVALID_PARAMS (decode runs before authorize, matching Python).
+    // `echo` requires a role the session lacks; a request with bad params must still get
+    // INVALID_PARAMS (decode runs before the authorization gate, matching Python).
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
+        .roles(Roles::new(["AUTH"]))
         .method(
-            JsonRpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _cx: &RequestCtx<()>| {
+            JsonRpcMethod::new(MethodDef::new("echo").roles(["AUTH"]), |a: EchoArgs, _cx: &RequestCtx<()>| {
                 Ok(EchoResult { echo: a.msg })
             }),
         )
         .unwrap()
-        .authorizer(|_req: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>| {
-            AuthorizationResponse::deny("nope")
-        })
         .build();
     let s = session(&proto, Some(()));
 
@@ -163,7 +161,7 @@ async fn invalid_params_precedes_not_authorized() {
     // good params -> NOT_AUTHORIZED
     let resp = call(&proto, &s, &req("echo", Some(json!({"msg": "x"})), Some(ID))).await.unwrap();
     assert_eq!(resp["error"]["code"], -32000);
-    assert_eq!(resp["error"]["message"], "nope");
+    assert_eq!(resp["error"]["message"], "Not authorized");
 }
 
 #[tokio::test]

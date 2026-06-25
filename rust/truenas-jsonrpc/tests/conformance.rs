@@ -19,10 +19,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    tnfilter, AuthorizationResponse, CancelTarget, CompiledFilters, CompiledOptions, Dispatched,
-    FilterableJsonRpcMethod, Filtered, IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol,
-    JsonRpcRequest, MethodDef, Outbound, RequestCtx, Session, SessionId, SessionLifecycle,
-    SubscriptionDef,
+    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod, Filtered,
+    IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef, Outbound,
+    RequestCtx, Roles, Session, SessionId, SessionLifecycle, SubscriptionDef,
 };
 
 const GOLDEN: &str = include_str!("conformance/golden.json");
@@ -161,6 +160,7 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
 
 fn build_gated() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("ref-gated", "1.0.0")
+        .roles(Roles::new(["AUTH"]))
         .method(JsonRpcMethod::new(MethodDef::new("ping").pre_auth(), |_a: Empty, _c: &RequestCtx<()>| {
             Ok(PingResult { pong: true })
         }))
@@ -177,17 +177,10 @@ fn build_gated() -> JsonRpcProtocol<()> {
             Err::<OkResult, _>(JsonRpcError::request_failed("kaboom"))
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("secret_op"), |_a: Empty, _c: &RequestCtx<()>| {
+        .method(JsonRpcMethod::new(MethodDef::new("secret_op").roles(["AUTH"]), |_a: Empty, _c: &RequestCtx<()>| {
             Ok(OkResult { ok: true })
         }))
         .unwrap()
-        .authorizer(|req: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>| {
-            if req.method == "secret_op" {
-                AuthorizationResponse::deny("denied")
-            } else {
-                AuthorizationResponse::allow()
-            }
-        })
         .session_setup(MethodDef::new("$/sessionSetup"), |a: SetupArgs, _s: &Session<()>| {
             if a.token == "good" {
                 Ok((SessionLifecycle::Established, SetupResult { welcome: "hi".into() }))

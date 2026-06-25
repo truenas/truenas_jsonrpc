@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    AsyncJsonRpcMethod, AuthorizationResponse, Dispatched, JsonRpcError, JsonRpcMethod,
-    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Session, SessionLifecycle,
+    AsyncJsonRpcMethod, Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest,
+    MethodDef, NullOutbound, RequestCtx, Roles, Session, SessionLifecycle,
 };
 use truenas_xdr::frame::{self, build_request};
 use truenas_xdr::to_bytes;
@@ -127,19 +127,19 @@ async fn session_gate_blocks_before_established() {
 #[tokio::test]
 async fn authorizer_denial_is_rejected() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .roles(Roles::new(["AUTH"]))
         .method(JsonRpcMethod::new(
-            MethodDef::new("xdr.add").xdr(1001),
+            MethodDef::new("xdr.add").xdr(1001).roles(["AUTH"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
             },
         ))
         .unwrap()
-        .authorizer(|_r: &_, _s: &Session<()>, _t| AuthorizationResponse::deny("no"))
         .build();
     let request = build_request(1001, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
-    assert_eq!(code, -32000); // NOT_AUTHORIZED
+    assert_eq!(code, -32000); // NOT_AUTHORIZED (required role not granted)
 }
 
 #[tokio::test]
@@ -242,14 +242,14 @@ async fn audited_xdr_denial_is_audited() {
     let captured: Arc<Mutex<Option<(Value, Value)>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .roles(Roles::new(["AUTH"]))
         .method(JsonRpcMethod::new(
-            MethodDef::new("xdr.guarded").xdr(2011).audit(),
+            MethodDef::new("xdr.guarded").xdr(2011).audit().roles(["AUTH"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
             },
         ))
         .unwrap()
-        .authorizer(|_r: &_, _s: &Session<()>, _t| AuthorizationResponse::deny("nope"))
         .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, _m: Option<&str>| {
             *cap.lock().unwrap() = Some((req.params.clone(), resp.clone()));
         })
@@ -257,7 +257,7 @@ async fn audited_xdr_denial_is_audited() {
     let request = build_request(2011, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
-    assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire
+    assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire (required role not granted)
     let (params, resp) = captured.lock().unwrap().take().expect("the denial was audited");
     assert_eq!(params["a"], 1); // params reflected even on denial (decode precedes authz)
     assert_eq!(resp["error"]["code"], -32000);
@@ -392,14 +392,14 @@ async fn async_audited_denial_is_audited() {
     let captured: Arc<Mutex<Option<(Value, Value)>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+        .roles(Roles::new(["AUTH"]))
         .async_method(AsyncJsonRpcMethod::new(
-            MethodDef::new("xdr.guarded").xdr(2011).audit(),
+            MethodDef::new("xdr.guarded").xdr(2011).audit().roles(["AUTH"]),
             |a: AddArgs, _cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
             },
         ))
         .unwrap()
-        .authorizer(|_r: &_, _s: &Session<()>, _t| AuthorizationResponse::deny("nope"))
         .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, _m: Option<&str>| {
             *cap.lock().unwrap() = Some((req.params.clone(), resp.clone()));
         })
@@ -407,7 +407,7 @@ async fn async_audited_denial_is_audited() {
     let request = build_request(2011, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
-    assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire
+    assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire (required role not granted)
     let (params, resp) = captured.lock().unwrap().take().expect("the denial was audited");
     assert_eq!(params["a"], 1); // params reflected even on denial (decode precedes authz)
     assert_eq!(resp["error"]["code"], -32000);

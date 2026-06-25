@@ -9,9 +9,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    AuthorizationResponse, CancelTarget, Dispatched, IdGen, JsonRpcError, JsonRpcMethod,
-    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, Outbound, RequestCtx, Session,
-    SessionId, SubscriptionDef,
+    Dispatched, IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
+    NullOutbound, Outbound, RequestCtx, Roles, Session, SessionId, SubscriptionDef,
 };
 
 const SID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"; // a subscribe-request id
@@ -124,11 +123,9 @@ async fn subscribe_bad_params_is_invalid_params() {
 #[tokio::test]
 async fn subscribe_denied_by_authz_registers_nothing() {
     let proto = JsonRpcProtocol::<()>::builder("t", "1")
-        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new("events")))
+        .roles(Roles::new(["AUTH"]))
+        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new("events").roles(["AUTH"])))
         .unwrap()
-        .authorizer(|_r: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>| {
-            AuthorizationResponse::deny("nope")
-        })
         .build();
     let (out, buf) = sink();
     let s = proto.new_session(Some(()), out);
@@ -251,29 +248,20 @@ async fn unsubscribe_via_cancel_stops_delivery() {
 }
 
 #[tokio::test]
-async fn cancel_subscription_authz_denied_leaves_it_active() {
-    // Authorizer allows the subscribe (target None) but denies the cancel (target Some).
-    let proto = JsonRpcProtocol::<()>::builder("t", "1")
-        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new("events")))
-        .unwrap()
-        .authorizer(|_r: &JsonRpcRequest, _s: &Session<()>, target: Option<CancelTarget>| {
-            if target.is_some() {
-                AuthorizationResponse::deny("no cancel")
-            } else {
-                AuthorizationResponse::allow()
-            }
-        })
-        .build();
-    let (out, buf) = sink();
-    let s = proto.new_session(Some(()), out);
-    let sub_id = subscribe(&proto, &s, "events", SID).await;
+async fn cancelling_another_sessions_subscription_is_denied() {
+    // Cancel is owner-or-FULL_ADMIN: a *different*, non-admin session cannot cancel A's sub.
+    let proto = events_proto();
+    let (out_a, buf_a) = sink();
+    let a = proto.new_session(Some(()), out_a);
+    let b = proto.new_session(Some(()), Arc::new(NullOutbound));
+    let sub_id = subscribe(&proto, &a, "events", SID).await;
 
-    let c = call(&proto, &s, &req("$/cancelRequest", Some(json!({ "target_id": sub_id })), Some(CID))).await;
+    let c = call(&proto, &b, &req("$/cancelRequest", Some(json!({ "target_id": sub_id })), Some(CID))).await;
     assert_eq!(c["error"]["code"], -32000);
 
-    // Still subscribed → publish is delivered.
+    // A's subscription is still active → the publish is delivered to A.
     proto.send_notification("events", &Event { seq: 7, msg: "still".into() }).unwrap();
-    assert_eq!(buf.lock().unwrap().len(), 1);
+    assert_eq!(buf_a.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]

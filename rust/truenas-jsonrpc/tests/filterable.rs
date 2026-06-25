@@ -10,9 +10,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    tnfilter, AuthorizationResponse, CancelTarget, CompiledFilters, CompiledOptions, Dispatched,
-    FilterableJsonRpcMethod, Filtered, JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef,
-    NullOutbound, RequestCtx, Session,
+    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod, Filtered,
+    JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Roles,
+    Session,
 };
 
 const RID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -39,9 +39,6 @@ fn query(
     Ok(tnfilter(data(), f, o)?)
 }
 
-fn deny(_r: &JsonRpcRequest, _s: &Session<()>, _t: Option<CancelTarget>) -> AuthorizationResponse {
-    AuthorizationResponse::deny("nope")
-}
 
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("t", "1.0.0")
@@ -133,16 +130,15 @@ async fn incomparable_is_internal_error() {
 
 #[tokio::test]
 async fn authz_denied_before_compile() {
-    // A structurally-valid but semantically-bad filter; authz denies first, so the compile
-    // (which would be INVALID_PARAMS) never runs — proving INVALID_PARAMS precedes nothing
-    // here and NOT_AUTHORIZED wins.
+    // A structurally-valid but semantically-bad filter; the role gate denies first, so the compile
+    // (which would be INVALID_PARAMS) never runs — proving NOT_AUTHORIZED wins.
     let p = JsonRpcProtocol::<()>::builder("t", "1.0.0")
+        .roles(Roles::new(["AUTH"]))
         .filterable(FilterableJsonRpcMethod::<NoArgs, Value, _>::new(
-            MethodDef::new("x.query"),
+            MethodDef::new("x.query").roles(["AUTH"]),
             query,
         ))
         .unwrap()
-        .authorizer(deny)
         .build();
     let r = call(&p, json!({"query-filters": [["name", "??", "a"]]})).await;
     assert_eq!(err_code(&r), -32000); // NOT_AUTHORIZED

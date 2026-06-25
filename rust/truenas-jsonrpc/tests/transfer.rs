@@ -10,9 +10,9 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    AuthorizationResponse, Dispatched, FileTransfer, JsonRpcError, JsonRpcFdPassMethod,
-    JsonRpcFdTransferMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx,
-    Session, TransferDirection,
+    Dispatched, FileTransfer, JsonRpcError, JsonRpcFdPassMethod, JsonRpcFdTransferMethod,
+    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Roles, Session,
+    TransferDirection,
 };
 
 const RID: &str = "123e4567-e89b-12d3-a456-426614174000";
@@ -191,14 +191,14 @@ async fn authz_denial_is_audited() {
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
     let p = JsonRpcProtocol::<()>::builder("t", "1")
+        .roles(Roles::new(["AUTH"]))
         .fd_transfer_method(JsonRpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
-            MethodDef::new("zfs.send").audit(),
+            MethodDef::new("zfs.send").audit().roles(["AUTH"]),
             TransferDirection::Download,
             |_a: &SendArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(ReadyInfo { size: 0 }),
             |_a: SendArgs, _ft: &dyn FileTransfer| Ok::<_, JsonRpcError>(Done { ok: true }),
         ))
         .unwrap()
-        .authorizer(|_r: &JsonRpcRequest, _s: &Session<()>, _t| AuthorizationResponse::deny("no"))
         .audit_sink(move |_r: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, _m: Option<&str>| {
             h.fetch_add(1, Ordering::SeqCst);
         })
@@ -216,14 +216,14 @@ async fn denial_and_refusal_without_audit() {
     // Non-audited transfer methods: the denial / negotiate-refusal paths skip the audit block.
     // (a) authorization denial, not audited.
     let p = JsonRpcProtocol::<()>::builder("t", "1")
+        .roles(Roles::new(["AUTH"]))
         .fd_transfer_method(JsonRpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
-            MethodDef::new("zfs.send"),
+            MethodDef::new("zfs.send").roles(["AUTH"]),
             TransferDirection::Download,
             |_a: &SendArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(ReadyInfo { size: 0 }),
             |_a: SendArgs, _ft: &dyn FileTransfer| Ok::<_, JsonRpcError>(Done { ok: true }),
         ))
         .unwrap()
-        .authorizer(|_r: &JsonRpcRequest, _s: &Session<()>, _t| AuthorizationResponse::deny("no"))
         .build();
     let s = session(&p);
     let v: Value = serde_json::from_slice(
