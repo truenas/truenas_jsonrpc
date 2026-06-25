@@ -41,14 +41,16 @@ foreign-types = { version = "0.3", optional = true } # ForeignType::as_ptr for t
 # WebSocket transport: JSON-RPC framed as WebSocket messages (the library owns the framing, so
 # no raw-fd transfer). Mirrors Python's optional `websockets` extra.
 tokio-tungstenite = { version = "0.24", optional = true }
-futures-util = { version = "0.3", optional = true } # Stream/Sink + .split() for the WS stream
+# `FuturesUnordered` drives a connection's in-flight dispatches on its own task (no per-request
+# spawn); also Stream/Sink + `.split()` for the WS stream (the `websocket` feature).
+futures-util = "0.3"
 
 [features]
 # Encrypted TCP via system OpenSSL (kernel TLS or a userspace pump, per TlsMode). Off by
 # default: the default build pulls no openssl crates.
 tls = ["dep:openssl", "dep:openssl-sys", "dep:tokio-openssl", "dep:foreign-types"]
 # WebSocket transport (ws://). Off by default.
-websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
+websocket = ["dep:tokio-tungstenite"]
 # SCM_RIGHTS control-frame primitives (`scm`) for handing a connection fd to a local auth broker.
 # No new dependencies (nix is already in); off by default — the auth crate's `passthrough` enables it.
 passthrough = []

@@ -50,12 +50,18 @@ impl std::error::Error for FrameError {
     }
 }
 
+/// Append `payload`, prefixed with its 4-byte big-endian length, to `buf`. The single source of
+/// the wire framing — used by [`frame`] and by the writer's batch-coalescing path.
+pub fn frame_into(buf: &mut Vec<u8>, payload: &[u8]) {
+    buf.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    buf.extend_from_slice(payload);
+}
+
 /// Prefix `payload` with its 4-byte big-endian length, ready to write to the stream.
 #[must_use]
 pub fn frame(payload: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(HEADER_SIZE + payload.len());
-    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
-    out.extend_from_slice(payload);
+    frame_into(&mut out, payload);
     out
 }
 

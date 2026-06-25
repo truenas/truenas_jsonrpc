@@ -15,10 +15,14 @@
 //! `$/transferReady` → (`$/transferGo`) handshake, hands the blocking fd to the handler's
 //! `transfer` callback on a blocking worker, then writes the final response.
 
+use std::future::Future;
 use std::os::fd::RawFd;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
+use futures_util::stream::FuturesUnordered;
+use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
@@ -103,15 +107,29 @@ async fn write_framed<W: AsyncWrite + Unpin>(w: &mut W, payload: &[u8]) -> std::
     w.flush().await
 }
 
-/// Drain the outbound channel, writing each payload in order under the shared write mutex (so
-/// a transfer in progress, which holds that mutex, pauses notifications), until it closes.
+/// Drain the outbound channel, **coalescing** every payload already queued into a single
+/// `write_all` + `flush` under the shared write mutex, until it closes. Batching cuts the syscall
+/// count (one write per *burst* of replies/notifications instead of one per message — each socket
+/// write is taxed by the kernel + any LSM/audit hooks), which dominates under pipelining.
+///
+/// Two invariants are preserved: payloads are written in FIFO order (so framed messages never
+/// interleave on the wire), and the channel is awaited (`recv`) **only outside** the write lock —
+/// a transfer/passthrough takeover fences the wire by acquiring this same mutex, so blocking on
+/// `recv()` while holding it would deadlock the handoff. Inside the lock we only ever `try_recv`.
 async fn write_loop<IO: AsyncWrite + Unpin>(
     writer: Arc<Mutex<WriteHalf<IO>>>,
     mut rx: UnboundedReceiver<Vec<u8>>,
 ) {
-    while let Some(payload) = rx.recv().await {
+    while let Some(first) = rx.recv().await {
+        // Build the batch before taking the lock: the first payload (awaited above) plus whatever
+        // else is already queued, drained non-blockingly so we never await the channel under lock.
+        let mut batch = Vec::new();
+        crate::framing::frame_into(&mut batch, &first);
+        while let Ok(next) = rx.try_recv() {
+            crate::framing::frame_into(&mut batch, &next);
+        }
         let mut w = writer.lock().await;
-        if write_framed(&mut *w, &payload).await.is_err() {
+        if w.write_all(&batch).await.is_err() || w.flush().await.is_err() {
             break;
         }
     }
@@ -135,7 +153,13 @@ pub(crate) async fn serve<S, IO>(
     let writer_task = tokio::spawn(write_loop(writer.clone(), out_rx));
 
     let outbound = conn_outbound(out_tx.clone());
-    let (outcome_tx, mut outcome_rx) = unbounded_channel::<Dispatched>();
+    // In-flight dispatches run concurrently **on this connection task** via `FuturesUnordered` —
+    // no per-request `tokio::spawn`, and completions are taken straight out of the set (no separate
+    // outcome channel). The set is polled in the `select!` below alongside reading, so a new frame
+    // (e.g. `$/cancelRequest`) is still read and dispatched while prior requests are pending. CPU /
+    // blocking handlers must be **sync** methods (the core runs those on `spawn_blocking`), so the
+    // connection task only ever awaits cheap completions here.
+    let mut inflight: FuturesUnordered<DispatchFut> = FuturesUnordered::new();
     let mut bound: Option<BoundConn<S>> = None;
     let mut acc = BytesMut::with_capacity(8 * 1024);
 
@@ -144,14 +168,11 @@ pub(crate) async fn serve<S, IO>(
         loop {
             match take_frame(&mut acc, shared.limit) {
                 Ok(Some(msg)) => match &bound {
-                    // BOUND: pipeline the dispatch; its outcome returns over `outcome_tx`.
+                    // BOUND: pipeline the dispatch as an in-flight future (driven in the `select!`).
                     Some((proto, session)) => {
                         let proto = proto.clone();
                         let session = session.clone();
-                        let outcome_tx = outcome_tx.clone();
-                        tokio::spawn(async move {
-                            let _ = outcome_tx.send(proto.dispatch(&msg, &session).await);
-                        });
+                        inflight.push(Box::pin(async move { proto.dispatch(&msg, &session).await }));
                     }
                     // AWAIT_NEGOTIATE: bind a protocol (or reply with an error and keep waiting).
                     None => match handle_negotiate(&msg, &peer, &shared, &outbound) {
@@ -182,7 +203,9 @@ pub(crate) async fn serve<S, IO>(
                 Ok(0) | Err(_) => break 'conn,    // clean EOF or read error
                 Ok(_) => {}                        // got bytes; loop to extract frames
             },
-            Some(outcome) = outcome_rx.recv() => match outcome {
+            // `, if !inflight.is_empty()` disables this branch when nothing is pending — otherwise
+            // `next()` on an empty set resolves to `None` and would spin the loop.
+            Some(outcome) = inflight.next(), if !inflight.is_empty() => match outcome {
                 Dispatched::Reply(bytes) => {
                     let _ = out_tx.send(bytes);
                 }
@@ -204,8 +227,10 @@ pub(crate) async fn serve<S, IO>(
     if let Some((proto, session)) = &bound {
         proto.close_session(session);
     }
+    // Dropping `inflight` abandons any still-pending dispatches (their replies are discarded — the
+    // connection is closing), and dropping `out_tx` lets the writer task drain what's queued + exit.
+    drop(inflight);
     drop(out_tx);
-    drop(outcome_tx);
     let _ = writer_task.await;
 }
 
@@ -353,6 +378,11 @@ struct Envelope {
 
 /// A bound connection: the negotiated protocol and its session.
 pub(crate) type BoundConn<S> = (Arc<JsonRpcProtocol<S>>, Arc<Session<S>>);
+
+/// One in-flight dispatch the connection task drives to completion (boxed because every pushed
+/// future is the same anonymous `async` block type but unnameable). Its output is the
+/// [`Dispatched`] the core produced, handled in the `serve` `select!`.
+type DispatchFut = Pin<Box<dyn Future<Output = Dispatched> + Send>>;
 
 /// A successful `$/negotiate`: the bound protocol, its new session, and the reply bytes.
 pub(crate) type Bound<S> = (Arc<JsonRpcProtocol<S>>, Arc<Session<S>>, Vec<u8>);
