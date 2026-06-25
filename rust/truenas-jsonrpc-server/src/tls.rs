@@ -14,16 +14,22 @@
 //!   Works on any kernel / OpenSSL, but the fd carries ciphertext, so raw-fd transfer is
 //!   refused on these connections.
 
+use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 
 use foreign_types::ForeignType;
-use openssl::ssl::{Ssl, SslAcceptor, SslMethod, SslOptions};
+use openssl::hash::MessageDigest;
+use openssl::nid::Nid;
+use openssl::pkey::PKey;
+use openssl::ssl::{Ssl, SslAcceptor, SslMethod, SslOptions, SslRef, SslVerifyMode};
+use openssl::x509::store::X509StoreBuilder;
+use openssl::x509::{X509Ref, X509};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_openssl::SslStream;
 
 use crate::connection;
-use crate::peer::{Peer, Transport};
+use crate::peer::{Peer, TlsPeer};
 use crate::server::JsonRpcServer;
 
 // Linux kTLS confirmation: getsockopt(SOL_TLS, TLS_TX/TLS_RX) returns the 4-byte
@@ -69,17 +75,22 @@ impl TlsConfig {
         key_pem: &[u8],
         mode: TlsMode,
     ) -> Result<Self, openssl::error::ErrorStack> {
-        let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
-        let key = openssl::pkey::PKey::private_key_from_pem(key_pem)?;
-        builder.set_private_key(&key)?;
-        let cert = openssl::x509::X509::from_pem(cert_pem)?;
-        builder.set_certificate(&cert)?;
-        builder.check_private_key()?;
-        if mode == TlsMode::Kernel {
-            builder.set_options(SslOptions::from_bits_retain(SSL_OP_ENABLE_KTLS));
-            builder.set_num_tickets(0)?;
-        }
-        Ok(TlsConfig { acceptor: Arc::new(builder.build()), mode })
+        Ok(TlsConfig { acceptor: Arc::new(build_acceptor(cert_pem, key_pem, mode, None)?), mode })
+    }
+
+    /// Like [`from_pem`](Self::from_pem) but also requests + verifies a **client** certificate
+    /// (mTLS) against `client_ca_pem`. Verification is `PEER` (not fail-if-absent): a client that
+    /// sends no certificate still completes the handshake (and may use another mechanism), while a
+    /// presented certificate must chain to `client_ca_pem` or the handshake fails. The verified
+    /// client cert is surfaced on [`Peer::tls`](crate::Peer::tls) for the auth layer.
+    pub fn from_pem_with_client_ca(
+        cert_pem: &[u8],
+        key_pem: &[u8],
+        client_ca_pem: &[u8],
+        mode: TlsMode,
+    ) -> Result<Self, openssl::error::ErrorStack> {
+        let acceptor = build_acceptor(cert_pem, key_pem, mode, Some(client_ca_pem))?;
+        Ok(TlsConfig { acceptor: Arc::new(acceptor), mode })
     }
 
     /// The configured acceptor — used by the WebSocket-over-TLS (`wss`) path, which always
@@ -100,6 +111,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         listener: TcpListener,
         tls: TlsConfig,
     ) -> std::io::Result<()> {
+        self.require_network_auth()?;
         let acceptor = tls.acceptor;
         let mode = tls.mode;
         loop {
@@ -107,18 +119,18 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             let _ = tcp.set_nodelay(true);
             let acceptor = acceptor.clone();
             let shared = self.shared.clone();
-            let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(addr) };
             tokio::spawn(async move {
                 match mode {
                     TlsMode::Kernel => {
                         let Ok(std_tcp) = tcp.into_std() else { return };
-                        // Handshake + kTLS probe blocks; run it off the reactor.
-                        let kfd = match tokio::task::spawn_blocking(move || {
+                        // Handshake + kTLS probe blocks; run it off the reactor. Returns the kTLS
+                        // socket plus the TLS facts (client cert + channel binding).
+                        let (kfd, (cert, binding)) = match tokio::task::spawn_blocking(move || {
                             ktls_accept(&acceptor, std_tcp)
                         })
                         .await
                         {
-                            Ok(Ok(s)) => s,
+                            Ok(Ok(pair)) => pair,
                             _ => return, // fail closed
                         };
                         if kfd.set_nonblocking(true).is_err() {
@@ -127,12 +139,13 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                         let fd = kfd.as_raw_fd();
                         let Ok(stream) = TcpStream::from_std(kfd) else { return };
                         // kTLS: the fd is plaintext to us / kernel-encrypted → transfer works.
-                        connection::serve(stream, Some(fd), peer, shared).await;
+                        connection::serve(stream, Some(fd), tls_peer(addr, cert, binding), shared).await;
                     }
                     TlsMode::Userspace => {
                         let Some(stream) = userspace_accept(&acceptor, tcp).await else { return };
+                        let (cert, binding) = tls_facts(stream.ssl());
                         // Userspace TLS: ciphertext on the fd → no raw-fd transfer (None).
-                        connection::serve(stream, None, peer, shared).await;
+                        connection::serve(stream, None, tls_peer(addr, cert, binding), shared).await;
                     }
                 }
             });
@@ -167,7 +180,7 @@ pub(crate) async fn userspace_accept(
 fn ktls_accept(
     acceptor: &SslAcceptor,
     tcp: std::net::TcpStream,
-) -> std::io::Result<std::net::TcpStream> {
+) -> std::io::Result<(std::net::TcpStream, TlsFacts)> {
     tcp.set_nonblocking(false)?;
     let fd = tcp.as_raw_fd();
     let ssl = Ssl::new(acceptor.context()).map_err(|e| io_other(e.to_string()))?;
@@ -195,8 +208,89 @@ fn ktls_accept(
         return Err(io_other(format!("kTLS requires an AES-GCM/ChaCha20 cipher; got {cipher:?}")));
     }
     confirm_ktls(fd)?;
+    // The verified client cert (mTLS) + this connection's channel binding, read before SSL_free.
+    let facts = tls_facts(&ssl);
     drop(ssl); // SSL_free frees the BIO (BIO_NOCLOSE → fd not closed); kTLS stays on the socket
-    Ok(tcp)
+    Ok((tcp, facts))
+}
+
+/// Build a server [`SslAcceptor`] from PEM cert+key (Mozilla intermediate profile), optionally
+/// requesting + verifying a client certificate against `client_ca`, and enabling kTLS for
+/// [`TlsMode::Kernel`].
+fn build_acceptor(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+    mode: TlsMode,
+    client_ca: Option<&[u8]>,
+) -> Result<SslAcceptor, openssl::error::ErrorStack> {
+    let mut builder = SslAcceptor::mozilla_intermediate_v5(SslMethod::tls())?;
+    let key = PKey::private_key_from_pem(key_pem)?;
+    builder.set_private_key(&key)?;
+    let cert = X509::from_pem(cert_pem)?;
+    builder.set_certificate(&cert)?;
+    builder.check_private_key()?;
+    if let Some(ca_pem) = client_ca {
+        let ca = X509::from_pem(ca_pem)?;
+        let mut store = X509StoreBuilder::new()?;
+        store.add_cert(ca.clone())?;
+        builder.set_verify_cert_store(store.build())?;
+        builder.add_client_ca(&ca)?;
+        builder.set_verify(SslVerifyMode::PEER);
+    }
+    if mode == TlsMode::Kernel {
+        builder.set_options(SslOptions::from_bits_retain(SSL_OP_ENABLE_KTLS));
+        builder.set_num_tickets(0)?;
+    }
+    Ok(builder.build())
+}
+
+/// The TLS facts a completed handshake surfaces to the auth layer: `(verified client cert DER,
+/// tls-server-end-point channel binding)` — either may be `None`.
+type TlsFacts = (Option<Vec<u8>>, Option<Vec<u8>>);
+
+/// Read the [`TlsFacts`] from a live `SslRef`:
+///
+/// - The **client cert** is `Some` only if the peer presented one (the acceptor was built with
+///   [`from_pem_with_client_ca`](TlsConfig::from_pem_with_client_ca)) — for mTLS.
+/// - The **channel binding** is computed from the server's *own* leaf certificate
+///   ([`tls_server_end_point`]); `None` if the server cert's signature uses no single hash (e.g.
+///   Ed25519), where RFC 5929 leaves the binding undefined.
+pub(crate) fn tls_facts(ssl: &SslRef) -> TlsFacts {
+    let peer_cert = ssl.peer_certificate().and_then(|c| c.to_der().ok());
+    let binding = ssl.certificate().and_then(tls_server_end_point);
+    (peer_cert, binding)
+}
+
+/// RFC 5929 §4.1 `tls-server-end-point`: the hash of the server certificate (octet-for-octet as it
+/// appears in the Certificate message) under the hash of the cert's own signature algorithm —
+/// except MD5/SHA-1 are upgraded to SHA-256, and a signature with no single hash yields `None`
+/// (the binding is undefined there, e.g. Ed25519). Counterpart to the C
+/// `scram_compute_tls_server_end_point`, so a binding either side computes for the same cert is
+/// byte-identical.
+///
+/// The digest comes from `OBJ_find_sigid_algs` (via [`Nid::signature_algorithms`]), which resolves
+/// the hash for the PKCS#1-v1.5 and ECDSA signatures TrueNAS issues. It returns `undef` for the
+/// few schemes that carry the hash in the algorithm *parameters* rather than the OID (RSASSA-PSS),
+/// where the C falls back to `X509_get_signature_info`; such a cert yields `None` here, so the
+/// connection simply can't offer SCRAM-PLUS — it never produces a wrong binding.
+fn tls_server_end_point(cert: &X509Ref) -> Option<Vec<u8>> {
+    let sig_nid = cert.signature_algorithm().object().nid();
+    let digest_nid = sig_nid.signature_algorithms()?.digest;
+    let md = match digest_nid {
+        Nid::UNDEF => return None,                       // no single hash → undefined
+        Nid::MD5 | Nid::SHA1 => MessageDigest::sha256(), // RFC 5929: weak hash → SHA-256
+        nid => MessageDigest::from_nid(nid)?,
+    };
+    cert.digest(md).ok().map(|d| d.to_vec())
+}
+
+/// A TLS [`Peer`] at `addr` carrying the (optional) verified client cert and channel binding.
+pub(crate) fn tls_peer(
+    addr: SocketAddr,
+    peer_cert: Option<Vec<u8>>,
+    channel_binding: Option<Vec<u8>>,
+) -> Peer {
+    Peer { tls: Some(TlsPeer { peer_cert, channel_binding }), ..Peer::tcp(addr) }
 }
 
 /// Refuse unless the kernel installed TLS crypto for both directions on `fd`.

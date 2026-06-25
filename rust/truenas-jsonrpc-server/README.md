@@ -12,6 +12,7 @@ connection with `$/negotiate`, and pumps the dispatch loop.
   - `.state_from_peer(|&Peer| -> Option<S>)` — derive the per-connection session state from
     the peer (defaults to `None`).
   - `.message_limit(usize)` — inbound frame cap (default 4 MiB).
+  - `.allow_unauthenticated_network()` — opt a server out of the network-auth guard (below).
   - `serve_unix(UnixConfig)` / `serve_tcp(addr)` — bind + accept loop. Split forms
     (`bind_unix` + `serve_unix_listener`, `bind_tcp` + `serve_tcp_listener`) let a caller bind
     before signalling readiness. The server is `Clone` (an `Arc` handle), so a clone moves into
@@ -37,6 +38,12 @@ connection with `$/negotiate`, and pumps the dispatch loop.
   plus pub/sub notifications pushed through the session's `Outbound` — funnel through one
   unbounded channel drained by a writer task (single ordered writer).
 - Notifications are push-based via the session's `Outbound` (no drain threads, unlike Python).
+- **Network-auth guard**: `serve_tcp` / `serve_tls` / `serve_websocket` / `serve_wss` (and their
+  `*_listener` forms) refuse — returning `io::ErrorKind::InvalidInput` before accepting — to serve
+  a registered protocol that has no `$/sessionSetup`, so an unauthenticated remote client can't
+  reach gated methods. **AF_UNIX is exempt** (local peer-credential / filesystem trust). Mirrors
+  `server.py`'s constructor check, but at serve time (the transport is chosen per `serve_*` call).
+  Opt out with `.allow_unauthenticated_network()` when a protocol is deliberately unauthenticated.
 
 ## Status
 

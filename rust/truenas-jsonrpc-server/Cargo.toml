@@ -49,6 +49,9 @@ futures-util = { version = "0.3", optional = true } # Stream/Sink + .split() for
 tls = ["dep:openssl", "dep:openssl-sys", "dep:tokio-openssl", "dep:foreign-types"]
 # WebSocket transport (ws://). Off by default.
 websocket = ["dep:tokio-tungstenite", "dep:futures-util"]
+# SCM_RIGHTS control-frame primitives (`scm`) for handing a connection fd to a local auth broker.
+# No new dependencies (nix is already in); off by default — the auth crate's `passthrough` enables it.
+passthrough = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

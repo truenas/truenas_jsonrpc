@@ -14,7 +14,7 @@ use truenas_jsonrpc::JsonRpcProtocol;
 
 use crate::connection;
 use crate::framing::DEFAULT_LIMIT;
-use crate::peer::{self, Peer, Transport};
+use crate::peer::{self, Peer};
 
 /// Listen on an AF_UNIX socket. `mode` is applied to the socket file after bind (`None`
 /// leaves the umask default). The path must not already exist (the caller manages stale
@@ -49,6 +49,7 @@ pub(crate) struct ServerShared<S> {
     pub(crate) name: Option<String>,
     pub(crate) state_fn: StateFn<S>,
     pub(crate) limit: usize,
+    pub(crate) allow_unauthenticated: bool,
 }
 
 impl<S> ServerShared<S> {
@@ -67,6 +68,7 @@ pub struct JsonRpcServerBuilder<S> {
     name: Option<String>,
     state_fn: Option<StateFn<S>>,
     limit: usize,
+    allow_unauthenticated: bool,
 }
 
 impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
@@ -96,6 +98,18 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
         self
     }
 
+    /// Allow serving protocols that have **no** `$/sessionSetup` over a **network** transport
+    /// (TCP / TLS / WebSocket). By default that is refused at serve time, because an
+    /// unauthenticated remote client could otherwise reach gated methods — mirroring
+    /// `server.py`, which raises when a network transport exposes an unauthenticated protocol.
+    /// AF_UNIX is always exempt (local peer-credential / filesystem trust). Opt in only when a
+    /// protocol is deliberately unauthenticated or authenticates by another means.
+    #[must_use]
+    pub fn allow_unauthenticated_network(mut self) -> Self {
+        self.allow_unauthenticated = true;
+        self
+    }
+
     /// Finish building the server.
     #[must_use]
     pub fn build(self) -> JsonRpcServer<S> {
@@ -105,6 +119,7 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
                 name: self.name,
                 state_fn: self.state_fn.unwrap_or_else(|| Box::new(|_| None)),
                 limit: self.limit,
+                allow_unauthenticated: self.allow_unauthenticated,
             }),
         }
     }
@@ -130,7 +145,40 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             name: Some(name.into()),
             state_fn: None,
             limit: DEFAULT_LIMIT,
+            allow_unauthenticated: false,
         }
+    }
+
+    /// Guard for the network transports (TCP / TLS / WebSocket): refuse to serve if any
+    /// registered protocol has no `$/sessionSetup` (so an unauthenticated remote client can't
+    /// reach gated methods), unless the server opted in via
+    /// [`allow_unauthenticated_network`](JsonRpcServerBuilder::allow_unauthenticated_network).
+    /// AF_UNIX is exempt and never calls this. Mirrors `server.py`'s constructor check, but at
+    /// serve time — the transport is chosen per `serve_*` call, not at build.
+    pub(crate) fn require_network_auth(&self) -> std::io::Result<()> {
+        if self.shared.allow_unauthenticated {
+            return Ok(());
+        }
+        let mut unauth: Vec<&str> = self
+            .shared
+            .protocols
+            .iter()
+            .filter(|(_, p)| !p.has_session_setup())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if unauth.is_empty() {
+            return Ok(());
+        }
+        unauth.sort_unstable();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to serve protocol(s) with no $/sessionSetup over a network transport: \
+                 [{}] — register session setup, serve only over AF_UNIX, or opt in with \
+                 .allow_unauthenticated_network()",
+                unauth.join(", ")
+            ),
+        ))
     }
 
     /// Bind an AF_UNIX socket (and `chmod` it per the config), returning the listener without
@@ -150,7 +198,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         loop {
             let (stream, _addr) = listener.accept().await?;
             let fd = stream.as_raw_fd();
-            let peer = Peer { transport: Transport::Unix, ucred: peer::peer_cred(fd), addr: None };
+            let peer = Peer::unix(peer::peer_cred(fd));
             tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
         }
     }
@@ -162,17 +210,13 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         self.serve_unix_listener(listener).await
     }
 
-    /// Accept connections on a TCP `addr` (length-prefixed JSON framing) until an accept error
-    /// occurs. Runs forever on the happy path — spawn it to run alongside other work.
+    /// Bind and serve a TCP `addr` (length-prefixed JSON framing). Refuses (before binding) if a
+    /// registered protocol has no `$/sessionSetup` unless opted in (see
+    /// [`require_network_auth`](Self::require_network_auth)). Runs forever on the happy path.
     pub async fn serve_tcp(&self, addr: impl ToSocketAddrs) -> std::io::Result<()> {
+        self.require_network_auth()?;
         let listener = TcpListener::bind(addr).await?;
-        loop {
-            let (stream, peer_addr) = listener.accept().await?;
-            let _ = stream.set_nodelay(true);
-            let fd = stream.as_raw_fd();
-            let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
-            tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
-        }
+        self.serve_tcp_listener(listener).await
     }
 
     /// The local address a bound TCP listener ended up on — convenience for binding port 0 in
@@ -183,13 +227,15 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         Ok((listener, local))
     }
 
-    /// Serve a TCP listener already obtained from [`bind_tcp`](Self::bind_tcp).
+    /// Serve a TCP listener already obtained from [`bind_tcp`](Self::bind_tcp). Refuses an
+    /// unauthenticated protocol over the network (see [`require_network_auth`](Self::require_network_auth)).
     pub async fn serve_tcp_listener(&self, listener: TcpListener) -> std::io::Result<()> {
+        self.require_network_auth()?;
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let _ = stream.set_nodelay(true);
             let fd = stream.as_raw_fd();
-            let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(peer_addr) };
+            let peer = Peer::tcp(peer_addr);
             tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
         }
     }

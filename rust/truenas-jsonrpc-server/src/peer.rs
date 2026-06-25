@@ -33,6 +33,34 @@ pub struct Peer {
     pub ucred: Option<Ucred>,
     /// Peer address — `Some` on TCP, `None` on AF_UNIX.
     pub addr: Option<SocketAddr>,
+    /// TLS context — `Some` iff the connection is TLS / `wss` (so its presence marks the channel
+    /// encrypted). Carries the verified client certificate (mTLS) and the channel-binding value.
+    pub tls: Option<TlsPeer>,
+}
+
+/// TLS facts about a connection, surfaced to the authentication layer.
+#[derive(Clone, Debug, Default)]
+pub struct TlsPeer {
+    /// The verified client certificate (DER), if the peer presented one (mTLS). `None` if the
+    /// client sent no certificate (the acceptor requests but does not require one, so SCRAM/other
+    /// mechanisms still apply).
+    pub peer_cert: Option<Vec<u8>>,
+    /// The server's `tls-server-end-point` channel-binding value (RFC 5929) for this connection —
+    /// the hash of the server's leaf certificate — for SCRAM-SHA-512-PLUS. `None` if the server
+    /// cert's signature algorithm has no single hash (e.g. Ed25519), where the binding is undefined.
+    pub channel_binding: Option<Vec<u8>>,
+}
+
+impl Peer {
+    /// An AF_UNIX peer with the given `SO_PEERCRED` credentials.
+    pub fn unix(ucred: Option<Ucred>) -> Self {
+        Self { transport: Transport::Unix, ucred, addr: None, tls: None }
+    }
+
+    /// A plain (non-TLS) TCP peer at `addr`.
+    pub fn tcp(addr: SocketAddr) -> Self {
+        Self { transport: Transport::Tcp, ucred: None, addr: Some(addr), tls: None }
+    }
 }
 
 /// Read `SO_PEERCRED` for an AF_UNIX socket fd (Linux). `None` if the syscall fails or the

@@ -34,7 +34,10 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         .build();
-    JsonRpcServer::<()>::builder("ws-server").protocol("main", proto).build()
+    JsonRpcServer::<()>::builder("ws-server")
+        .protocol("main", proto)
+        .allow_unauthenticated_network() // transport test: the protocol has no $/sessionSetup
+        .build()
 }
 
 async fn send_json<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S>, v: &Value) {

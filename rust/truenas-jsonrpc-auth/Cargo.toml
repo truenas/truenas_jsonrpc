@@ -1,0 +1,51 @@
+# `truenas-jsonrpc-auth` — the optional authentication layer for `truenas-jsonrpc`.
+#
+# Models the TrueNAS middleware auth mixin (`truenas_pyjsonrpc/mixins/auth/`) without PAM: an
+# `AuthStack` of pluggable challenge-response `Mechanism`s wired onto the core's
+# `$/sessionSetup` / `$/sessionSetupContinue` seam. AF_UNIX peer-cred is the default; TCP
+# mechanisms (mTLS, SCRAM-SHA-512-PLUS, GSSAPI, passthrough) are user-declared. Crypto goes
+# through OpenSSL (added in the SCRAM phase). Not in the workspace `default-members` — it sits
+# above both the core and the server transport; depend on it to authenticate connections.
+[package]
+name = "truenas-jsonrpc-auth"
+version = "0.1.0"
+description = "Authentication layer (peer-cred / mTLS / SCRAM-SHA-512-PLUS) for truenas-jsonrpc"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-jsonrpc = { path = "../truenas-jsonrpc" }
+# The auth stack reads the connection's `Peer` (transport / SO_PEERCRED / the TLS client cert +
+# channel binding) to gate mechanisms on what the channel offers.
+truenas-jsonrpc-server = { path = "../truenas-jsonrpc-server" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# SCRAM crypto (the `scram` feature) goes through the *same* system OpenSSL the C truenas_scram
+# uses — including its base64 (`EVP_EncodeBlock`/`EVP_DecodeBlock`, via `openssl::base64`) — so the
+# verifiers and wire encodings are byte-identical, with no separate base64 crate. Off by default;
+# peercred/mTLS pull no openssl.
+openssl = { version = "0.10", optional = true }
+# The keyring-backed `CredentialSource` (the `keyring` feature): looks SCRAM verifiers up in the
+# kernel keyring written by `truenas-keyring` / Python `truenas_keyring`. Optional — an embedder
+# may supply its own `CredentialSource` (in-memory, an RPC to middleware, …) instead.
+truenas-keyring = { path = "../truenas-keyring", optional = true }
+
+[features]
+# SCRAM-SHA-512(-PLUS) challenge-response. Off by default.
+scram = ["dep:openssl"]
+# A kernel-keyring-backed `CredentialSource` for SCRAM (implies `scram`).
+keyring = ["scram", "dep:truenas-keyring"]
+# Passthrough auth: hand the client fd to a local AF_UNIX broker (+ the broker-server mode). Pulls
+# the server crate's SCM_RIGHTS primitives (no new external dep). Off by default.
+passthrough = ["truenas-jsonrpc-server/passthrough"]
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+
+# Pure-Rust state machine + (later) OpenSSL's safe API — no syscalls/FFI of its own, so it keeps
+# the workspace's `unsafe_code = "forbid"`. (The keyring / pwenc syscalls live in their own crates.)
+[lints]
+workspace = true

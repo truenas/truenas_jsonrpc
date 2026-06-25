@@ -66,7 +66,10 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         .build();
-    JsonRpcServer::<()>::builder("tls-server").protocol("main", proto).build()
+    JsonRpcServer::<()>::builder("tls-server")
+        .protocol("main", proto)
+        .allow_unauthenticated_network() // transport test: the protocol has no $/sessionSetup
+        .build()
 }
 
 /// A throwaway self-signed cert + key (PEM), for the test acceptor.
@@ -204,4 +207,220 @@ async fn kernel_tls_transfer_is_encrypted() {
     assert_eq!(fin["id"], UUID);
 
     task.abort();
+}
+
+// --- mTLS: the verified client certificate is surfaced on `Peer::tls` ---------------------------
+
+use openssl::pkey::{PKey, Private};
+use openssl::x509::X509;
+
+/// `S` = the client cert DER the server observed for this connection (`None` if the client sent none).
+type CertState = Option<Vec<u8>>;
+
+#[derive(Deserialize, Serialize)]
+struct NoArgs {}
+#[derive(Serialize)]
+struct CertLen {
+    len: usize,
+}
+
+/// A server whose `cert.len` returns the length of the client cert the transport surfaced.
+fn mtls_server() -> JsonRpcServer<CertState> {
+    let proto = JsonRpcProtocol::<CertState>::builder("conf", "1")
+        .method(JsonRpcMethod::new(
+            MethodDef::new("cert.len"),
+            |_a: NoArgs, cx: &RequestCtx<CertState>| {
+                let len = cx.session().with_internal(|s| s.and_then(|c| c.as_ref()).map_or(0, Vec::len));
+                Ok::<_, JsonRpcError>(CertLen { len })
+            },
+        ))
+        .unwrap()
+        .build();
+    JsonRpcServer::<CertState>::builder("mtls-server")
+        .allow_unauthenticated_network() // this transport test serves no $/sessionSetup
+        // capture the verified client cert (if any) into the session state
+        .state_from_peer(|peer| Some(peer.tls.as_ref().and_then(|t| t.peer_cert.clone())))
+        .protocol("main", proto)
+        .build()
+}
+
+fn rsa_key() -> PKey<Private> {
+    PKey::from_rsa(openssl::rsa::Rsa::generate(2048).unwrap()).unwrap()
+}
+
+fn cn(name: &str) -> openssl::x509::X509Name {
+    let mut n = openssl::x509::X509NameBuilder::new().unwrap();
+    n.append_entry_by_text("CN", name).unwrap();
+    n.build()
+}
+
+fn rand_serial() -> openssl::asn1::Asn1Integer {
+    use openssl::bn::{BigNum, MsbOption};
+    let mut bn = BigNum::new().unwrap();
+    bn.rand(64, MsbOption::MAYBE_ZERO, false).unwrap();
+    bn.to_asn1_integer().unwrap()
+}
+
+/// A self-signed CA (`CA:TRUE`).
+fn make_ca() -> (X509, PKey<Private>) {
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::x509::extension::BasicConstraints;
+    let key = rsa_key();
+    let name = cn("Test CA");
+    let mut b = X509::builder().unwrap();
+    b.set_version(2).unwrap();
+    b.set_serial_number(&rand_serial()).unwrap();
+    b.set_subject_name(&name).unwrap();
+    b.set_issuer_name(&name).unwrap();
+    b.set_pubkey(&key).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
+    b.sign(&key, MessageDigest::sha256()).unwrap();
+    (b.build(), key)
+}
+
+/// A leaf client cert (`CN=<name>`, `clientAuth`) signed by `ca`. Returns (cert_pem, key_pem).
+fn make_client(ca: &X509, ca_key: &PKey<Private>, name: &str) -> (Vec<u8>, Vec<u8>) {
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::x509::extension::ExtendedKeyUsage;
+    let key = rsa_key();
+    let mut b = X509::builder().unwrap();
+    b.set_version(2).unwrap();
+    b.set_serial_number(&rand_serial()).unwrap();
+    b.set_subject_name(&cn(name)).unwrap();
+    b.set_issuer_name(ca.subject_name()).unwrap();
+    b.set_pubkey(&key).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.append_extension(ExtendedKeyUsage::new().client_auth().build().unwrap()).unwrap();
+    b.sign(ca_key, MessageDigest::sha256()).unwrap();
+    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+}
+
+/// Connect (optionally presenting a client cert), negotiate, call `cert.len`, return the length.
+fn mtls_cert_len(addr: SocketAddr, client: Option<(Vec<u8>, Vec<u8>)>) -> usize {
+    use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
+    let mut b = SslConnector::builder(SslMethod::tls()).unwrap();
+    b.set_verify(SslVerifyMode::NONE); // accept the self-signed server cert
+    if let Some((cert_pem, key_pem)) = client {
+        b.set_certificate(&X509::from_pem(&cert_pem).unwrap()).unwrap();
+        b.set_private_key(&PKey::private_key_from_pem(&key_pem).unwrap()).unwrap();
+    }
+    let tcp = std::net::TcpStream::connect(addr).unwrap();
+    let mut s = b.build().connect("localhost", tcp).unwrap();
+    send(&mut s, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}));
+    let _ = recv(&mut s);
+    send(&mut s, &json!({"jsonrpc":"2.0","method":"cert.len","id":UUID,"params":{}}));
+    recv(&mut s)["result"]["len"].as_u64().unwrap() as usize
+}
+
+#[tokio::test]
+async fn mtls_surfaces_verified_client_cert() {
+    let (server_cert, server_key) = self_signed_pem();
+    let (ca, ca_key) = make_ca();
+    let (client_cert, client_key) = make_client(&ca, &ca_key, "client-alice");
+    let ca_pem = ca.to_pem().unwrap();
+
+    let tls = TlsConfig::from_pem_with_client_ca(&server_cert, &server_key, &ca_pem, TlsMode::Userspace).unwrap();
+    let srv = mtls_server();
+    let (listener, addr) = JsonRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let task = {
+        let srv = srv.clone();
+        tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
+    };
+
+    // A CA-signed client cert is verified by the handshake and surfaces on the Peer.
+    let with = tokio::task::spawn_blocking(move || mtls_cert_len(addr, Some((client_cert, client_key))))
+        .await
+        .unwrap();
+    assert!(with > 0, "the verified client cert should surface on Peer::tls");
+
+    // No client cert → the handshake still succeeds (PEER, not fail-if-absent) and nothing surfaces,
+    // so SCRAM / other mechanisms remain usable over the same listener.
+    let without = tokio::task::spawn_blocking(move || mtls_cert_len(addr, None)).await.unwrap();
+    assert_eq!(without, 0, "no client cert → none surfaced, connection still works");
+
+    task.abort();
+}
+
+// --- tls-server-end-point channel binding (RFC 5929), for SCRAM-SHA-512-PLUS --------------------
+
+#[derive(Serialize)]
+struct BindingResult {
+    binding: String,
+}
+
+/// A server that reports this connection's `tls-server-end-point` binding (base64) to the client.
+/// `S` carries the binding the transport surfaced on `Peer::tls`.
+fn binding_server() -> JsonRpcServer<CertState> {
+    let proto = JsonRpcProtocol::<CertState>::builder("conf", "1")
+        .method(JsonRpcMethod::new(
+            MethodDef::new("binding.get"),
+            |_a: NoArgs, cx: &RequestCtx<CertState>| {
+                let binding = cx.session().with_internal(|s| {
+                    s.and_then(|c| c.as_ref()).map(|c| openssl::base64::encode_block(c))
+                });
+                Ok::<_, JsonRpcError>(BindingResult { binding: binding.unwrap_or_default() })
+            },
+        ))
+        .unwrap()
+        .build();
+    JsonRpcServer::<CertState>::builder("binding-server")
+        .allow_unauthenticated_network() // transport test: the protocol has no $/sessionSetup
+        .state_from_peer(|peer| Some(peer.tls.as_ref().and_then(|t| t.channel_binding.clone())))
+        .protocol("main", proto)
+        .build()
+}
+
+/// SHA-256 of a cert's DER, base64 — the expected binding for a SHA-256-signed certificate.
+fn sha256_der_b64(cert_der: &[u8]) -> String {
+    let digest = openssl::hash::hash(openssl::hash::MessageDigest::sha256(), cert_der).unwrap();
+    openssl::base64::encode_block(&digest)
+}
+
+/// Connect, derive the binding *client-side* from the server cert we receive, then ask the server
+/// what binding it computed. Returns `(server_reported, client_derived)`.
+fn client_get_binding(addr: SocketAddr) -> (String, String) {
+    let s = connect_tls(addr);
+    // What a SCRAM client would independently derive from the server's leaf cert.
+    let server_cert_der = s.ssl().peer_certificate().unwrap().to_der().unwrap();
+    let client_derived = sha256_der_b64(&server_cert_der);
+
+    let mut s = s;
+    send(&mut s, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}));
+    let _ = recv(&mut s);
+    send(&mut s, &json!({"jsonrpc":"2.0","method":"binding.get","id":UUID,"params":{}}));
+    let reported = recv(&mut s)["result"]["binding"].as_str().unwrap().to_string();
+    (reported, client_derived)
+}
+
+/// The server's `tls-server-end-point` binding (a) is surfaced on the connection, (b) equals
+/// `SHA-256(server-cert-DER)` for our SHA-256-signed cert, and (c) is byte-identical to what the
+/// client independently derives from the cert it received — i.e. the two ends agree on the binding
+/// without ever exchanging it. Both TLS modes compute it through the same `tls_facts` helper.
+#[tokio::test]
+async fn tls_surfaces_server_end_point_binding() {
+    let (cert, key) = self_signed_pem();
+    let expected = sha256_der_b64(&X509::from_pem(&cert).unwrap().to_der().unwrap());
+
+    for mode in [TlsMode::Userspace, TlsMode::Kernel] {
+        let tls = TlsConfig::from_pem(&cert, &key, mode).unwrap();
+        let srv = binding_server();
+        let (listener, addr) = JsonRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
+        let task = {
+            let srv = srv.clone();
+            tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
+        };
+
+        let (reported, client_derived) =
+            tokio::task::spawn_blocking(move || client_get_binding(addr)).await.unwrap();
+        assert!(!reported.is_empty(), "{mode:?}: no binding surfaced on the connection");
+        assert_eq!(reported, expected, "{mode:?}: binding != SHA-256(server cert DER)");
+        assert_eq!(reported, client_derived, "{mode:?}: server and client disagree on the binding");
+
+        task.abort();
+    }
 }

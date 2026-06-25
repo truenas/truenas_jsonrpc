@@ -19,6 +19,8 @@ pub mod framing;
 mod connection;
 mod negotiate;
 mod peer;
+#[cfg(feature = "passthrough")]
+pub mod scm;
 mod server;
 #[cfg(feature = "tls")]
 mod tls;
@@ -26,7 +28,7 @@ mod transfer;
 #[cfg(feature = "websocket")]
 mod ws;
 
-pub use peer::{Peer, Transport, Ucred};
+pub use peer::{Peer, TlsPeer, Transport, Ucred};
 pub use server::{JsonRpcServer, JsonRpcServerBuilder, UnixConfig};
 pub use transfer::FileTransferExt;
 #[cfg(feature = "tls")]

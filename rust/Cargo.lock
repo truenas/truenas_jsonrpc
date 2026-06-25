@@ -731,6 +731,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "truenas-jsonrpc-auth"
+version = "0.1.0"
+dependencies = [
+ "openssl",
+ "serde",
+ "serde_json",
+ "tokio",
+ "truenas-jsonrpc",
+ "truenas-jsonrpc-server",
+ "truenas-keyring",
+]
+
+[[package]]
 name = "truenas-jsonrpc-codegen"
 version = "0.1.0"
 dependencies = [
@@ -765,6 +778,16 @@ dependencies = [
  "tokio-openssl",
  "tokio-tungstenite",
  "truenas-jsonrpc",
+]
+
+[[package]]
+name = "truenas-keyring"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

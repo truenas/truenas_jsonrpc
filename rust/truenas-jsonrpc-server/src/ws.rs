@@ -19,21 +19,21 @@ use tokio_tungstenite::WebSocketStream;
 use truenas_jsonrpc::{Dispatched, ErrorCode};
 
 use crate::connection::{self, BoundConn};
-use crate::peer::{Peer, Transport};
+use crate::peer::Peer;
 use crate::server::{JsonRpcServer, ServerShared};
 
 impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     /// Accept WebSocket connections on a bound TCP `listener` until an accept error occurs. A
     /// failed WebSocket handshake drops just that connection.
     pub async fn serve_websocket_listener(&self, listener: TcpListener) -> std::io::Result<()> {
+        self.require_network_auth()?;
         loop {
             let (tcp, addr) = listener.accept().await?;
             let _ = tcp.set_nodelay(true);
             let shared = self.shared.clone();
             tokio::spawn(async move {
                 let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
-                let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(addr) };
-                serve_ws(ws, peer, shared).await;
+                serve_ws(ws, Peer::tcp(addr), shared).await;
             });
         }
     }
@@ -57,6 +57,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         listener: TcpListener,
         tls: crate::tls::TlsConfig,
     ) -> std::io::Result<()> {
+        self.require_network_auth()?;
         let acceptor = tls.acceptor();
         loop {
             let (tcp, addr) = listener.accept().await?;
@@ -67,9 +68,10 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                 let Some(tls_stream) = crate::tls::userspace_accept(&acceptor, tcp).await else {
                     return;
                 };
+                // Surface the verified client cert + channel binding before the WS handshake consumes the stream.
+                let (cert, binding) = crate::tls::tls_facts(tls_stream.ssl());
                 let Ok(ws) = tokio_tungstenite::accept_async(tls_stream).await else { return };
-                let peer = Peer { transport: Transport::Tcp, ucred: None, addr: Some(addr) };
-                serve_ws(ws, peer, shared).await;
+                serve_ws(ws, crate::tls::tls_peer(addr, cert, binding), shared).await;
             });
         }
     }

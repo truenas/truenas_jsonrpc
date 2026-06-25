@@ -21,15 +21,23 @@ struct AddResult {
     sum: i64,
 }
 
-fn server() -> JsonRpcServer<()> {
-    let proto = JsonRpcProtocol::<()>::builder("conf", "1")
+fn proto() -> JsonRpcProtocol<()> {
+    JsonRpcProtocol::<()>::builder("conf", "1")
         .method(JsonRpcMethod::new(
             MethodDef::new("math.add"),
             |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
         ))
         .unwrap()
-        .build();
-    JsonRpcServer::<()>::builder("test-server").protocol("main", proto).build()
+        .build()
+}
+
+fn server() -> JsonRpcServer<()> {
+    // These transport tests intentionally serve a protocol with no `$/sessionSetup`; opt past the
+    // network-auth guard (see `network_auth_guard` for the guard itself).
+    JsonRpcServer::<()>::builder("test-server")
+        .protocol("main", proto())
+        .allow_unauthenticated_network()
+        .build()
 }
 
 /// Frame `req`, write it, and read + parse the one framed reply.
@@ -122,4 +130,30 @@ async fn negotiate_errors() {
     assert_eq!(r["error"]["data"]["available"], json!(["main"]));
 
     task.abort();
+}
+
+#[tokio::test]
+async fn network_auth_guard() {
+    // A protocol with no `$/sessionSetup`, on a server that has NOT opted out.
+    let unauth = || {
+        JsonRpcServer::<()>::builder("test-server").protocol("main", proto()).build()
+    };
+
+    // (1) A network transport refuses it (an unauthenticated remote client must not reach gated
+    //     methods) — the serve call returns immediately with InvalidInput, naming the protocol.
+    let (listener, _addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let err = unauth().serve_tcp_listener(listener).await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    assert!(err.to_string().contains("main"), "error should name the protocol: {err}");
+
+    // (2) AF_UNIX is exempt — the same unauthenticated server serves fine over a unix socket.
+    let path = std::env::temp_dir().join(format!("tnrpc-{}-guard.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let srv = unauth();
+    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let task = tokio::spawn(async move { srv.serve_unix_listener(listener).await });
+    let mut client = UnixStream::connect(&path).await.unwrap();
+    negotiate_then_add(&mut client).await;
+    task.abort();
+    let _ = std::fs::remove_file(&path);
 }
