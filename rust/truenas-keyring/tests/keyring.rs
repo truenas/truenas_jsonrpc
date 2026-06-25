@@ -12,6 +12,7 @@ fn sample(username: &str) -> ScramRecord {
         stored_key: "c3RvcmVkS2V5".into(),
         server_key: "c2VydmVyS2V5".into(),
         expiry: 0,
+        roles: vec![],
     }
 }
 

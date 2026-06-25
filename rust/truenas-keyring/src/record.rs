@@ -22,6 +22,11 @@ pub struct ScramRecord {
     pub server_key: String,
     /// Expiry: `-1` revoked, `0` never, `> 0` a Unix timestamp after which it is invalid.
     pub expiry: i64,
+    /// The role names this credential grants. Converted to the session's
+    /// [`RoleMask`](truenas_jsonrpc::RoleMask) at `sessionSetup`; absent in older records (an
+    /// empty grant — only no-role methods are callable).
+    #[serde(default)]
+    pub roles: Vec<String>,
 }
 
 impl ScramRecord {

@@ -18,6 +18,10 @@ pub enum Outcome {
     Authenticated {
         /// The server-internal identity stored on the session.
         identity: Identity,
+        /// The role *names* this identity was granted. The auth stack converts them to a
+        /// [`RoleMask`](truenas_jsonrpc::RoleMask) via its registry (`FULL_ADMIN` / hierarchy
+        /// expanded) and stores it on the session for the per-call authorization gate.
+        roles: Vec<String>,
         /// Optional client-facing info attached to the success reply.
         user_info: Option<serde_json::Value>,
         /// Optional mechanism-specific data attached to the success reply.
@@ -47,10 +51,16 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// Authenticated as `identity`, with no client-facing info or mechanism extras (the common
-    /// single-shot case — peer-cred, mTLS).
+    /// Authenticated as `identity` with the granted `roles` (role names) and no client-facing info
+    /// or mechanism extras.
+    pub fn authenticated_with_roles(identity: Identity, roles: Vec<String>) -> Outcome {
+        Outcome::Authenticated { identity, roles, user_info: None, extra: None }
+    }
+
+    /// Authenticated as `identity` with **no** granted roles (only methods that require no role are
+    /// callable) — the common single-shot case where the mechanism grants no roles.
     pub fn authenticated(identity: Identity) -> Outcome {
-        Outcome::Authenticated { identity, user_info: None, extra: None }
+        Outcome::authenticated_with_roles(identity, Vec::new())
     }
 }
 

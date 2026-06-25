@@ -24,6 +24,7 @@
 //! let record = ScramRecord {
 //!     username: "alice".into(), algorithm: "SHA512".into(), iterations: 500_000,
 //!     salt: String::new(), stored_key: String::new(), server_key: String::new(), expiry: 0,
+//!     roles: vec!["readonly".into()],
 //! };
 //! store.server_keys().put_record("alice", &record, None)?;
 //! let got: Option<ScramRecord> = store.server_keys().get_record("alice")?;

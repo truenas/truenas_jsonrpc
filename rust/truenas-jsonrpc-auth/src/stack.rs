@@ -5,10 +5,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use truenas_jsonrpc::{
-    JsonRpcError, JsonRpcProtocolBuilder, MethodDef, Session, SessionId, SessionLifecycle,
-    SetupOutcome,
+    JsonRpcError, JsonRpcProtocolBuilder, MethodDef, RoleMask, Roles, Session, SessionId,
+    SessionLifecycle, SetupOutcome,
 };
 use truenas_jsonrpc_server::Transport;
+
+/// The conventional role name that grants every privilege (mapped to [`RoleMask::FULL_ADMIN`]).
+pub const FULL_ADMIN: &str = "FULL_ADMIN";
 
 use crate::channel::Channel;
 use crate::mechanism::Mechanism;
@@ -16,9 +19,10 @@ use crate::outcome::{AuthProgress, Identity, Outcome, RejectKind};
 use crate::state::{AuthSession, AuthSessionState};
 use crate::wire::{AuthResponse, AuthResult, ContinueArgs, SetupArgs};
 
-/// An AF_UNIX peer-cred verifier: map the connecting process's credentials to an identity, or
-/// `None` to fall through (the connection must then use an explicit mechanism).
-type PeercredFn = Box<dyn Fn(&Channel) -> Option<Identity> + Send + Sync>;
+/// An AF_UNIX peer-cred verifier: map the connecting process's credentials to an identity plus its
+/// granted role names (e.g. `uid 0 → ["FULL_ADMIN"]`), or `None` to fall through (the connection
+/// must then use an explicit mechanism).
+type PeercredFn = Box<dyn Fn(&Channel) -> Option<(Identity, Vec<String>)> + Send + Sync>;
 
 /// The configured authentication stack: the mechanisms enabled for this protocol (keyed by wire
 /// tag) plus an optional AF_UNIX peer-cred default. Build it with [`AuthStack::builder`] and wire
@@ -26,6 +30,7 @@ type PeercredFn = Box<dyn Fn(&Channel) -> Option<Identity> + Send + Sync>;
 pub struct AuthStack {
     peercred: Option<PeercredFn>,
     mechanisms: HashMap<String, Box<dyn Mechanism>>,
+    registry: Option<Roles>,
 }
 
 /// Builder for [`AuthStack`].
@@ -33,6 +38,7 @@ pub struct AuthStack {
 pub struct AuthStackBuilder {
     peercred: Option<PeercredFn>,
     mechanisms: HashMap<String, Box<dyn Mechanism>>,
+    registry: Option<Roles>,
 }
 
 impl AuthStack {
@@ -48,8 +54,30 @@ impl AuthStack {
             return Outcome::Reject(RejectKind::Denied);
         }
         match self.peercred.as_ref().and_then(|f| f(channel)) {
-            Some(identity) => Outcome::authenticated(identity),
+            Some((identity, roles)) => Outcome::authenticated_with_roles(identity, roles),
             None => Outcome::Reject(RejectKind::AuthErr),
+        }
+    }
+
+    /// Convert granted role *names* to a [`RoleMask`] via the registry: [`FULL_ADMIN`] grants every
+    /// role (all-ones), otherwise the union of each registered name's bit. Unknown names are
+    /// ignored (a stale role in a credential doesn't fail the whole authentication).
+    fn granted_mask(&self, names: &[String]) -> RoleMask {
+        if names.iter().any(|n| n == FULL_ADMIN) {
+            return RoleMask::FULL_ADMIN;
+        }
+        let Some(reg) = &self.registry else { return RoleMask::NONE };
+        names.iter().fold(RoleMask::NONE, |acc, n| match reg.get(n) {
+            Some(bit) => acc.union(bit),
+            None => acc,
+        })
+    }
+
+    /// The granted mask an [`Outcome`] confers (only [`Outcome::Authenticated`] grants roles).
+    fn granted_mask_of(&self, outcome: &Outcome) -> RoleMask {
+        match outcome {
+            Outcome::Authenticated { roles, .. } => self.granted_mask(roles),
+            _ => RoleMask::NONE,
         }
     }
 
@@ -112,10 +140,13 @@ impl AuthStack {
             ));
         }
         let _ = channel;
+        // The granted roles (if any) become the session's role mask for the per-call gate.
+        let granted = self.granted_mask_of(&outcome);
         let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
             Some(auth) => commit(auth, outcome, session_id),
             None => (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }),
         });
+        session.set_roles(granted);
         SetupOutcome::Commit(lifecycle, result)
     }
 
@@ -126,7 +157,8 @@ impl AuthStack {
         session: &Session<AuthSession>,
     ) -> Result<(SessionLifecycle, AuthResult), JsonRpcError> {
         let session_id = session.id();
-        session.with_internal_mut(|slot| {
+        type Committed = ((SessionLifecycle, AuthResult), RoleMask);
+        let (committed, granted) = session.with_internal_mut(|slot| -> Result<Committed, JsonRpcError> {
             let auth = slot.as_mut().ok_or_else(missing_state)?;
             // Take the carried in-progress state; anything else is out of sequence.
             let progress = match std::mem::replace(&mut auth.state, AuthSessionState::Unauthenticated)
@@ -134,7 +166,8 @@ impl AuthStack {
                 AuthSessionState::InProgress(p) => p,
                 other => {
                     auth.state = other;
-                    return Ok((SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }));
+                    let reject = AuthResult { response: AuthResponse::AuthErr };
+                    return Ok(((SessionLifecycle::None, reject), RoleMask::NONE));
                 }
             };
             // A continue must stay on the in-progress mechanism.
@@ -143,20 +176,34 @@ impl AuthStack {
             } else {
                 Outcome::Reject(RejectKind::AuthErr)
             };
-            Ok(commit(auth, outcome, session_id))
-        })
+            let granted = self.granted_mask_of(&outcome);
+            Ok((commit(auth, outcome, session_id), granted))
+        })?;
+        session.set_roles(granted);
+        Ok(committed)
     }
 }
 
 impl AuthStackBuilder {
     /// Set the AF_UNIX peer-cred default: a connection with no declared mechanism authenticates by
-    /// its `SO_PEERCRED` credentials. Return `None` from `f` to require an explicit mechanism.
+    /// its `SO_PEERCRED` credentials, returning the identity plus its granted role names (e.g.
+    /// `uid 0 → ["FULL_ADMIN"]`). Return `None` from `f` to require an explicit mechanism.
     #[must_use]
     pub fn peercred(
         mut self,
-        f: impl Fn(&Channel) -> Option<Identity> + Send + Sync + 'static,
+        f: impl Fn(&Channel) -> Option<(Identity, Vec<String>)> + Send + Sync + 'static,
     ) -> Self {
         self.peercred = Some(Box::new(f));
+        self
+    }
+
+    /// Set the role registry — the canonical role taxonomy. The stack interns the role names a
+    /// mechanism grants into a [`RoleMask`] at `sessionSetup`. Use the **same** [`Roles`] you pass
+    /// to the protocol builder's [`roles`](truenas_jsonrpc::JsonRpcProtocolBuilder::roles) so the
+    /// granted and required masks share one numbering.
+    #[must_use]
+    pub fn roles(mut self, roles: Roles) -> Self {
+        self.registry = Some(roles);
         self
     }
 
@@ -169,7 +216,11 @@ impl AuthStackBuilder {
 
     /// Freeze into a shared [`AuthStack`].
     pub fn build(self) -> Arc<AuthStack> {
-        Arc::new(AuthStack { peercred: self.peercred, mechanisms: self.mechanisms })
+        Arc::new(AuthStack {
+            peercred: self.peercred,
+            mechanisms: self.mechanisms,
+            registry: self.registry,
+        })
     }
 }
 
@@ -213,7 +264,8 @@ pub(crate) fn commit(
     session_id: SessionId,
 ) -> (SessionLifecycle, AuthResult) {
     match outcome {
-        Outcome::Authenticated { identity, user_info, extra } => {
+        // `roles` were converted to the session's mask by the caller (`granted_mask_of`).
+        Outcome::Authenticated { identity, roles: _, user_info, extra } => {
             auth.state = AuthSessionState::Authenticated(identity);
             let response =
                 AuthResponse::Success { session_id: session_id.to_string(), user_info, extra };

@@ -78,6 +78,9 @@ pub enum BrokerVerdict {
     Authenticated {
         /// The server-internal identity to store on the session.
         identity: serde_json::Value,
+        /// The role names the broker granted (converted to the session's mask via the registry).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        roles: Vec<String>,
         /// Optional client-facing identity info echoed in the `SUCCESS` reply.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_info: Option<serde_json::Value>,
@@ -94,8 +97,8 @@ impl BrokerVerdict {
     /// Map the verdict onto the mechanism [`Outcome`] the auth stack commits.
     pub(crate) fn into_outcome(self) -> Outcome {
         match self {
-            BrokerVerdict::Authenticated { identity, user_info } => {
-                Outcome::Authenticated { identity, user_info, extra: None }
+            BrokerVerdict::Authenticated { identity, roles, user_info } => {
+                Outcome::Authenticated { identity, roles, user_info, extra: None }
             }
             BrokerVerdict::Denied => Outcome::Reject(RejectKind::Denied),
             BrokerVerdict::AuthErr => Outcome::Reject(RejectKind::AuthErr),

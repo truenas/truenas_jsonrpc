@@ -10,17 +10,17 @@ use crate::stack::AuthStackBuilder;
 /// The wire tag clients use to select mTLS (`{ "mechanism": "CLIENT_CERTIFICATE" }`).
 pub const MTLS_TAG: &str = "CLIENT_CERTIFICATE";
 
-/// mTLS mechanism: maps the verified client certificate (DER) to an [`Identity`] via a policy
-/// closure (return `None` to reject). Single-shot — the certificate is on the channel, not the
-/// wire — and gated on [`Capability::ClientCert`], so a connection without a client cert is denied
-/// before this runs.
+/// mTLS mechanism: maps the verified client certificate (DER) to an [`Identity`] plus its granted
+/// role names via a policy closure (return `None` to reject). Single-shot — the certificate is on
+/// the channel, not the wire — and gated on [`Capability::ClientCert`], so a connection without a
+/// client cert is denied before this runs.
 pub struct Mtls<F> {
     policy: F,
 }
 
 impl<F> Mtls<F> {
-    /// Build the mechanism from a cert→identity `policy` (parses the DER and returns the identity,
-    /// e.g. from the subject CN / a SAN / the fingerprint).
+    /// Build the mechanism from a cert→`(identity, roles)` `policy` (parses the DER and returns the
+    /// identity, e.g. from the subject CN / a SAN / the fingerprint, plus the role names it grants).
     pub fn new(policy: F) -> Self {
         Self { policy }
     }
@@ -28,7 +28,7 @@ impl<F> Mtls<F> {
 
 impl<F> Mechanism for Mtls<F>
 where
-    F: Fn(&[u8]) -> Option<Identity> + Send + Sync,
+    F: Fn(&[u8]) -> Option<(Identity, Vec<String>)> + Send + Sync,
 {
     fn required(&self) -> &'static [Capability] {
         &[Capability::ClientCert]
@@ -41,17 +41,20 @@ where
         _progress: Option<AuthProgress>,
     ) -> Outcome {
         match channel.client_cert.as_deref().and_then(|der| (self.policy)(der)) {
-            Some(identity) => Outcome::authenticated(identity),
+            Some((identity, roles)) => Outcome::authenticated_with_roles(identity, roles),
             None => Outcome::Reject(RejectKind::AuthErr),
         }
     }
 }
 
 impl AuthStackBuilder {
-    /// Enable mTLS under the [`MTLS_TAG`] tag: derive an identity from the verified client
-    /// certificate (DER) via `policy`.
+    /// Enable mTLS under the [`MTLS_TAG`] tag: derive an identity and its granted role names from
+    /// the verified client certificate (DER) via `policy`.
     #[must_use]
-    pub fn mtls(self, policy: impl Fn(&[u8]) -> Option<Identity> + Send + Sync + 'static) -> Self {
+    pub fn mtls(
+        self,
+        policy: impl Fn(&[u8]) -> Option<(Identity, Vec<String>)> + Send + Sync + 'static,
+    ) -> Self {
         self.mechanism(MTLS_TAG, Mtls::new(policy))
     }
 }

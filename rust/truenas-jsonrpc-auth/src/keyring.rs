@@ -77,6 +77,7 @@ impl<F: Fn(&ScramRecord) -> Value + Send + Sync> CredentialSource for KeyringCre
             stored_key: decode_block(&record.stored_key).ok()?,
             server_key: decode_block(&record.server_key).ok()?,
             identity: (self.identity)(&record),
+            roles: record.roles.clone(),
         })
     }
 }

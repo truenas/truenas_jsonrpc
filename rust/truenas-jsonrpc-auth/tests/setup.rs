@@ -60,7 +60,7 @@ fn response_type(reply: &Value) -> &str {
 async fn peercred_unix_root_establishes() {
     // AF_UNIX with no declared mechanism → peer-cred default; root → authenticated.
     let stack = AuthStack::builder()
-        .peercred(|ch| ch.ucred.filter(|c| c.uid == 0).map(|c| json!({ "uid": c.uid })))
+        .peercred(|ch| ch.ucred.filter(|c| c.uid == 0).map(|c| (json!({ "uid": c.uid }), vec![])))
         .build();
     let proto = proto_with(stack);
     let s = session(&proto, &unix_peer(0));
@@ -78,7 +78,7 @@ async fn peercred_unix_root_establishes() {
 async fn peercred_non_root_falls_through_to_auth_err() {
     // The verifier returns None for a non-root uid → the connection must use a mechanism.
     let stack = AuthStack::builder()
-        .peercred(|ch| ch.ucred.filter(|c| c.uid == 0).map(|c| json!({ "uid": c.uid })))
+        .peercred(|ch| ch.ucred.filter(|c| c.uid == 0).map(|c| (json!({ "uid": c.uid }), vec![])))
         .build();
     let proto = proto_with(stack);
     let s = session(&proto, &unix_peer(1000));
@@ -90,9 +90,44 @@ async fn peercred_non_root_falls_through_to_auth_err() {
 }
 
 #[tokio::test]
+async fn granted_role_names_become_the_session_mask() {
+    // The role *names* a credential grants are interned to the session's `RoleMask` via the stack's
+    // registry at `sessionSetup` — `FULL_ADMIN` → all-ones, a registered name → its bit, and an
+    // unknown name is dropped (a stale grant doesn't fail the whole authentication).
+    use truenas_jsonrpc::{RoleMask, Roles};
+    use truenas_jsonrpc_auth::FULL_ADMIN;
+
+    let registry = Roles::new(["readonly", "ops"]);
+    let stack = AuthStack::builder()
+        .roles(registry.clone())
+        .peercred(|ch| {
+            let uid = ch.ucred?.uid;
+            let roles: Vec<String> = match uid {
+                0 => vec![FULL_ADMIN.to_string()],            // → the all-ones mask
+                5 => vec!["ops".into()],                      // → exactly the ops bit
+                7 => vec!["bogus".into(), "readonly".into()], // unknown name dropped
+                _ => return None,
+            };
+            Some((json!({ "uid": uid }), roles))
+        })
+        .build();
+    let proto = proto_with(stack);
+
+    for (uid, expected) in [
+        (0u32, RoleMask::FULL_ADMIN),
+        (5, registry.get("ops").unwrap()),
+        (7, registry.get("readonly").unwrap()),
+    ] {
+        let s = session(&proto, &unix_peer(uid));
+        assert_eq!(response_type(&call(&proto, &s, "$/sessionSetup", json!({})).await), "SUCCESS");
+        assert_eq!(s.granted_roles(), expected, "uid {uid}");
+    }
+}
+
+#[tokio::test]
 async fn tcp_with_no_mechanism_is_denied() {
     // A network client may not use the peer-cred default — it must declare a mechanism.
-    let stack = AuthStack::builder().peercred(|_| Some(json!({ "any": true }))).build();
+    let stack = AuthStack::builder().peercred(|_| Some((json!({ "any": true }), vec![]))).build();
     let proto = proto_with(stack);
     let s = session(&proto, &tcp_peer());
 
@@ -123,7 +158,7 @@ async fn unsupported_mechanism_is_auth_err() {
 async fn mtls_maps_verified_client_cert_to_identity() {
     // The transport already verified the cert; the mechanism maps it to an identity.
     let stack = AuthStack::builder()
-        .mtls(|der| (der == b"good-cert").then(|| json!({ "cn": "alice" })))
+        .mtls(|der| (der == b"good-cert").then(|| (json!({ "cn": "alice" }), vec![])))
         .build();
     let proto = proto_with(stack);
     let s = session(&proto, &tls_peer(Some(b"good-cert".to_vec())));
@@ -137,7 +172,7 @@ async fn mtls_maps_verified_client_cert_to_identity() {
 #[tokio::test]
 async fn mtls_without_a_client_cert_is_denied() {
     // No client cert on the channel → the CLIENT_CERT capability gate refuses before the policy runs.
-    let stack = AuthStack::builder().mtls(|_| Some(json!({ "any": true }))).build();
+    let stack = AuthStack::builder().mtls(|_| Some((json!({ "any": true }), vec![]))).build();
     let proto = proto_with(stack);
     let s = session(&proto, &tls_peer(None)); // TLS but no client cert
 
@@ -172,6 +207,7 @@ impl Mechanism for TwoRound {
             },
             Some(_carried) => Outcome::Authenticated {
                 identity: json!({ "user": "t" }),
+                roles: vec![],
                 user_info: Some(json!({ "hello": true })),
                 extra: None,
             },

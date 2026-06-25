@@ -43,6 +43,7 @@ async fn passthrough_over_a_real_unix_server_hands_off_to_the_broker() {
             let _ = client.write_all(b"BROKER-AUTHED\n");
             BrokerVerdict::Authenticated {
                 identity: json!({ "via": "broker", "uid": ctx.peercred.map(|p| p.uid) }),
+                roles: vec![],
                 user_info: None,
             }
         });

@@ -58,6 +58,6 @@ pub use passthrough::{
 };
 #[cfg(feature = "scram")]
 pub use scram::{derive_verifier, CredentialSource, Scram, ScramCredentials, SCRAM_TAG};
-pub use stack::{install, AuthStack, AuthStackBuilder};
+pub use stack::{install, AuthStack, AuthStackBuilder, FULL_ADMIN};
 pub use state::{AuthSession, AuthSessionState};
 pub use wire::{AuthResponse, AuthResult, ContinueArgs, SetupArgs};

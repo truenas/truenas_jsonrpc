@@ -64,7 +64,11 @@ fn passthrough_hands_the_real_client_fd_to_the_broker() {
                 return BrokerVerdict::AuthErr;
             }
             client.write_all(b"ok").unwrap(); // talk back on the passed fd
-            BrokerVerdict::Authenticated { identity: json!({ "uid": byte[0] }), user_info: None }
+            BrokerVerdict::Authenticated {
+                identity: json!({ "uid": byte[0] }),
+                roles: vec![],
+                user_info: None,
+            }
         });
         let (conn, _) = listener.accept().unwrap();
         server.serve_conn(&conn).unwrap();
@@ -178,7 +182,11 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
         let server = BrokerServer::new(|ctx: BrokerContext, fd| {
             let mut client = UnixStream::from(fd);
             client.write_all(b"hello-from-broker").unwrap();
-            BrokerVerdict::Authenticated { identity: json!({ "uid": ctx.peercred.unwrap().uid }), user_info: None }
+            BrokerVerdict::Authenticated {
+                identity: json!({ "uid": ctx.peercred.unwrap().uid }),
+                roles: vec![],
+                user_info: None,
+            }
         });
         let (conn, _) = listener.accept().unwrap();
         server.serve_conn(&conn).unwrap();

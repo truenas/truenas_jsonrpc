@@ -225,6 +225,7 @@ fn alice_record(creds: &ScramCredentials, expiry: i64) -> truenas_keyring::Scram
         stored_key: encode_block(&creds.stored_key),
         server_key: encode_block(&creds.server_key),
         expiry,
+        roles: vec![],
     }
 }
 

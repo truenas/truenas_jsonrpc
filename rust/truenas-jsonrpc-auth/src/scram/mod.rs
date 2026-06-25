@@ -44,13 +44,23 @@ pub struct ScramCredentials {
     pub server_key: Vec<u8>,
     /// The identity to authenticate as on success (opaque to the mechanism).
     pub identity: Identity,
+    /// The role names this credential grants (converted to the session's mask at `sessionSetup`).
+    pub roles: Vec<String>,
 }
 
 impl ScramCredentials {
-    /// Mint a verifier from raw key material (PBKDF2-HMAC-SHA512 → StoredKey/ServerKey).
+    /// Mint a verifier from raw key material (PBKDF2-HMAC-SHA512 → StoredKey/ServerKey), granting no
+    /// roles (set [`roles`](ScramCredentials::roles) after, or supply them from a credential store).
     pub fn mint(key: &[u8], salt: Vec<u8>, iterations: u32, identity: Identity) -> ScramCredentials {
         let (stored_key, server_key) = derive_verifier(key, &salt, iterations);
-        ScramCredentials { salt, iterations, stored_key: stored_key.into(), server_key: server_key.into(), identity }
+        ScramCredentials {
+            salt,
+            iterations,
+            stored_key: stored_key.into(),
+            server_key: server_key.into(),
+            identity,
+            roles: Vec::new(),
+        }
     }
 }
 
@@ -83,6 +93,7 @@ struct ScramPending {
     stored_key: Vec<u8>,
     server_key: Vec<u8>,
     identity: Identity,
+    roles: Vec<String>,
 }
 
 fn reject(kind: RejectKind) -> Outcome {
@@ -144,6 +155,7 @@ impl<C: CredentialSource> Scram<C> {
             stored_key: creds.stored_key,
             server_key: creds.server_key,
             identity: creds.identity,
+            roles: creds.roles,
         };
         Outcome::Challenge {
             reply: crate::wire::AuthResponse::Challenge {
@@ -199,6 +211,7 @@ impl<C: CredentialSource> Scram<C> {
         let server_final = format!("v={}", encode_block(&server_sig));
         Outcome::Authenticated {
             identity: pending.identity,
+            roles: pending.roles,
             user_info: None,
             extra: Some(json!({ "scram": server_final })),
         }
