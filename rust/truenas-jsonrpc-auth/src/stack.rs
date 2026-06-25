@@ -15,14 +15,21 @@ pub const FULL_ADMIN: &str = "FULL_ADMIN";
 
 use crate::channel::Channel;
 use crate::mechanism::Mechanism;
-use crate::outcome::{AuthProgress, Identity, Outcome, RejectKind};
+use crate::outcome::{AuthProgress, Identity, Outcome, Principal, RejectKind};
 use crate::state::{AuthSession, AuthSessionState};
 use crate::wire::{AuthResponse, AuthResult, ContinueArgs, SetupArgs};
 
-/// An AF_UNIX peer-cred verifier: map the connecting process's credentials to an identity plus its
-/// granted role names (e.g. `uid 0 → ["FULL_ADMIN"]`), or `None` to fall through (the connection
-/// must then use an explicit mechanism).
-type PeercredFn = Box<dyn Fn(&Channel) -> Option<(Identity, Vec<String>)> + Send + Sync>;
+/// An AF_UNIX peer-cred verifier: map the connecting process's credentials to an identity, or
+/// `None` to fall through (the connection must then use an explicit mechanism). Authorization comes
+/// from the peer's uid (`SO_PEERCRED`) via `server_roles`, not from this closure.
+type PeercredFn = Box<dyn Fn(&Channel) -> Option<Identity> + Send + Sync>;
+
+/// A username→uid resolver (e.g. `getpwnam`): the uid authorization keys off, or `None` if the
+/// account is unknown / rejected. Used for [`Principal::User`] (SCRAM / mTLS).
+type UserResolverFn = Box<dyn Fn(&str) -> Option<u32> + Send + Sync>;
+
+/// A uid→roles source (e.g. the `server_roles` keyring): the role names granted to a uid.
+type RoleSourceFn = Box<dyn Fn(u32) -> Vec<String> + Send + Sync>;
 
 /// The configured authentication stack: the mechanisms enabled for this protocol (keyed by wire
 /// tag) plus an optional AF_UNIX peer-cred default. Build it with [`AuthStack::builder`] and wire
@@ -31,6 +38,8 @@ pub struct AuthStack {
     peercred: Option<PeercredFn>,
     mechanisms: HashMap<String, Box<dyn Mechanism>>,
     registry: Option<Roles>,
+    user_resolver: Option<UserResolverFn>,
+    role_source: Option<RoleSourceFn>,
 }
 
 /// Builder for [`AuthStack`].
@@ -39,6 +48,8 @@ pub struct AuthStackBuilder {
     peercred: Option<PeercredFn>,
     mechanisms: HashMap<String, Box<dyn Mechanism>>,
     registry: Option<Roles>,
+    user_resolver: Option<UserResolverFn>,
+    role_source: Option<RoleSourceFn>,
 }
 
 impl AuthStack {
@@ -53,15 +64,19 @@ impl AuthStack {
         if channel.transport != Transport::Unix {
             return Outcome::Reject(RejectKind::Denied);
         }
+        // Authorization keys off the peer's uid (`SO_PEERCRED`); without it we can't authorize.
+        let Some(uid) = channel.ucred.map(|c| c.uid) else {
+            return Outcome::Reject(RejectKind::AuthErr);
+        };
         match self.peercred.as_ref().and_then(|f| f(channel)) {
-            Some((identity, roles)) => Outcome::authenticated_with_roles(identity, roles),
+            Some(identity) => Outcome::authenticated(identity, Principal::Uid(uid)),
             None => Outcome::Reject(RejectKind::AuthErr),
         }
     }
 
     /// Convert granted role *names* to a [`RoleMask`] via the registry: [`FULL_ADMIN`] grants every
     /// role (all-ones), otherwise the union of each registered name's bit. Unknown names are
-    /// ignored (a stale role in a credential doesn't fail the whole authentication).
+    /// ignored (a stale role doesn't fail the whole authentication).
     fn granted_mask(&self, names: &[String]) -> RoleMask {
         if names.iter().any(|n| n == FULL_ADMIN) {
             return RoleMask::FULL_ADMIN;
@@ -73,10 +88,30 @@ impl AuthStack {
         })
     }
 
-    /// The granted mask an [`Outcome`] confers (only [`Outcome::Authenticated`] grants roles).
+    /// The role *names* a [`Principal`] is granted: resolve it to a uid (a peer-cred uid directly,
+    /// an account name via the username→uid resolver), then read its roles from the role source —
+    /// except **uid 0, which is always full admin**. An unresolvable principal, or no
+    /// resolver/source configured, grants nothing.
+    fn principal_roles(&self, principal: &Principal) -> Vec<String> {
+        let uid = match principal {
+            Principal::Uid(uid) => Some(*uid),
+            Principal::User(name) => self.user_resolver.as_ref().and_then(|f| f(name)),
+            Principal::None => None,
+        };
+        match uid {
+            Some(0) => vec![FULL_ADMIN.to_string()],
+            Some(uid) => self.role_source.as_ref().map(|f| f(uid)).unwrap_or_default(),
+            None => Vec::new(),
+        }
+    }
+
+    /// The granted mask an [`Outcome`] confers (only [`Outcome::Authenticated`] grants roles):
+    /// resolve its principal to role names, then intern them via the registry.
     fn granted_mask_of(&self, outcome: &Outcome) -> RoleMask {
         match outcome {
-            Outcome::Authenticated { roles, .. } => self.granted_mask(roles),
+            Outcome::Authenticated { principal, .. } => {
+                self.granted_mask(&self.principal_roles(principal))
+            }
             _ => RoleMask::NONE,
         }
     }
@@ -186,25 +221,67 @@ impl AuthStack {
 
 impl AuthStackBuilder {
     /// Set the AF_UNIX peer-cred default: a connection with no declared mechanism authenticates by
-    /// its `SO_PEERCRED` credentials, returning the identity plus its granted role names (e.g.
-    /// `uid 0 → ["FULL_ADMIN"]`). Return `None` from `f` to require an explicit mechanism.
+    /// its `SO_PEERCRED` credentials, mapping them to an identity. Return `None` from `f` to require
+    /// an explicit mechanism. Authorization comes from the peer's **uid** via the
+    /// [`role_source`](Self::role_source) (uid 0 ⇒ full admin), not from this closure.
     #[must_use]
-    pub fn peercred(
-        mut self,
-        f: impl Fn(&Channel) -> Option<(Identity, Vec<String>)> + Send + Sync + 'static,
-    ) -> Self {
+    pub fn peercred(mut self, f: impl Fn(&Channel) -> Option<Identity> + Send + Sync + 'static) -> Self {
         self.peercred = Some(Box::new(f));
         self
     }
 
     /// Set the role registry — the canonical role taxonomy. The stack interns the role names a
-    /// mechanism grants into a [`RoleMask`] at `sessionSetup`. Use the **same** [`Roles`] you pass
-    /// to the protocol builder's [`roles`](truenas_jsonrpc::JsonRpcProtocolBuilder::roles) so the
-    /// granted and required masks share one numbering.
+    /// principal is granted into a [`RoleMask`] at `sessionSetup`. Use the **same** [`Roles`] you
+    /// pass to the protocol builder's [`roles`](truenas_jsonrpc::JsonRpcProtocolBuilder::roles) so
+    /// the granted and required masks share one numbering.
     #[must_use]
     pub fn roles(mut self, roles: Roles) -> Self {
         self.registry = Some(roles);
         self
+    }
+
+    /// Set the username→uid resolver used for a [`Principal::User`] (SCRAM / mTLS): it maps an
+    /// authenticated account name to the uid authorization keys off, or `None` to grant no roles.
+    /// With the `nss` feature, [`resolve_users_via_nss`](Self::resolve_users_via_nss) wires
+    /// `getpwnam` here.
+    #[must_use]
+    pub fn user_resolver(mut self, f: impl Fn(&str) -> Option<u32> + Send + Sync + 'static) -> Self {
+        self.user_resolver = Some(Box::new(f));
+        self
+    }
+
+    /// Set the uid→roles source: it returns the role names granted to a uid (uid 0 is full admin
+    /// regardless). With the `keyring` feature, [`roles_from_keyring`](Self::roles_from_keyring)
+    /// wires the `server_roles` ring here.
+    #[must_use]
+    pub fn role_source(mut self, f: impl Fn(u32) -> Vec<String> + Send + Sync + 'static) -> Self {
+        self.role_source = Some(Box::new(f));
+        self
+    }
+
+    /// Resolve a [`Principal::User`]'s uid via the system passwd database (`getpwnam`) — the
+    /// built-in [`user_resolver`](Self::user_resolver) for accounts that live in NSS.
+    #[cfg(feature = "nss")]
+    #[must_use]
+    pub fn resolve_users_via_nss(self) -> Self {
+        self.user_resolver(|name| truenas_nss::getpwnam(name).ok().flatten().map(|e| e.uid))
+    }
+
+    /// Read a uid's roles from a keyring [`server_roles`](truenas_keyring::SERVER_ROLES) ring — the
+    /// built-in [`role_source`](Self::role_source). A uid with no record (or an unreadable one)
+    /// grants no roles.
+    #[cfg(feature = "keyring")]
+    #[must_use]
+    pub fn roles_from_keyring(self, store: Arc<truenas_keyring::KeyringStore>) -> Self {
+        self.role_source(move |uid| {
+            store
+                .server_roles()
+                .get_record::<truenas_keyring::RoleRecord>(&uid.to_string())
+                .ok()
+                .flatten()
+                .map(|r| r.roles)
+                .unwrap_or_default()
+        })
     }
 
     /// Enable a mechanism under its wire `tag` (the `"mechanism"` value clients send).
@@ -220,6 +297,8 @@ impl AuthStackBuilder {
             peercred: self.peercred,
             mechanisms: self.mechanisms,
             registry: self.registry,
+            user_resolver: self.user_resolver,
+            role_source: self.role_source,
         })
     }
 }
@@ -264,8 +343,8 @@ pub(crate) fn commit(
     session_id: SessionId,
 ) -> (SessionLifecycle, AuthResult) {
     match outcome {
-        // `roles` were converted to the session's mask by the caller (`granted_mask_of`).
-        Outcome::Authenticated { identity, roles: _, user_info, extra } => {
+        // The `principal` was resolved to the session's role mask by the caller (`granted_mask_of`).
+        Outcome::Authenticated { identity, principal: _, user_info, extra } => {
             auth.state = AuthSessionState::Authenticated(identity);
             let response =
                 AuthResponse::Success { session_id: session_id.to_string(), user_info, extra };

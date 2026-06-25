@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use truenas_jsonrpc_server::Transport;
 
 use crate::channel::Channel;
-use crate::outcome::{Outcome, RejectKind};
+use crate::outcome::{Outcome, Principal, RejectKind};
 
 /// AF_UNIX peer credentials (`SO_PEERCRED`), forwarded to the broker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -78,9 +78,10 @@ pub enum BrokerVerdict {
     Authenticated {
         /// The server-internal identity to store on the session.
         identity: serde_json::Value,
-        /// The role names the broker granted (converted to the session's mask via the registry).
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        roles: Vec<String>,
+        /// Who to authorize as — the [`Principal`] the stack resolves roles from (a uid, or an
+        /// account name resolved via the username→uid resolver). Defaults to [`Principal::None`].
+        #[serde(default)]
+        principal: Principal,
         /// Optional client-facing identity info echoed in the `SUCCESS` reply.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         user_info: Option<serde_json::Value>,
@@ -97,8 +98,8 @@ impl BrokerVerdict {
     /// Map the verdict onto the mechanism [`Outcome`] the auth stack commits.
     pub(crate) fn into_outcome(self) -> Outcome {
         match self {
-            BrokerVerdict::Authenticated { identity, roles, user_info } => {
-                Outcome::Authenticated { identity, roles, user_info, extra: None }
+            BrokerVerdict::Authenticated { identity, principal, user_info } => {
+                Outcome::Authenticated { identity, principal, user_info, extra: None }
             }
             BrokerVerdict::Denied => Outcome::Reject(RejectKind::Denied),
             BrokerVerdict::AuthErr => Outcome::Reject(RejectKind::AuthErr),

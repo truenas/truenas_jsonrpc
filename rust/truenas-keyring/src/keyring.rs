@@ -12,6 +12,10 @@ use crate::key::{Found, KeyRing, KeyType, SpecialKeyring};
 pub const SERVER_KEYS: &str = "server_keys";
 /// The always-present sub-keyring for **outbound** peer credentials (us → remote servers).
 pub const CLIENT_KEYS: &str = "client_keys";
+/// The always-present sub-keyring mapping a **uid → granted roles** ([`RoleRecord`], keyed by the
+/// uid). The auth layer resolves a principal to a uid (an AF_UNIX peer's `SO_PEERCRED`, or a SCRAM
+/// username via `getpwnam`) and reads its roles here.
+pub const SERVER_ROLES: &str = "server_roles";
 
 /// A config-opened keyring: the resolved root [`KeyRing`] plus a handle to each sub-keyring (the
 /// `server_keys` / `client_keys` built-ins plus any config extras).
@@ -27,7 +31,7 @@ impl KeyringStore {
         config.validate()?;
         let root = resolve_root(config)?;
         let mut subkeyrings = HashMap::new();
-        let names = [SERVER_KEYS, CLIENT_KEYS]
+        let names = [SERVER_KEYS, CLIENT_KEYS, SERVER_ROLES]
             .into_iter()
             .chain(config.subkeyrings.iter().map(String::as_str));
         for name in names {
@@ -47,6 +51,11 @@ impl KeyringStore {
     /// The built-in `client_keys` sub-keyring (outbound peer credentials).
     pub fn client_keys(&self) -> KeyRing {
         *self.subkeyrings.get(CLIENT_KEYS).expect("client_keys is a built-in sub-keyring")
+    }
+
+    /// The built-in `server_roles` sub-keyring (uid → granted roles).
+    pub fn server_roles(&self) -> KeyRing {
+        *self.subkeyrings.get(SERVER_ROLES).expect("server_roles is a built-in sub-keyring")
     }
 
     /// A sub-keyring by name (a built-in or a config extra), or `None` if not configured.

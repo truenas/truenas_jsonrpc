@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 
 use crate::channel::{Capability, Channel};
 use crate::mechanism::Mechanism;
-use crate::outcome::{AuthProgress, Identity, Outcome, RejectKind};
+use crate::outcome::{AuthProgress, Identity, Outcome, Principal, RejectKind};
 use crate::stack::AuthStackBuilder;
 
 use self::crypto::KEY_LEN;
@@ -44,13 +44,11 @@ pub struct ScramCredentials {
     pub server_key: Vec<u8>,
     /// The identity to authenticate as on success (opaque to the mechanism).
     pub identity: Identity,
-    /// The role names this credential grants (converted to the session's mask at `sessionSetup`).
-    pub roles: Vec<String>,
 }
 
 impl ScramCredentials {
-    /// Mint a verifier from raw key material (PBKDF2-HMAC-SHA512 → StoredKey/ServerKey), granting no
-    /// roles (set [`roles`](ScramCredentials::roles) after, or supply them from a credential store).
+    /// Mint a verifier from raw key material (PBKDF2-HMAC-SHA512 → StoredKey/ServerKey). Roles are
+    /// not part of the verifier — authorization is resolved from the account's uid at `sessionSetup`.
     pub fn mint(key: &[u8], salt: Vec<u8>, iterations: u32, identity: Identity) -> ScramCredentials {
         let (stored_key, server_key) = derive_verifier(key, &salt, iterations);
         ScramCredentials {
@@ -59,7 +57,6 @@ impl ScramCredentials {
             stored_key: stored_key.into(),
             server_key: server_key.into(),
             identity,
-            roles: Vec::new(),
         }
     }
 }
@@ -93,7 +90,7 @@ struct ScramPending {
     stored_key: Vec<u8>,
     server_key: Vec<u8>,
     identity: Identity,
-    roles: Vec<String>,
+    username: String,
 }
 
 fn reject(kind: RejectKind) -> Outcome {
@@ -133,8 +130,8 @@ impl<C: CredentialSource> Scram<C> {
             return reject(RejectKind::Denied); // SCRAM-PLUS requires a TLS channel binding
         };
 
-        let Some(creds) = self.source.scram_credentials(&message::unescape_username(&cf.username_raw))
-        else {
+        let username = message::unescape_username(&cf.username_raw);
+        let Some(creds) = self.source.scram_credentials(&username) else {
             return reject(RejectKind::AuthErr); // unknown user
         };
 
@@ -155,7 +152,7 @@ impl<C: CredentialSource> Scram<C> {
             stored_key: creds.stored_key,
             server_key: creds.server_key,
             identity: creds.identity,
-            roles: creds.roles,
+            username,
         };
         Outcome::Challenge {
             reply: crate::wire::AuthResponse::Challenge {
@@ -211,7 +208,7 @@ impl<C: CredentialSource> Scram<C> {
         let server_final = format!("v={}", encode_block(&server_sig));
         Outcome::Authenticated {
             identity: pending.identity,
-            roles: pending.roles,
+            principal: Principal::User(pending.username),
             user_info: None,
             extra: Some(json!({ "scram": server_final })),
         }

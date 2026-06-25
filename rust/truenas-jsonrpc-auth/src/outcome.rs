@@ -3,6 +3,8 @@
 
 use std::any::Any;
 
+use serde::{Deserialize, Serialize};
+
 use crate::wire::AuthResponse;
 
 /// An authenticated identity — opaque to the framework (the application decides its shape, as in
@@ -18,10 +20,13 @@ pub enum Outcome {
     Authenticated {
         /// The server-internal identity stored on the session.
         identity: Identity,
-        /// The role *names* this identity was granted. The auth stack converts them to a
-        /// [`RoleMask`](truenas_jsonrpc::RoleMask) via its registry (`FULL_ADMIN` / hierarchy
-        /// expanded) and stores it on the session for the per-call authorization gate.
-        roles: Vec<String>,
+        /// Who was authenticated, as the auth stack resolves authorization: a uid (AF_UNIX
+        /// peer-cred), an account name (SCRAM / mTLS — resolved to a uid via the configured
+        /// username→uid resolver), or [`Principal::None`]. The stack maps it to a uid, looks the
+        /// uid's roles up in `server_roles` (uid 0 ⇒ full admin), interns them via its
+        /// [`Roles`](truenas_jsonrpc::Roles) registry, and stores the [`RoleMask`](truenas_jsonrpc::RoleMask)
+        /// on the session for the per-call gate.
+        principal: Principal,
         /// Optional client-facing info attached to the success reply.
         user_info: Option<serde_json::Value>,
         /// Optional mechanism-specific data attached to the success reply.
@@ -51,17 +56,26 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// Authenticated as `identity` with the granted `roles` (role names) and no client-facing info
-    /// or mechanism extras.
-    pub fn authenticated_with_roles(identity: Identity, roles: Vec<String>) -> Outcome {
-        Outcome::Authenticated { identity, roles, user_info: None, extra: None }
+    /// Authenticated as `identity`, authorized as `principal` (the uid/account the stack resolves
+    /// roles from), with no client-facing info or mechanism extras.
+    pub fn authenticated(identity: Identity, principal: Principal) -> Outcome {
+        Outcome::Authenticated { identity, principal, user_info: None, extra: None }
     }
+}
 
-    /// Authenticated as `identity` with **no** granted roles (only methods that require no role are
-    /// callable) — the common single-shot case where the mechanism grants no roles.
-    pub fn authenticated(identity: Identity) -> Outcome {
-        Outcome::authenticated_with_roles(identity, Vec::new())
-    }
+/// Who was authenticated, for the auth stack to resolve authorization from. Authorization keys off
+/// the **uid**: an AF_UNIX peer arrives as a [`Uid`](Principal::Uid) directly, a SCRAM/mTLS account
+/// as a [`User`](Principal::User) name the stack resolves to a uid (via the configured
+/// username→uid resolver, e.g. `getpwnam`). [`None`](Principal::None) grants no roles.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Principal {
+    /// A Unix user id — roles come from `server_roles[uid]` (uid 0 ⇒ full admin).
+    Uid(u32),
+    /// An account name — resolved to a uid (then `server_roles[uid]`) by the stack's resolver.
+    User(String),
+    /// No authorization principal: the session is authenticated but granted no roles.
+    #[default]
+    None,
 }
 
 /// Why authentication was refused — maps onto the `AUTH_ERR` / `DENIED` / `EXPIRED` wire responses.

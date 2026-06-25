@@ -30,14 +30,20 @@ serde_json = { workspace = true }
 openssl = { version = "0.10", optional = true }
 # The keyring-backed `CredentialSource` (the `keyring` feature): looks SCRAM verifiers up in the
 # kernel keyring written by `truenas-keyring` / Python `truenas_keyring`. Optional — an embedder
-# may supply its own `CredentialSource` (in-memory, an RPC to middleware, …) instead.
+# may supply its own `CredentialSource` (in-memory, an RPC to middleware, …) instead. The same
+# crate also backs the `server_roles` (uid → roles) lookup for authorization.
 truenas-keyring = { path = "../truenas-keyring", optional = true }
+# The passwd lookup (the `nss` feature): resolve a SCRAM username → uid so authorization can key off
+# the uid. Optional — an embedder may supply its own username→uid resolver instead.
+truenas-nss = { path = "../truenas-nss", optional = true }
 
 [features]
 # SCRAM-SHA-512(-PLUS) challenge-response. Off by default.
 scram = ["dep:openssl"]
 # A kernel-keyring-backed `CredentialSource` for SCRAM (implies `scram`).
 keyring = ["scram", "dep:truenas-keyring"]
+# A built-in passwd-backed username→uid resolver (`getpwnam`) for keying authorization off the uid.
+nss = ["dep:truenas-nss"]
 # Passthrough auth: hand the client fd to a local AF_UNIX broker (+ the broker-server mode). Pulls
 # the server crate's SCM_RIGHTS primitives (no new external dep). Off by default.
 passthrough = ["truenas-jsonrpc-server/passthrough"]

@@ -51,7 +51,7 @@ pub use channel::{Capability, Channel};
 pub use keyring::KeyringCredentials;
 pub use mechanism::Mechanism;
 pub use mtls::{Mtls, MTLS_TAG};
-pub use outcome::{AuthProgress, Identity, Outcome, RejectKind};
+pub use outcome::{AuthProgress, Identity, Outcome, Principal, RejectKind};
 #[cfg(feature = "passthrough")]
 pub use passthrough::{
     BrokerContext, BrokerServer, BrokerVerdict, Passthrough, PeerCred, PASSTHROUGH_TAG,

@@ -741,6 +741,7 @@ dependencies = [
  "truenas-jsonrpc",
  "truenas-jsonrpc-server",
  "truenas-keyring",
+ "truenas-nss",
 ]
 
 [[package]]
@@ -788,6 +789,13 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "truenas-nss"
+version = "0.1.0"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

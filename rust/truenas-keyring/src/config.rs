@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use serde::Deserialize;
 
 use crate::error::Error;
-use crate::keyring::{CLIENT_KEYS, SERVER_KEYS};
+use crate::keyring::{CLIENT_KEYS, SERVER_KEYS, SERVER_ROLES};
 
 /// Which kernel keyring is the root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -83,9 +83,9 @@ impl KeyringConfig {
             if name.contains('\0') {
                 return Err(Error::Config(format!("subkeyring name {name:?} contains a NUL byte")));
             }
-            if name == SERVER_KEYS || name == CLIENT_KEYS {
+            if name == SERVER_KEYS || name == CLIENT_KEYS || name == SERVER_ROLES {
                 return Err(Error::Config(format!(
-                    "subkeyring {name:?} duplicates a built-in (server_keys / client_keys are always present)"
+                    "subkeyring {name:?} duplicates a built-in (server_keys / client_keys / server_roles are always present)"
                 )));
             }
             if !seen.insert(name.as_str()) {

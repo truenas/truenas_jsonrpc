@@ -20,7 +20,7 @@ use truenas_jsonrpc::{
 };
 use truenas_jsonrpc_auth::{
     install, AuthSession, AuthStack, BrokerContext, BrokerServer, BrokerVerdict, Channel, Outcome,
-    Passthrough, RejectKind,
+    Passthrough, Principal, RejectKind,
 };
 use truenas_jsonrpc_server::{Peer, Ucred};
 
@@ -66,7 +66,7 @@ fn passthrough_hands_the_real_client_fd_to_the_broker() {
             client.write_all(b"ok").unwrap(); // talk back on the passed fd
             BrokerVerdict::Authenticated {
                 identity: json!({ "uid": byte[0] }),
-                roles: vec![],
+                principal: Principal::None,
                 user_info: None,
             }
         });
@@ -184,7 +184,7 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
             client.write_all(b"hello-from-broker").unwrap();
             BrokerVerdict::Authenticated {
                 identity: json!({ "uid": ctx.peercred.unwrap().uid }),
-                roles: vec![],
+                principal: Principal::None,
                 user_info: None,
             }
         });

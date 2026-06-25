@@ -16,7 +16,9 @@ use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_jsonrpc::JsonRpcProtocol;
-use truenas_jsonrpc_auth::{install, AuthSession, AuthStack, BrokerContext, BrokerServer, BrokerVerdict};
+use truenas_jsonrpc_auth::{
+    install, AuthSession, AuthStack, BrokerContext, BrokerServer, BrokerVerdict, Principal,
+};
 use truenas_jsonrpc_server::{framing, JsonRpcServer, UnixConfig};
 
 fn tmp(tag: &str) -> PathBuf {
@@ -43,7 +45,7 @@ async fn passthrough_over_a_real_unix_server_hands_off_to_the_broker() {
             let _ = client.write_all(b"BROKER-AUTHED\n");
             BrokerVerdict::Authenticated {
                 identity: json!({ "via": "broker", "uid": ctx.peercred.map(|p| p.uid) }),
-                roles: vec![],
+                principal: Principal::None,
                 user_info: None,
             }
         });

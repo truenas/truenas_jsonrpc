@@ -1,5 +1,5 @@
-//! [`ScramRecord`] — the SCRAM verifier stored per credential (fields modeled on TrueNAS's
-//! `UserApiKey`).
+//! The records stored in the keyring: [`ScramRecord`] (a SCRAM verifier, modeled on TrueNAS's
+//! `UserApiKey`) and [`RoleRecord`] (a uid's granted roles).
 
 use serde::{Deserialize, Serialize};
 
@@ -22,11 +22,6 @@ pub struct ScramRecord {
     pub server_key: String,
     /// Expiry: `-1` revoked, `0` never, `> 0` a Unix timestamp after which it is invalid.
     pub expiry: i64,
-    /// The role names this credential grants. Converted to the session's
-    /// [`RoleMask`](truenas_jsonrpc::RoleMask) at `sessionSetup`; absent in older records (an
-    /// empty grant — only no-role methods are callable).
-    #[serde(default)]
-    pub roles: Vec<String>,
 }
 
 impl ScramRecord {
@@ -44,4 +39,17 @@ impl ScramRecord {
             None
         }
     }
+}
+
+/// The roles granted to one **uid**. Stored as the JSON payload of a `user` key in `server_roles`,
+/// keyed by the uid (its decimal string). The auth layer reads it after resolving a principal to a
+/// uid and interns `roles` into the session's [`RoleMask`](truenas_jsonrpc::RoleMask). `uid 0` is
+/// full admin regardless of whether a record exists.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoleRecord {
+    /// The uid these roles are granted to (redundant with the lookup key, for self-description).
+    pub uid: u32,
+    /// The role names granted to this uid; absent/empty means no roles (only no-role methods).
+    #[serde(default)]
+    pub roles: Vec<String>,
 }

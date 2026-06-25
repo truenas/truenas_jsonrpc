@@ -1,7 +1,9 @@
 //! Config validation (pure) + best-effort keyring exercises (skipped if the environment blocks the
 //! keyring syscalls): the high-level record round-trip and the low-level `Key`/`KeyRing` primitives.
 
-use truenas_keyring::{Found, KeyRing, KeyType, KeyringConfig, KeyringStore, ScramRecord, SpecialKeyring};
+use truenas_keyring::{
+    Found, KeyRing, KeyType, KeyringConfig, KeyringStore, RoleRecord, ScramRecord, SpecialKeyring,
+};
 
 fn sample(username: &str) -> ScramRecord {
     ScramRecord {
@@ -12,7 +14,6 @@ fn sample(username: &str) -> ScramRecord {
         stored_key: "c3RvcmVkS2V5".into(),
         server_key: "c2VydmVyS2V5".into(),
         expiry: 0,
-        roles: vec![],
     }
 }
 
@@ -49,6 +50,8 @@ fn subkeyring_names_are_validated() {
     assert!(KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["extra"] }"#).is_ok());
     let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["server_keys"] }"#).unwrap_err();
     assert!(err.to_string().contains("built-in"), "{err}");
+    let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["server_roles"] }"#).unwrap_err();
+    assert!(err.to_string().contains("built-in"), "{err}");
     let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["a", "a"] }"#).unwrap_err();
     assert!(err.to_string().contains("duplicate"), "{err}");
     assert!(KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": [""] }"#).is_err());
@@ -74,7 +77,18 @@ fn store_record_roundtrip() {
     assert!(sk.remove_record("alice").unwrap());
     assert!(!sk.remove_record("alice").unwrap());
 
+    // server_roles: uid → roles, keyed by the uid's decimal string.
+    let sr = store.server_roles();
+    let rec = RoleRecord { uid: 1000, roles: vec!["READONLY".into(), "SHARING_WRITE".into()] };
+    if sr.put_record("1000", &rec, None).is_ok() {
+        let got: RoleRecord = sr.get_record("1000").unwrap().expect("uid 1000 present");
+        assert_eq!(got.uid, 1000);
+        assert_eq!(got.roles, ["READONLY", "SHARING_WRITE"]);
+        assert!(sr.get_record::<RoleRecord>("4242").unwrap().is_none());
+    }
+
     assert_ne!(store.server_keys().serial(), store.client_keys().serial());
+    assert_ne!(store.server_roles().serial(), store.server_keys().serial());
     assert!(store.subkeyring("extra").is_some());
     assert!(store.subkeyring("missing").is_none());
     let _ = store.root().serial();

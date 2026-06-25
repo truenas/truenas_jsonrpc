@@ -24,7 +24,6 @@
 //! let record = ScramRecord {
 //!     username: "alice".into(), algorithm: "SHA512".into(), iterations: 500_000,
 //!     salt: String::new(), stored_key: String::new(), server_key: String::new(), expiry: 0,
-//!     roles: vec!["readonly".into()],
 //! };
 //! store.server_keys().put_record("alice", &record, None)?;
 //! let got: Option<ScramRecord> = store.server_keys().get_record("alice")?;
@@ -41,5 +40,5 @@ mod sys;
 pub use config::{KeyringConfig, KeyringType};
 pub use error::Error;
 pub use key::{Description, Found, Key, KeyRing, KeyType, SpecialKeyring};
-pub use keyring::{KeyringStore, CLIENT_KEYS, SERVER_KEYS};
-pub use record::ScramRecord;
+pub use keyring::{KeyringStore, CLIENT_KEYS, SERVER_KEYS, SERVER_ROLES};
+pub use record::{RoleRecord, ScramRecord};
