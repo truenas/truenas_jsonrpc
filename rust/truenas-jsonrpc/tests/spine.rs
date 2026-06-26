@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
+    AuditOutcome,
     Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
     NullOutbound, Outbound, RequestCtx, Roles, Session, SessionLifecycle,
 };
@@ -242,7 +243,7 @@ async fn server_info_probe() {
 #[tokio::test]
 #[allow(clippy::type_complexity)]
 async fn audit_redacts_secret_fields() {
-    let captured: Arc<Mutex<Vec<(Value, Value, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
+    let captured: Arc<Mutex<Vec<(Value, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
         .method(
@@ -252,8 +253,8 @@ async fn audit_redacts_secret_fields() {
             ),
         )
         .unwrap()
-        .audit_sink(move |r: &JsonRpcRequest, resp: &Value, _s: &Session<()>, msg: Option<&str>| {
-            sink.lock().unwrap().push((r.params.clone(), resp.clone(), msg.map(str::to_string)));
+        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+            sink.lock().unwrap().push((r.params.clone(), msg.map(str::to_string)));
         })
         .build();
     let s = session(&proto, Some(()));
@@ -265,10 +266,9 @@ async fn audit_redacts_secret_fields() {
     // But redacted in the audit view.
     let rows = captured.lock().unwrap();
     assert_eq!(rows.len(), 1);
-    let (params, audit_resp, msg) = &rows[0];
+    let (params, msg) = &rows[0];
     assert_eq!(params["password"], "********");
     assert_eq!(params["user"], "u");
-    assert_eq!(audit_resp["result"]["password"], "********");
     assert_eq!(msg.as_deref(), Some("user login"));
 }
 

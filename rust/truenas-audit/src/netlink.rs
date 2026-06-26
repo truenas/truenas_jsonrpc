@@ -58,6 +58,11 @@ impl AuditSocket {
 
     /// Send one `AUDIT_*` user message (`msg` is the `key=value` record text), then read the ack.
     /// `Ok(Delivered)` = accepted, `Ok(Unavailable)` = benignly off, `Err` = a real failure.
+    ///
+    /// Note: under kernel-audit backpressure (`auditd` behind, backlog over `audit_backlog_limit`)
+    /// this `sendto` can **block the calling thread uninterruptibly** for up to
+    /// `audit_backlog_wait_time` — regardless of `O_NONBLOCK`. That is why it only ever runs on the
+    /// drain thread; see the `sink` module docs.
     pub(crate) fn send(&mut self, msg_type: u16, msg: &str) -> io::Result<SendStatus> {
         // libaudit sends `strlen(msg)+1` — the payload is NUL-terminated.
         let payload_len = msg.len() + 1;

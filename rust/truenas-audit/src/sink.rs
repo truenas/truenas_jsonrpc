@@ -7,14 +7,23 @@
 //! dispatch path — the Rust analogue of Python's `use_audit_queue` drain thread (which the core
 //! spine otherwise lacks). Auditing must never break or block dispatch, so overflow is dropped and
 //! counted, and the sink never panics.
+//!
+//! **Why a dedicated thread and not an async send?** The kernel audit subsystem applies
+//! *backpressure*: when `auditd` can't keep up and the kernel's `audit_queue` grows past
+//! `audit_backlog_limit` (default 64), the netlink `sendmsg` neither fails nor yields — instead
+//! `kernel/audit.c:audit_receive()` parks the **calling thread** in `TASK_UNINTERRUPTIBLE` for up to
+//! `audit_backlog_wait_time` (default `60*HZ`, i.e. 60 s), in the sender's own syscall context. That
+//! stall is gated on backlog depth, **not** on the socket's `O_NONBLOCK` flag, so it can't be made
+//! non-blocking or driven through `AsyncFd` — inlining the send would freeze a tokio reactor worker
+//! for seconds. Confining that (rare, bounded) block to this drain thread is the only safe option,
+//! and the bounded queue + drop-and-count is how we shed load when the kernel pushes back on *us*.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use serde_json::Value;
-use truenas_jsonrpc::{AuditSink, JsonRpcRequest, Session};
+use truenas_jsonrpc::{AuditOutcome, AuditSink, JsonRpcRequest, Session};
 
 use crate::netlink::{AuditSocket, SendStatus};
 use crate::record::{build_record, lost_record, AuditPrincipal};
@@ -49,7 +58,7 @@ impl<S: Send + Sync + 'static> AuditSink<S> for LinuxAuditSink<S> {
     fn audit(
         &self,
         request: &JsonRpcRequest,
-        response: &Value,
+        outcome: AuditOutcome<'_>,
         session: &Session<S>,
         audit_message: Option<&str>,
     ) {
@@ -57,7 +66,7 @@ impl<S: Send + Sync + 'static> AuditSink<S> for LinuxAuditSink<S> {
         let aid = uuid::Uuid::new_v4().to_string();
         let sess = session.id().to_string();
         let record =
-            build_record(&self.service, &aid, &sess, request, response, &principal, audit_message);
+            build_record(&self.service, &aid, &sess, request, outcome, &principal, audit_message);
         // Non-blocking: a full queue drops + counts rather than stalling dispatch.
         if self.tx.try_send(record).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);

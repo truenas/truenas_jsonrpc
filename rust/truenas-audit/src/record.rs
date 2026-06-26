@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-use truenas_jsonrpc::JsonRpcRequest;
+use truenas_jsonrpc::{AuditOutcome, JsonRpcRequest};
 
 // AUDIT_* user-message types (uapi/linux/audit.h + audit-records.h); see the PAM mapping.
 const AUDIT_USER_AUTH: u16 = 1100;
@@ -18,7 +18,7 @@ const AUDIT_USER_END: u16 = 1106;
 const AUDIT_TRUSTED_APP: u16 = 1121;
 
 /// The `NOT_AUTHORIZED` JSON-RPC error code (a denial → `AUDIT_USER_ACCT`, `res=failed`).
-const NOT_AUTHORIZED: i64 = -32000;
+const NOT_AUTHORIZED: i32 = -32000;
 
 /// The authenticated principal an audit record describes — produced by the embedder's extractor
 /// from the session's identity + peer. All optional: an unauthenticated/anonymous call still audits.
@@ -43,14 +43,13 @@ pub(crate) fn build_record(
     aid: &str,
     sess: &str,
     request: &JsonRpcRequest,
-    response: &Value,
+    outcome: AuditOutcome<'_>,
     principal: &AuditPrincipal,
     audit_message: Option<&str>,
 ) -> (u16, String) {
-    let error = response.get("error");
-    let success = error.is_none();
-    let error_code = error.and_then(|e| e.get("code")).and_then(Value::as_i64);
-    let (msg_type, verb, is_control) = classify(&request.method, error_code);
+    let error = outcome.error();
+    let success = outcome.succeeded();
+    let (msg_type, verb, is_control) = classify(&request.method, error.map(|e| e.code));
 
     let mut buf = String::with_capacity(256);
     // Standard (ausearch-keyed) fields — `op`/`res` are bare tokens, the rest are nv-encoded.
@@ -86,8 +85,13 @@ pub(crate) fn build_record(
             encode_nv(&mut buf, &format!("event_data_{}", sanitize_key(k)), &value_to_field(v));
         }
     }
+    // The error, flattened into native fields (code + message + optional data) — not a JSON blob.
     if let Some(err) = error {
-        encode_nv(&mut buf, "event_error", &err.to_string());
+        encode_nv(&mut buf, "event_error_code", &err.code.to_string());
+        encode_nv(&mut buf, "event_error", &err.message);
+        if let Some(data) = &err.data {
+            encode_nv(&mut buf, "event_error_data", &value_to_field(data));
+        }
     }
 
     (msg_type, buf)
@@ -100,7 +104,7 @@ pub(crate) fn lost_record(service: &str, n: u64) -> (u16, String) {
 }
 
 /// Map an event to its `(AUDIT_* type, op-verb, is_control)`, mirroring linux-PAM's switch.
-fn classify(method: &str, error_code: Option<i64>) -> (u16, &'static str, bool) {
+fn classify(method: &str, error_code: Option<i32>) -> (u16, &'static str, bool) {
     match method {
         "$/sessionSetup" | "$/sessionSetupContinue" => (AUDIT_USER_AUTH, "authentication", true),
         "$/sessionClose" => (AUDIT_USER_END, "session_close", true),
@@ -162,6 +166,7 @@ fn sanitize_key(key: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use truenas_jsonrpc::JsonRpcError;
 
     fn req(method: &str, params: Value) -> JsonRpcRequest {
         JsonRpcRequest { method: method.into(), id: Some("rid-1".into()), params, roles: vec![] }
@@ -193,7 +198,7 @@ mod tests {
             "aid-123",
             "sess-1",
             &req("pool.query", json!({ "pool": "tank", "recursive": true })),
-            &json!({ "jsonrpc": "2.0", "id": "rid-1", "result": [] }),
+            AuditOutcome::Success,
             &p,
             Some("query pools"),
         );
@@ -215,7 +220,7 @@ mod tests {
             "aid",
             "sess-1",
             &req("x.query", json!({ "filters": [["name", "=", "x"]] })),
-            &json!({ "result": [] }),
+            AuditOutcome::Success,
             &AuditPrincipal::default(),
             None,
         );
@@ -231,14 +236,19 @@ mod tests {
             "aid",
             "sess-1",
             &req("secret.op", json!({})),
-            &json!({ "error": { "code": -32000, "message": "Not authorized" } }),
+            AuditOutcome::Failure(&JsonRpcError {
+                code: -32000,
+                message: "Not authorized".to_string(),
+                data: None,
+            }),
             &AuditPrincipal::default(),
             None,
         );
         assert_eq!(ty, AUDIT_USER_ACCT); // NOT_AUTHORIZED → accounting
         assert!(msg.contains("op=svc:accounting"));
         assert!(msg.contains(" res=failed"));
-        assert!(msg.contains(" event_error="));
+        assert!(msg.contains(" event_error_code=\"-32000\""));
+        assert!(msg.contains(" event_error=")); // message "Not authorized" (hex — has a space)
     }
 
     #[test]
@@ -248,7 +258,7 @@ mod tests {
             "aid",
             "sess-1",
             &req("$/sessionSetup", json!({ "mechanism": "********" })),
-            &json!({ "result": {} }),
+            AuditOutcome::Success,
             &AuditPrincipal::default(),
             None,
         );

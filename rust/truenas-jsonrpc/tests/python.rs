@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use serde_json::value::to_raw_value;
 use serde_json::Value;
 use truenas_jsonrpc::{
+    AuditOutcome,
     JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, PyOutcome, PyResult,
     Roles, Session,
 };
@@ -49,7 +50,7 @@ async fn python_ok_passes_params_and_session_view_and_audits() {
         .python_method(MethodDef::new("py.echo").audit_message("call"))
         .unwrap()
         .python_dispatcher(mock)
-        .audit_sink(move |req: &JsonRpcRequest, _r: &Value, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             rec.lock().unwrap().push((req.method.clone(), msg.map(str::to_string)));
         })
         .build();

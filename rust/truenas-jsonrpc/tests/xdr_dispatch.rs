@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
+    AuditOutcome,
     AsyncJsonRpcMethod, Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest,
     MethodDef, NullOutbound, RequestCtx, Roles, Session, SessionLifecycle,
 };
@@ -208,7 +209,8 @@ async fn handler_panic_is_internal_error() {
 
 #[tokio::test]
 async fn audited_xdr_call_emits_redacted_audit_record() {
-    // An audited XDR method: the typed params + result are reflected to JSON for the audit sink
+    // An audited XDR method: the typed params are reflected to JSON for the audit sink (the result
+    // is not — the record carries the structured outcome, not the payload)
     // (XDR is non-self-describing), with the `secret_fields` redacted — parity with the JSON wire.
     let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
@@ -220,8 +222,8 @@ async fn audited_xdr_call_emits_redacted_audit_record() {
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, msg: Option<&str>| {
-            *cap.lock().unwrap() = Some(json!({ "params": req.params, "resp": resp, "msg": msg }));
+        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+            *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
         })
         .build();
     let request = build_request(2010, Some(TEST_ID), &to_bytes(&AddArgs { a: 2, b: 40 }).unwrap()).unwrap();
@@ -231,15 +233,15 @@ async fn audited_xdr_call_emits_redacted_audit_record() {
     let rec = captured.lock().unwrap().take().expect("the audit sink fired");
     assert_eq!(rec["params"]["a"], "********"); // secret field redacted in the reflected params
     assert_eq!(rec["params"]["b"], 40); //          the rest reflected from the typed XDR struct
-    assert_eq!(rec["resp"]["result"]["sum"], 42); // result reflected into the audit response
     assert_eq!(rec["msg"], "did the secret thing");
 }
 
 #[tokio::test]
+#[allow(clippy::type_complexity)] // (Value, Option<i32>) capture
 async fn audited_xdr_denial_is_audited() {
     // A denied XDR call is still audited (like the JSON wire) — and because the params are
     // typed-decoded *before* authorization, the audit record carries them even on denial.
-    let captured: Arc<Mutex<Option<(Value, Value)>>> = Arc::new(Mutex::new(None));
+    let captured: Arc<Mutex<Option<(Value, Option<i32>)>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .roles(Roles::new(["AUTH"]))
@@ -250,17 +252,17 @@ async fn audited_xdr_denial_is_audited() {
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, _m: Option<&str>| {
-            *cap.lock().unwrap() = Some((req.params.clone(), resp.clone()));
+        .audit_sink(move |req: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+            *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
         })
         .build();
     let request = build_request(2011, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire (required role not granted)
-    let (params, resp) = captured.lock().unwrap().take().expect("the denial was audited");
+    let (params, err_code) = captured.lock().unwrap().take().expect("the denial was audited");
     assert_eq!(params["a"], 1); // params reflected even on denial (decode precedes authz)
-    assert_eq!(resp["error"]["code"], -32000);
+    assert_eq!(err_code, Some(-32000));
 }
 
 #[tokio::test]
@@ -358,7 +360,8 @@ async fn async_unencodable_result_is_internal_error() {
 
 #[tokio::test]
 async fn async_audited_xdr_call_emits_redacted_audit_record() {
-    // Audit parity on the async path: the typed params + result reflect to JSON for the sink
+    // Audit parity on the async path: the typed params reflect to JSON for the sink (not the result
+    // — the record carries the structured outcome)
     // (with `secret_fields` redacted), and the audit record's id is the lazily-formatted UUID.
     let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
@@ -370,8 +373,8 @@ async fn async_audited_xdr_call_emits_redacted_audit_record() {
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, msg: Option<&str>| {
-            *cap.lock().unwrap() = Some(json!({ "params": req.params, "resp": resp, "msg": msg }));
+        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+            *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
         })
         .build();
     let request = build_request(2010, Some(TEST_ID), &to_bytes(&AddArgs { a: 2, b: 40 }).unwrap()).unwrap();
@@ -380,16 +383,15 @@ async fn async_audited_xdr_call_emits_redacted_audit_record() {
     let rec = captured.lock().unwrap().take().expect("the audit sink fired");
     assert_eq!(rec["params"]["a"], "********"); // secret field redacted
     assert_eq!(rec["params"]["b"], 40);
-    assert_eq!(rec["resp"]["result"]["sum"], 42);
-    assert_eq!(rec["resp"]["id"], "123e4567-e89b-12d3-a456-426614174000"); // id materialized for audit
     assert_eq!(rec["msg"], "did the secret thing");
 }
 
 #[tokio::test]
+#[allow(clippy::type_complexity)] // (Value, Option<i32>) capture
 async fn async_audited_denial_is_audited() {
     // A denied async XDR call: NOT_AUTHORIZED on the wire, and still audited (params reflected
     // even on denial, since decode precedes authz) — exercises the audit error-envelope branch.
-    let captured: Arc<Mutex<Option<(Value, Value)>>> = Arc::new(Mutex::new(None));
+    let captured: Arc<Mutex<Option<(Value, Option<i32>)>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .roles(Roles::new(["AUTH"]))
@@ -400,17 +402,17 @@ async fn async_audited_denial_is_audited() {
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, _m: Option<&str>| {
-            *cap.lock().unwrap() = Some((req.params.clone(), resp.clone()));
+        .audit_sink(move |req: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+            *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
         })
         .build();
     let request = build_request(2011, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire (required role not granted)
-    let (params, resp) = captured.lock().unwrap().take().expect("the denial was audited");
+    let (params, err_code) = captured.lock().unwrap().take().expect("the denial was audited");
     assert_eq!(params["a"], 1); // params reflected even on denial (decode precedes authz)
-    assert_eq!(resp["error"]["code"], -32000);
+    assert_eq!(err_code, Some(-32000));
 }
 
 #[tokio::test]

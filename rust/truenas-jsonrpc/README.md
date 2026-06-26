@@ -30,8 +30,12 @@ reply bytes (or a directive); it owns no socket. For a runnable transport see
   `required ⊆ granted` (subset / AND semantics). `RoleMask::FULL_ADMIN` (all-ones) satisfies
   every gate and may cancel anything; resource / parameter checks are the handler's job.
 - Wires: JSON-RPC (text) and XDR (binary, selected by a leading TXDR magic).
-- Seams: `AuditSink`, `Canceller`, `ServerInfoHandler`, `Outbound` (the pub/sub / `$/progress`
-  back-channel), `PyDispatcher` (runs `python:true` bodies), `Secret<T>` (audit redaction).
+- Seams: `AuditSink` — called with a structured `AuditOutcome` (`Success` | `Failure(&JsonRpcError)`)
+  and the request params (secrets already redacted), **not** a re-parsed response envelope, so the
+  dispatch path never serializes-then-reparses the reply just to audit it; covers method calls plus
+  the `$/sessionSetup` / `$/sessionClose` / `$/cancelRequest` control ops. Other seams: `Canceller`,
+  `ServerInfoHandler`, `Outbound` (the pub/sub / `$/progress` back-channel), `PyDispatcher` (runs
+  `python:true` bodies), `Secret<T>` (audit redaction).
 
 ## Dependencies
 

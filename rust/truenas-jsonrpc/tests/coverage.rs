@@ -11,6 +11,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
+    AuditOutcome,
     AsyncJsonRpcMethod, Clock, Dispatched, Error, ErrorCode, IdGen, JsonRpcError, JsonRpcMethod,
     JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, RoleMask, Roles, Session,
     SessionId, SessionLifecycle,
@@ -355,8 +356,8 @@ async fn session_setup_is_audited_and_redacted() {
             MethodDef::new("$/sessionSetup").secret_fields(["password"]),
             |_a: SetupArgs, _s: &Session<String>| Ok((SessionLifecycle::Established, json!({ "token": "sekret" }))),
         )
-        .audit_sink(move |r: &JsonRpcRequest, resp: &Value, _s: &Session<String>, _m: Option<&str>| {
-            cap.lock().unwrap().push(json!({ "params": r.params, "response": resp }));
+        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<String>, _m: Option<&str>| {
+            cap.lock().unwrap().push(json!({ "params": r.params }));
         })
         .build();
     let s = proto.new_session(None, Arc::new(NullOutbound));
@@ -410,7 +411,7 @@ async fn audited_request_without_params_snapshots_empty_object() {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             *sp.lock().unwrap() = req.params.clone();
         })
         .build();
@@ -474,7 +475,7 @@ async fn audit_message_join_variants() {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .audit_sink(move |_r: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |_r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             sink.lock().unwrap().push(msg.map(str::to_string));
         })
         .build();
@@ -498,7 +499,7 @@ async fn audit_redacts_secrets_in_nested_arrays() {
             |a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(a),
         ))
         .unwrap()
-        .audit_sink(move |r: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             sink.lock().unwrap().push(r.params.clone());
         })
         .build();

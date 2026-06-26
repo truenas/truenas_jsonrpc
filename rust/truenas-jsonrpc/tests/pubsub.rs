@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
+    AuditOutcome,
     Dispatched, IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
     NullOutbound, Outbound, RequestCtx, Roles, Session, SessionId, SubscriptionDef,
 };
@@ -145,8 +146,8 @@ async fn subscribe_is_audited() {
             MethodDef::new("events").audit_message("subscribed"),
         ))
         .unwrap()
-        .audit_sink(move |r: &JsonRpcRequest, resp: &Value, _s: &Session<()>, msg: Option<&str>| {
-            cap.lock().unwrap().push(json!({ "method": r.method, "response": resp, "msg": msg }));
+        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+            cap.lock().unwrap().push(json!({ "method": r.method, "msg": msg }));
         })
         .id_gen(FixedId(PINNED.parse().unwrap()))
         .build();
@@ -155,7 +156,6 @@ async fn subscribe_is_audited() {
     let rows = captured.lock().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["method"], "events");
-    assert_eq!(rows[0]["response"]["result"], json!(PINNED)); // the ack (sub-id) is audited
     assert_eq!(rows[0]["msg"], json!("subscribed"));
 }
 

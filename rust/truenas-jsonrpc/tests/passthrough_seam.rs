@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::value::{to_raw_value, RawValue};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
+    AuditOutcome,
     Dispatched, FileTransfer, JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound,
     Session, SessionLifecycle, SetupHandoff, SetupOutcome,
 };
@@ -31,7 +32,8 @@ fn raw(v: Value) -> Box<RawValue> {
 type Captured = Arc<Mutex<Vec<Value>>>;
 
 /// A protocol whose `$/sessionSetup` takes over (or commits) per the `mode` param. `captured`, if
-/// set, installs an audit sink recording `{params, response}` for each setup.
+/// set, installs an audit sink recording `{params, error}` — the structured outcome (the success
+/// result payload is deliberately not audited) — for each setup.
 fn proto(captured: Option<Captured>) -> JsonRpcProtocol<()> {
     let b = JsonRpcProtocol::<()>::builder("p", "1").session_setup_takeover(
         MethodDef::new("$/sessionSetup").secret_fields(["secret"]),
@@ -56,8 +58,9 @@ fn proto(captured: Option<Captured>) -> JsonRpcProtocol<()> {
         },
     );
     let b = match captured {
-        Some(cap) => b.audit_sink(move |r: &JsonRpcRequest, resp: &Value, _s: &Session<()>, _m: Option<&str>| {
-            cap.lock().unwrap().push(json!({ "params": r.params, "response": resp }));
+        Some(cap) => b.audit_sink(move |r: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+            let error = outcome.error().map(|e| json!({ "code": e.code, "message": e.message }));
+            cap.lock().unwrap().push(json!({ "params": r.params, "error": error }));
         }),
         None => b,
     };
@@ -156,7 +159,7 @@ async fn the_deferred_outcome_is_audited_redacted() {
     let rows = captured.lock().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["params"]["secret"], "********"); // redacted
-    assert_eq!(rows[0]["response"]["result"], json!({ "ident": "alice" }));
+    assert_eq!(rows[0]["error"], json!(null)); // success — the result payload itself is not audited
 }
 
 #[tokio::test]
@@ -168,6 +171,6 @@ async fn a_takeover_error_is_audited() {
     takeover.run(&FakeFt(42));
     let rows = captured.lock().unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0]["response"]["error"]["code"], -32803); // request_failed
-    assert_eq!(rows[0]["response"]["error"]["message"], "broker refused");
+    assert_eq!(rows[0]["error"]["code"], -32803); // request_failed
+    assert_eq!(rows[0]["error"]["message"], "broker refused");
 }

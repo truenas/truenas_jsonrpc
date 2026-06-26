@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use serde_json::json;
 use truenas_audit::{AuditPrincipal, LinuxAuditSink};
-use truenas_jsonrpc::{AuditSink, JsonRpcProtocol, JsonRpcRequest, NullOutbound, Session};
+use truenas_jsonrpc::{
+    AuditOutcome, AuditSink, JsonRpcError, JsonRpcProtocol, JsonRpcRequest, NullOutbound, Session,
+};
 
 #[test]
 fn audit_drives_through_the_sink_without_panicking() {
@@ -34,21 +36,20 @@ fn audit_drives_through_the_sink_without_panicking() {
         params: json!({ "pool": "tank", "recursive": true }),
         roles: vec![],
     };
-    let ok = json!({ "jsonrpc": "2.0", "id": "id-1", "result": [] });
-    let denied = json!({ "error": { "code": -32000, "message": "Not authorized" } });
+    let denied = JsonRpcError::not_authorized("Not authorized");
 
     // Method success, an auth denial, and a control message — none may panic.
     for _ in 0..16 {
-        sink.audit(&req, &ok, &session, Some("query pools"));
+        sink.audit(&req, AuditOutcome::Success, &session, Some("query pools"));
     }
-    sink.audit(&req, &denied, &session, None);
+    sink.audit(&req, AuditOutcome::Failure(&denied), &session, None);
     let setup = JsonRpcRequest {
         method: "$/sessionSetup".into(),
         id: Some("id-2".into()),
         params: json!({ "mechanism": "********" }),
         roles: vec![],
     };
-    sink.audit(&setup, &ok, &session, None);
+    sink.audit(&setup, AuditOutcome::Success, &session, None);
 
     std::thread::sleep(Duration::from_millis(50)); // let the drain thread consume the queue
     assert_eq!(sink.dropped(), 0, "no overflow at this volume");

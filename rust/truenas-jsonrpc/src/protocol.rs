@@ -88,14 +88,54 @@ pub enum CancelTarget {
 
 // --- configurable hooks (mirroring Python's register_* handlers) -------------
 
-/// Audit sink. Called for every audited method call + control op (success, error, or
-/// denial). `response` is the response envelope as a `Value`, with secret fields redacted.
+/// The structured result of an audited dispatch, handed to an [`AuditSink`] in place of a
+/// re-parsed response envelope.
+///
+/// The success *result* is intentionally **not** carried: an audit record captures that a call
+/// happened and whether it succeeded — not the (potentially large) payload. This lets the dispatch
+/// path hand the sink the `Result` it already holds, instead of serializing the reply and then
+/// re-parsing it back into a [`Value`] (and, on the XDR wire, reflecting the result to a `Value`
+/// only to serialize + re-parse it). It also means there is no result to scan for secrets — the
+/// only secret-bearing surface is the request params, which the core redacts before the sink runs.
+#[derive(Debug, Clone, Copy)]
+pub enum AuditOutcome<'a> {
+    /// The call succeeded.
+    Success,
+    /// The call failed with this error (already classified by [`JsonRpcError::code`]).
+    Failure(&'a JsonRpcError),
+}
+
+impl AuditOutcome<'_> {
+    /// `true` for [`Success`](AuditOutcome::Success) — drives `res=success|failed`.
+    pub fn succeeded(&self) -> bool {
+        matches!(self, AuditOutcome::Success)
+    }
+
+    /// The error, when the call failed.
+    pub fn error(&self) -> Option<&JsonRpcError> {
+        match self {
+            AuditOutcome::Failure(e) => Some(e),
+            AuditOutcome::Success => None,
+        }
+    }
+}
+
+/// Map a dispatch `Result` to an [`AuditOutcome`] without touching the success payload.
+fn audit_outcome<T>(outcome: &Result<T, JsonRpcError>) -> AuditOutcome<'_> {
+    match outcome {
+        Ok(_) => AuditOutcome::Success,
+        Err(e) => AuditOutcome::Failure(e),
+    }
+}
+
+/// Audit sink. Called for every audited method call + control op (success, error, or denial).
+/// `request.params` already has its secret fields redacted; `outcome` is the structured result.
 pub trait AuditSink<S>: Send + Sync {
-    /// Record one audit entry (`response` is the reply envelope with secrets redacted).
+    /// Record one audit entry (`request.params` is redacted; `outcome` carries success/failure).
     fn audit(
         &self,
         request: &JsonRpcRequest,
-        response: &Value,
+        outcome: AuditOutcome<'_>,
         session: &Session<S>,
         audit_message: Option<&str>,
     );
@@ -103,16 +143,16 @@ pub trait AuditSink<S>: Send + Sync {
 
 impl<S, F> AuditSink<S> for F
 where
-    F: Fn(&JsonRpcRequest, &Value, &Session<S>, Option<&str>) + Send + Sync,
+    F: Fn(&JsonRpcRequest, AuditOutcome<'_>, &Session<S>, Option<&str>) + Send + Sync,
 {
     fn audit(
         &self,
         request: &JsonRpcRequest,
-        response: &Value,
+        outcome: AuditOutcome<'_>,
         session: &Session<S>,
         audit_message: Option<&str>,
     ) {
-        (self)(request, response, session, audit_message)
+        (self)(request, outcome, session, audit_message)
     }
 }
 
@@ -1011,9 +1051,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let ack = envelope::success(rid.as_deref(), &raw);
 
         // 5. Audit (subscribe is audited iff the topic opted in; static message, no runtime detail).
+        //    Reaching here means the subscribe was authorized and registered → success.
         if method.meta.audit {
             if let Some(sink) = self.audit_sink.as_deref() {
-                audit_call(sink, &method.meta, &req, &ack, None, session);
+                audit_call(sink, &method.meta, &req, AuditOutcome::Success, None, session);
             }
         }
 
@@ -1064,13 +1105,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
         // Authorize; a denial is audited (like the normal path audits an authorized call).
         if let Err(denied) = role_gate(method.meta.required, session) {
-            let resp = response_bytes(Some(&rid), &Err(denied));
             if method.meta.audit {
                 if let Some(sink) = self.audit_sink.as_deref() {
-                    audit_call(sink, &method.meta, &req, &resp, None, session);
+                    audit_call(sink, &method.meta, &req, AuditOutcome::Failure(&denied), None, session);
                 }
             }
-            return Dispatched::Reply(resp);
+            return Dispatched::Reply(response_bytes(Some(&rid), &Err(denied)));
         }
 
         // Negotiate → the interim "ready" result (a refusal is audited like a handler error).
@@ -1078,13 +1118,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let interim = match erased.negotiate(decoded.as_ref(), &cx) {
             Ok(raw) => raw,
             Err(e) => {
-                let resp = response_bytes(Some(&rid), &Err(e));
                 if method.meta.audit {
                     if let Some(sink) = self.audit_sink.as_deref() {
-                        audit_call(sink, &method.meta, &req, &resp, None, session);
+                        audit_call(sink, &method.meta, &req, AuditOutcome::Failure(&e), None, session);
                     }
                 }
-                return Dispatched::Reply(resp);
+                return Dispatched::Reply(response_bytes(Some(&rid), &Err(e)));
             }
         };
 
@@ -1098,13 +1137,13 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let session = session.clone();
         let final_rid = rid.clone();
         let complete = Box::new(move |ft: &dyn FileTransfer| -> Vec<u8> {
-            let resp = response_bytes(Some(&final_rid), &erased.run_transfer(decoded, ft));
+            let outcome = erased.run_transfer(decoded, ft);
             if audit {
                 if let Some(sink) = &audit_sink {
-                    audit_call(sink.as_ref(), &meta, &req, &resp, None, &session);
+                    audit_call(sink.as_ref(), &meta, &req, audit_outcome(&outcome), None, &session);
                 }
             }
-            resp
+            response_bytes(Some(&final_rid), &outcome)
         });
 
         Dispatched::Transfer(Transfer::new(rid, direction, af_unix, ready, complete))
@@ -1217,15 +1256,17 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let raw_outcome = match outcome {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
-                let bytes = envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref());
-                self.audit_setup_bytes(&parsed.method, rid.as_deref(), snapshot, &slot.meta, &bytes, session);
-                return finish(note, bytes);
+                self.audit_setup_outcome(
+                    &parsed.method, rid.as_deref(), snapshot, &slot.meta, AuditOutcome::Failure(&e), session,
+                );
+                return finish(note, envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref()));
             }
             Err(_panicked) => {
-                let bytes =
-                    envelope::error(rid.as_deref(), ErrorCode::InternalError.code(), "Internal error", None);
-                self.audit_setup_bytes(&parsed.method, rid.as_deref(), snapshot, &slot.meta, &bytes, session);
-                return finish(note, bytes);
+                let err = JsonRpcError::new(ErrorCode::InternalError, "Internal error");
+                self.audit_setup_outcome(
+                    &parsed.method, rid.as_deref(), snapshot, &slot.meta, AuditOutcome::Failure(&err), session,
+                );
+                return finish(note, envelope::error(rid.as_deref(), err.code, &err.message, err.data.as_ref()));
             }
         };
 
@@ -1235,9 +1276,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 if let Ok(v) = serde_json::from_str::<Value>(raw.get()) {
                     session.set_external(v);
                 }
-                let bytes = envelope::success(rid.as_deref(), &raw);
-                self.audit_setup_bytes(&parsed.method, rid.as_deref(), snapshot, &slot.meta, &bytes, session);
-                finish(note, bytes)
+                self.audit_setup_outcome(
+                    &parsed.method, rid.as_deref(), snapshot, &slot.meta, AuditOutcome::Success, session,
+                );
+                finish(note, envelope::success(rid.as_deref(), &raw))
             }
             // Passthrough: defer the lifecycle commit + audit into a directive the server runs once
             // it has gated the connection and supplied the fd (the broker replies to the client).
@@ -1251,17 +1293,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 let af_unix = handoff.af_unix;
                 let complete = handoff.complete;
                 let run = Box::new(move |ft: &dyn FileTransfer| {
-                    let resp_value = match (complete)(ft) {
-                        Ok((new_lifecycle, raw)) => {
-                            session.set_lifecycle(new_lifecycle);
-                            let v: Value = serde_json::from_str(raw.get()).unwrap_or(Value::Null);
-                            if !v.is_null() {
-                                session.set_external(v.clone());
-                            }
-                            json!({ "result": v })
+                    let outcome = (complete)(ft);
+                    if let Ok((new_lifecycle, raw)) = &outcome {
+                        session.set_lifecycle(*new_lifecycle);
+                        let v: Value = serde_json::from_str(raw.get()).unwrap_or(Value::Null);
+                        if !v.is_null() {
+                            session.set_external(v);
                         }
-                        Err(e) => json!({ "error": { "code": e.code, "message": e.message } }),
-                    };
+                    }
                     if let Some(sink) = &audit_sink {
                         audit_setup(
                             sink.as_ref(),
@@ -1270,7 +1309,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                             snapshot,
                             &secret_fields,
                             audit_message.as_deref(),
-                            resp_value,
+                            audit_outcome(&outcome),
                             &session,
                         );
                     }
@@ -1280,18 +1319,17 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
     }
 
-    /// Audit a setup call from its final reply bytes (the synchronous paths).
-    fn audit_setup_bytes(
+    /// Audit a setup call from its structured outcome (the synchronous paths).
+    fn audit_setup_outcome(
         &self,
         method: &str,
         rid: Option<&str>,
         snapshot: Value,
         meta: &MethodMeta,
-        bytes: &[u8],
+        outcome: AuditOutcome<'_>,
         session: &Session<S>,
     ) {
         if let Some(sink) = &self.audit_sink {
-            let resp_value: Value = serde_json::from_slice(bytes).unwrap_or(Value::Null);
             audit_setup(
                 sink.as_ref(),
                 method.to_string(),
@@ -1299,7 +1337,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 snapshot,
                 &meta.secret_fields,
                 meta.audit_message.as_deref(),
-                resp_value,
+                outcome,
                 session,
             );
         }
@@ -1489,8 +1527,8 @@ fn join_audit_message(static_msg: Option<&str>, detail: Option<&str>) -> Option<
 
 /// Emit one `$/sessionSetup` / `$/sessionSetupContinue` audit record (credentials redacted). A free
 /// function (not a method) so the passthrough takeover closure — which runs later and can't borrow
-/// the protocol — can call it with cloned bits. `resp_value` is the response envelope value
-/// (`{"result": …}` or `{"error": …}`).
+/// the protocol — can call it with cloned bits. `outcome` is the structured setup result; the
+/// credentials live in `snapshot` (the params), which is redacted here before the sink runs.
 #[allow(clippy::too_many_arguments)]
 fn audit_setup<S>(
     sink: &dyn AuditSink<S>,
@@ -1499,15 +1537,12 @@ fn audit_setup<S>(
     mut snapshot: Value,
     secret_fields: &[String],
     audit_message: Option<&str>,
-    mut resp_value: Value,
+    outcome: AuditOutcome<'_>,
     session: &Session<S>,
 ) {
     redact_value(&mut snapshot, secret_fields);
     let req = JsonRpcRequest { method, id: rid, params: snapshot, roles: Vec::new() };
-    if let Some(result) = resp_value.get_mut("result") {
-        redact_value(result, secret_fields);
-    }
-    sink.audit(&req, &resp_value, session, audit_message);
+    sink.audit(&req, outcome, session, audit_message);
 }
 
 fn redact_value(value: &mut Value, secret_fields: &[String]) {
@@ -1533,25 +1568,27 @@ fn redact_value(value: &mut Value, secret_fields: &[String]) {
     }
 }
 
-/// Emit one audit record: redact the method's `secret_fields` in the request params and the
-/// response result, join the static + runtime audit message, and call the sink. Shared by
-/// the request pipeline ([`Pipeline::do_audit`]) and the subscribe path.
+/// Emit one audit record: redact the method's `secret_fields` in the request params, join the
+/// static + runtime audit message, and call the sink with the structured [`AuditOutcome`]. Shared
+/// by the request pipeline ([`Pipeline::do_audit`]) and the subscribe path.
 fn audit_call<S>(
     sink: &dyn AuditSink<S>,
     meta: &MethodMeta,
     req: &JsonRpcRequest,
-    response: &[u8],
+    outcome: AuditOutcome<'_>,
     detail: Option<&str>,
     session: &Session<S>,
 ) {
     let message = join_audit_message(meta.audit_message.as_deref(), detail);
-    let mut audit_req = req.clone();
-    redact_value(&mut audit_req.params, &meta.secret_fields);
-    let mut resp_value: Value = serde_json::from_slice(response).unwrap_or(Value::Null);
-    if let Some(result) = resp_value.get_mut("result") {
-        redact_value(result, &meta.secret_fields);
+    // Redact the method's secret params before the record is built — the sink only ever sees
+    // `********`. A method with no declared secret fields skips the clone+walk entirely.
+    if meta.secret_fields.is_empty() {
+        sink.audit(req, outcome, session, message.as_deref());
+    } else {
+        let mut audit_req = req.clone();
+        redact_value(&mut audit_req.params, &meta.secret_fields);
+        sink.audit(&audit_req, outcome, session, message.as_deref());
     }
-    sink.audit(&audit_req, &resp_value, session, message.as_deref());
 }
 
 /// Owned, `'static` context for one request's pipeline. Bundles the data the
@@ -1596,9 +1633,8 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Err(denied) => Err(denied),
             Ok(()) => erased.run(decoded, &cx),
         };
-        let response = response_bytes(self.rid.as_deref(), &outcome);
-        self.do_audit(&response, &audit_detail);
-        response
+        self.do_audit(audit_outcome(&outcome), &audit_detail);
+        response_bytes(self.rid.as_deref(), &outcome)
     }
 
     /// Blocking-pool entry: route a python body through the `PyDispatcher` seam, everything
@@ -1636,9 +1672,8 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
                 }
             },
         };
-        let response = response_bytes(self.rid.as_deref(), &outcome);
-        self.do_audit(&response, &audit_detail);
-        response
+        self.do_audit(audit_outcome(&outcome), &audit_detail);
+        response_bytes(self.rid.as_deref(), &outcome)
     }
 
     /// Async pipeline (awaited on the runtime): same stages, but `cx` is moved into the
@@ -1656,9 +1691,8 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Err(denied) => Err(denied),
             Ok(()) => erased.run(decoded, cx).await,
         };
-        let response = response_bytes(self.rid.as_deref(), &outcome);
-        self.do_audit(&response, &audit_detail);
-        response
+        self.do_audit(audit_outcome(&outcome), &audit_detail);
+        response_bytes(self.rid.as_deref(), &outcome)
     }
 
     /// XDR pipeline (blocking pool): XDR decode (INVALID_PARAMS, before authz) → authorize → run
@@ -1683,26 +1717,14 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         if need_params {
             self.req.params = params_value;
         }
-        let (outcome, result_value) =
-            match role_gate(self.method.meta.required, &self.session) {
-                Err(denied) => (Err(denied), None),
-                Ok(()) => match erased.xdr_run(decoded, &cx, want_audit) {
-                    Ok((bytes, value)) => (Ok(bytes), value),
-                    Err(e) => (Err(e), None),
-                },
-            };
+        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` skips the
+        // result→`Value` reflection: no envelope is synthesized and nothing is re-parsed.
+        let outcome = match role_gate(self.method.meta.required, &self.session) {
+            Err(denied) => Err(denied),
+            Ok(()) => erased.xdr_run(decoded, &cx, false).map(|(bytes, _)| bytes),
+        };
         if want_audit {
-            // Synthesize the JSON response envelope (reflected result on success, the error
-            // otherwise) for the shared redaction + sink call — the wire reply itself is XDR.
-            let response = match &outcome {
-                Ok(_) => {
-                    let value = result_value.expect("xdr_run reflects the result when auditing");
-                    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": self.rid.clone(), "result": value }))
-                        .unwrap_or_default()
-                }
-                Err(e) => envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
-            };
-            self.do_audit(&response, &audit_detail);
+            self.do_audit(audit_outcome(&outcome), &audit_detail);
         }
         outcome
     }
@@ -1725,38 +1747,28 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         if need_params {
             self.req.params = params_value;
         }
-        let (outcome, result_value) =
-            match role_gate(self.method.meta.required, &self.session) {
-                Err(denied) => (Err(denied), None),
-                Ok(()) => match erased.xdr_run(decoded, cx, want_audit).await {
-                    Ok((bytes, value)) => (Ok(bytes), value),
-                    Err(e) => (Err(e), None),
-                },
-            };
+        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` skips the
+        // result→`Value` reflection: no envelope is synthesized and nothing is re-parsed.
+        let outcome = match role_gate(self.method.meta.required, &self.session) {
+            Err(denied) => Err(denied),
+            Ok(()) => erased.xdr_run(decoded, cx, false).await.map(|(bytes, _)| bytes),
+        };
         if want_audit {
-            let response = match &outcome {
-                Ok(_) => {
-                    let value = result_value.expect("xdr_run reflects the result when auditing");
-                    serde_json::to_vec(&json!({ "jsonrpc": "2.0", "id": self.rid.clone(), "result": value }))
-                        .unwrap_or_default()
-                }
-                Err(e) => envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
-            };
-            self.do_audit(&response, &audit_detail);
+            self.do_audit(audit_outcome(&outcome), &audit_detail);
         }
         outcome
     }
 
     /// Audit one call (success / handler error / authz denial — never a decode failure):
-    /// redacts the method's `secret_fields` in both params and result. A no-op when the
-    /// method isn't audited or no sink is configured.
-    fn do_audit(&self, response: &[u8], audit_detail: &Mutex<Option<String>>) {
+    /// redacts the method's `secret_fields` in the params. A no-op when the method isn't audited
+    /// or no sink is configured.
+    fn do_audit(&self, outcome: AuditOutcome<'_>, audit_detail: &Mutex<Option<String>>) {
         if !self.method.meta.audit {
             return;
         }
         let Some(sink) = self.audit_sink.as_deref() else { return };
         let detail = audit_detail.lock().unwrap_or_else(PoisonError::into_inner).take();
-        audit_call(sink, &self.method.meta, &self.req, response, detail.as_deref(), &self.session);
+        audit_call(sink, &self.method.meta, &self.req, outcome, detail.as_deref(), &self.session);
     }
 }
 

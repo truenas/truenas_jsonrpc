@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
+    AuditOutcome,
     tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod, Filtered,
     JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Roles,
     Session,
@@ -154,7 +155,7 @@ async fn filterable_is_audited() {
             query,
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             cap.lock().unwrap().push(json!({"method": req.method, "msg": msg}));
         })
         .build();

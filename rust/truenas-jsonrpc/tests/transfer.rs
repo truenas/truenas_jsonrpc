@@ -10,6 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
+    AuditOutcome,
     Dispatched, FileTransfer, JsonRpcError, JsonRpcFdPassMethod, JsonRpcFdTransferMethod,
     JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Roles, Session,
     TransferDirection,
@@ -165,7 +166,7 @@ where
             transfer,
         ))
         .unwrap()
-        .audit_sink(move |_r: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |_r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             h.fetch_add(1, Ordering::SeqCst);
         })
         .build();
@@ -199,7 +200,7 @@ async fn authz_denial_is_audited() {
             |_a: SendArgs, _ft: &dyn FileTransfer| Ok::<_, JsonRpcError>(Done { ok: true }),
         ))
         .unwrap()
-        .audit_sink(move |_r: &JsonRpcRequest, _resp: &Value, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |_r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             h.fetch_add(1, Ordering::SeqCst);
         })
         .build();

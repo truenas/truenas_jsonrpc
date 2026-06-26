@@ -9,8 +9,8 @@
 //! Comparison rule: success responses must match in full; error responses must match
 //! on `{jsonrpc, id, error.code, error.message}` — `error.data` (the implementation's
 //! free-form decode/validation detail) is stripped before comparison, since msgspec and
-//! serde phrase it differently. Audit records (method, redacted params, redacted
-//! response, message) must match too.
+//! serde phrase it differently. Audit records (method, redacted params, message) must match
+//! too — the response is validated via the per-step comparison, not re-checked in the record.
 //!
 //! Keep `build_open`/`build_gated` here in sync with the factories in `generate.py`.
 
@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_jsonrpc::{
-    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod, Filtered,
-    IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef, Outbound,
-    RequestCtx, Roles, Session, SessionId, SessionLifecycle, SubscriptionDef,
+    tnfilter, AuditOutcome, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod,
+    Filtered, IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
+    Outbound, RequestCtx, Roles, Session, SessionId, SessionLifecycle, SubscriptionDef,
 };
 
 const GOLDEN: &str = include_str!("conformance/golden.json");
@@ -136,11 +136,10 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
         ))
         .unwrap()
         .server_info(|_s: &Session<()>| Ok(json!({"name": "ref", "version": "1.0.0"})))
-        .audit_sink(move |req: &JsonRpcRequest, resp: &Value, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             cap.lock().unwrap().push(json!({
                 "method": req.method,
                 "params": req.params,
-                "response": resp,
                 "audit_message": msg,
             }));
         })
@@ -211,8 +210,11 @@ fn strip_data(v: &Value) -> Value {
 
 fn strip_audit(rec: &Value) -> Value {
     let mut r = rec.clone();
-    if let Some(resp) = r.get_mut("response") {
-        *resp = strip_data(resp);
+    // The Rust audit seam carries a structured outcome, not the response payload — the response is
+    // already validated by the per-step comparison — so drop `response` from both sides (the golden
+    // still records it) and compare on `{method, params, audit_message}`.
+    if let Some(obj) = r.as_object_mut() {
+        obj.remove("response");
     }
     r
 }

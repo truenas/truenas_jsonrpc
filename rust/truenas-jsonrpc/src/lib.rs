@@ -38,8 +38,8 @@ pub use method::{
     JsonRpcMethod, MethodDef, SubscriptionDef,
 };
 pub use protocol::{
-    AuditSink, CancelTarget, Canceller, Dispatched, JsonRpcProtocol, JsonRpcProtocolBuilder,
-    ServerInfoHandler,
+    AuditOutcome, AuditSink, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
+    JsonRpcProtocolBuilder, ServerInfoHandler,
 };
 pub use setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 pub use transfer::{FileTransfer, Transfer, TransferDirection};
