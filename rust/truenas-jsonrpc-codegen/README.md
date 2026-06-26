@@ -27,6 +27,9 @@ A spec is a single JSON file (JSON-Schema draft 2020-12 + a few extensions):
 }
 ```
 
+Top-level keys: `name`, `version`, `$defs`, `methods`, and an optional `audit` block (see
+**Auditing** below — auditing is **on by default**).
+
 Per-method keys: `handler` (the Rust handler symbol — required), `params` (required `$ref`),
 `result` / `entry` / `notifies` (`$ref`s), `summary`, `audit` / `auditMessage`, `preAuth`,
 `cancellable`, `roles`, `direction` (`client_server` | `server_client`), `filterable`, `xdr`
@@ -37,6 +40,49 @@ be `#/$defs/<Name>` and resolve. Type mapping: object→struct, `$ref`→named, 
 integer→`i64`, number→`f64`, boolean→`bool`, array→`Vec<T>`, string-enum→a generated `enum`,
 `secret`→`truenas_jsonrpc::Secret<T>`; `required`→`T`, `default`→`T` (+ `#[serde(default)]`),
 otherwise→`Option<T>`.
+
+## Auditing (on by default)
+
+The generated server **installs a Linux kernel-audit sink by default**: every method marked
+`audit: true` (plus the `$/sessionSetup` / `$/sessionClose` / `$/cancelRequest` control ops) emits a
+record to the kernel audit subsystem (auditd → `/var/log/audit/audit.log`, queryable with
+`ausearch`). Configure it with an optional **top-level `audit` block**:
+
+```jsonc
+{
+  "name": "myservice", "version": "1.0.0",
+  "audit": {
+    "enabled": true,            // default true — omit the whole block to keep auditing on
+    "service": "truenas-api",   // auditd `svc=` / `op=<service>:<verb>` namespace; default = name
+    "queueBound": 1024          // optional drain-queue bound (buffered before drop-and-count)
+  },
+  "$defs": { /* ... */ }, "methods": { /* ... */ }
+}
+```
+
+- **On by default** — omit the `audit` block entirely ⇒ enabled, with `service` defaulting to the
+  spec `name`. A given `service` must be non-empty and a given `queueBound` must be `> 0`.
+- **Off** — `"audit": { "enabled": false }` ⇒ no sink is wired and the generated code has **no
+  `truenas-audit` dependency** (nothing references it).
+- **Dependency** — when enabled, the server-gen crate must depend on `truenas-audit` (the generated
+  `register` / `make_audit_sink` reference it). See the `Cargo.toml` below.
+- **Identity attribution** — `register` installs the sink with an *empty* principal (records carry
+  no `acct=` / uid / origin). To attribute records, pass an extractor that reads your session state
+  to the generated `make_audit_sink` and re-install it (last call wins, and it reuses the spec's
+  `service` / `queueBound`):
+
+  ```rust
+  use truenas_jsonrpc::Session;
+  use truenas_audit::AuditPrincipal;
+  let proto = register(builder, handlers)?
+      .audit_sink(make_audit_sink(|session: &Session<MyState>| -> AuditPrincipal {
+          // read uid / username / origin out of your session state
+          AuditPrincipal::default()
+      }))
+      .build();
+  ```
+
+  (The auth layer, `truenas-jsonrpc-auth`, can supply this extractor for its session type.)
 
 ## Consumer layout
 
@@ -59,6 +105,7 @@ my-truenas-service/
 ```toml
 [dependencies]
 truenas-jsonrpc = "..."        # the dispatch core (and serde, for the derives)
+truenas-audit = "..."          # audit backend — needed unless the spec sets audit.enabled=false
 serde = { version = "1", features = ["derive"] }
 
 [build-dependencies]

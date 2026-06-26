@@ -11,6 +11,9 @@ rust-version.workspace = true
 
 [dependencies]
 truenas-jsonrpc = { path = "../../truenas-jsonrpc" }
+# Audit is on by default in generated servers (demo.json has no `audit` block), so the
+# generated `register`/`make_audit_sink` reference the kernel-audit backend.
+truenas-audit = { path = "../../truenas-audit" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -22,5 +22,7 @@ cargo test -p demo-consumer
 
 ## Dependencies
 
-`truenas-jsonrpc` (runtime) + `truenas-jsonrpc-codegen` (build-dependency), plus `serde` /
-`serde_json`. No generated code is committed — it is produced into `OUT_DIR` on each build.
+`truenas-jsonrpc` (runtime), `truenas-audit` (the audit backend — `demo.json` has no `audit`
+block, so auditing is **on by default** and the generated `register` wires a kernel-audit sink),
+and `truenas-jsonrpc-codegen` (build-dependency), plus `serde` / `serde_json`. No generated code
+is committed — it is produced into `OUT_DIR` on each build.

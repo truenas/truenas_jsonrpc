@@ -87,5 +87,15 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             }
         }
     }
+
+    // Top-level audit config: a given service must be non-empty; a given queue bound must be > 0.
+    if let Some(a) = &spec.audit {
+        if a.service.as_deref() == Some("") {
+            return Err(err("audit.service must be a non-empty string".to_string()));
+        }
+        if a.queue_bound == Some(0) {
+            return Err(err("audit.queueBound must be greater than 0".to_string()));
+        }
+    }
     Ok(())
 }

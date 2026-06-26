@@ -75,6 +75,8 @@ fn full_fixture_exercises_remaining_branches() {
     assert!(s.contains("#[serde(default)]\n    pub level: i64"));
     // The xdr method binds `.xdr(2001u32)`.
     assert!(s.contains(".xdr(2001u32)"));
+    // Audit is on by default (no `audit` block) — service defaults to the spec name.
+    assert!(s.contains("pub fn make_audit_sink") && s.contains(r#"builder("full")"#));
 
     // The client + OpenRPC also generate cleanly for the full spec.
     assert!(generate_client(&spec).unwrap().contains("subscribe_events"));
@@ -90,6 +92,33 @@ fn python_methods_table_and_no_handler() {
     assert!(s.contains("pub struct GreetArgs")); // structs still emitted
     assert!(!s.contains("fn greet(")); // python methods are NOT in the Handlers trait
     assert!(s.contains(r#".audit_message("greeting")"#)); // flags preserved
+}
+
+// --- audit config (on by default; spec-configurable) -------------------------
+
+#[test]
+fn audit_config() {
+    // No `audit` block → on by default; `service` defaults to the spec `name`, no queue bound.
+    let default_on = r##"{"name":"svc","version":"1","$defs":{"A":{"type":"object","properties":{},"required":[]}},"methods":{"m":{"handler":"m","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"}}}}"##;
+    let s = generate_server(&Spec::parse(default_on, "spec").unwrap()).unwrap();
+    assert!(s.contains("pub fn make_audit_sink"));
+    assert!(s.contains(r#"truenas_audit::LinuxAuditSink::<S>::builder("svc").identity"#));
+    assert!(s.contains(".audit_sink(make_audit_sink::<S, _>("));
+
+    // Configured service + queue bound are baked into `make_audit_sink`.
+    let configured = r##"{"name":"svc","version":"1","audit":{"service":"truenas-api","queueBound":256},"$defs":{},"methods":{}}"##;
+    let s = generate_server(&Spec::parse(configured, "spec").unwrap()).unwrap();
+    assert!(s.contains(r#"builder("truenas-api").queue_bound(256usize).identity"#));
+
+    // Disabled → no audit wiring at all (so a consumer needs no `truenas-audit` dependency).
+    let disabled = r##"{"name":"svc","version":"1","audit":{"enabled":false},"$defs":{},"methods":{}}"##;
+    let s = generate_server(&Spec::parse(disabled, "spec").unwrap()).unwrap();
+    assert!(!s.contains("make_audit_sink") && !s.contains("truenas_audit") && !s.contains(".audit_sink("));
+
+    // Validation: a given service must be non-empty, a given queue bound > 0, keys are closed.
+    assert!(parse_err(r##"{"name":"t","version":"1","audit":{"service":""},"methods":{}}"##).contains("audit.service must be a non-empty"));
+    assert!(parse_err(r##"{"name":"t","version":"1","audit":{"queueBound":0},"methods":{}}"##).contains("audit.queueBound must be greater than 0"));
+    assert!(parse_err(r##"{"name":"t","version":"1","audit":{"bogus":1},"methods":{}}"##).contains("unknown field"));
 }
 
 // --- load_dir / merge / sources ----------------------------------------------

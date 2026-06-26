@@ -38,6 +38,7 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     out.push_str(&emit_handlers_trait(spec)?);
     out.push('\n');
     out.push_str(&emit_register(spec)?);
+    out.push_str(&emit_audit(spec));
     out.push_str(&emit_python_table(spec));
     Ok(out)
 }
@@ -279,9 +280,31 @@ fn emit_register(spec: &Spec) -> Result<String> {
         }
     }
     let prelude = if uses_handlers { "" } else { "    let _ = &handlers;\n" };
+    // On by default: install the spec-configured audit sink (empty identity — override via
+    // `make_audit_sink`). Emitted only when auditing is enabled (so a disabled spec needs no
+    // `truenas-audit` dependency).
+    let audit_install = if spec.resolved_audit().is_some() {
+        "    let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_jsonrpc::Session<S>| truenas_audit::AuditPrincipal::default()));\n"
+    } else {
+        ""
+    };
     Ok(format!(
-        "/// Register every spec method onto `builder`, binding each to `handlers.<handler>`.\npub fn register<S, H>(\n    builder: truenas_jsonrpc::JsonRpcProtocolBuilder<S>,\n    handlers: std::sync::Arc<H>,\n) -> truenas_jsonrpc::BuildResult<truenas_jsonrpc::JsonRpcProtocolBuilder<S>>\nwhere\n    S: Send + Sync + 'static,\n    H: Handlers<S> + 'static,\n{{\n{prelude}{body}    Ok(builder)\n}}\n"
+        "/// Register every spec method onto `builder`, binding each to `handlers.<handler>`.\npub fn register<S, H>(\n    builder: truenas_jsonrpc::JsonRpcProtocolBuilder<S>,\n    handlers: std::sync::Arc<H>,\n) -> truenas_jsonrpc::BuildResult<truenas_jsonrpc::JsonRpcProtocolBuilder<S>>\nwhere\n    S: Send + Sync + 'static,\n    H: Handlers<S> + 'static,\n{{\n{prelude}{body}{audit_install}    Ok(builder)\n}}\n"
     ))
+}
+
+/// Emit the `make_audit_sink` helper — only when auditing is enabled. It carries the spec's
+/// configured `service` + `queueBound`; the consumer supplies the identity extractor.
+fn emit_audit(spec: &Spec) -> String {
+    let Some(audit) = spec.resolved_audit() else { return String::new() };
+    let queue = match audit.queue_bound {
+        Some(n) => format!(".queue_bound({n}usize)"),
+        None => String::new(),
+    };
+    format!(
+        "\n/// Build the spec-configured Linux kernel-audit sink with your identity extractor.\n/// `register` installs one with an empty extractor by default; pass an extractor that reads your\n/// session state and re-install via `.audit_sink(..)` to attribute records (`acct=`, uid, origin).\npub fn make_audit_sink<S, F>(identity: F) -> truenas_audit::LinuxAuditSink<S>\nwhere\n    S: Send + Sync + 'static,\n    F: Fn(&truenas_jsonrpc::Session<S>) -> truenas_audit::AuditPrincipal + Send + Sync + 'static,\n{{\n    truenas_audit::LinuxAuditSink::<S>::builder({service}){queue}.identity(identity).build()\n}}\n",
+        service = str_lit(&audit.service),
+    )
 }
 
 fn emit_python_table(spec: &Spec) -> String {

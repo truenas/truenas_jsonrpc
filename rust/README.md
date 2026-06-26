@@ -144,6 +144,10 @@ document — via a `build.rs` build-dependency (prost/tonic-build style):
 truenas_jsonrpc_codegen::Build::new().json_idl("../json-idl").emit_server().unwrap();
 ```
 
+The generated server **audits on by default** — every `audit: true` method (and the `$/` control
+ops) emits to the Linux kernel audit subsystem via `truenas-audit`; a top-level `audit` block in
+the spec configures the service / queue bound or turns it off (`audit.enabled = false`).
+
 See `truenas-jsonrpc-codegen/README.md` for the dialect, the consumer crate layout
 (`json-idl/` + `server-gen` + `client-gen` + your own crate), and the packaging caveat. The
 generated OpenRPC is byte-for-byte equivalent (A/B-tested) to `api-specs/gen.py`'s output.

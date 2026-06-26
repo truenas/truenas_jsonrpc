@@ -101,5 +101,17 @@ where
     let builder = builder.method(truenas_jsonrpc::JsonRpcMethod::new(truenas_jsonrpc::MethodDef::new("crash").doc("Always raises (exercises the error-audit path).").audit_message("crash op"), move |request: CrashArgs, cx: &truenas_jsonrpc::RequestCtx<S>| h.crash(request, cx)))?;
     let h = handlers.clone();
     let builder = builder.filterable(truenas_jsonrpc::FilterableJsonRpcMethod::<QueryArgs, Entry, _>::new(truenas_jsonrpc::MethodDef::new("x.query").doc("Filterable query over a collection of entries."), move |request: QueryArgs, cx: &truenas_jsonrpc::RequestCtx<S>, filters: &truenas_jsonrpc::CompiledFilters, options: &truenas_jsonrpc::CompiledOptions| h.query(request, cx, filters, options)))?;
+    let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_jsonrpc::Session<S>| truenas_audit::AuditPrincipal::default()));
     Ok(builder)
+}
+
+/// Build the spec-configured Linux kernel-audit sink with your identity extractor.
+/// `register` installs one with an empty extractor by default; pass an extractor that reads your
+/// session state and re-install via `.audit_sink(..)` to attribute records (`acct=`, uid, origin).
+pub fn make_audit_sink<S, F>(identity: F) -> truenas_audit::LinuxAuditSink<S>
+where
+    S: Send + Sync + 'static,
+    F: Fn(&truenas_jsonrpc::Session<S>) -> truenas_audit::AuditPrincipal + Send + Sync + 'static,
+{
+    truenas_audit::LinuxAuditSink::<S>::builder("sample").identity(identity).build()
 }

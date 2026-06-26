@@ -39,10 +39,13 @@ for b in "${BINS[@]}"; do [ -n "$b" ] && OBJ+=(--object "$b"); done
 
 "$LLVMBIN/llvm-profdata" merge -sparse "$PROFDIR"/raw/*.profraw -o "$PROFDIR/cov.profdata"
 
-# Scope to this crate's src/: exclude deps, std, our own tests/examples/build output, and
-# the proc-macro crate (`truenas-xdr-derive` runs at compile time, not in the instrumented
-# test binaries; its generated output is covered behaviorally by `truenas-xdr`'s tests).
-IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-jsonrpc-server/)'
+# Scope to this crate's src/: exclude deps, std, our own tests/examples/build output, the
+# proc-macro crate (`truenas-xdr-derive` runs at compile time, not in the instrumented test
+# binaries; its generated output is covered behaviorally by `truenas-xdr`'s tests), and the
+# FFI / socket-I/O crates excluded by design (`truenas-jsonrpc-server` does kTLS/SCM_RIGHTS I/O;
+# `truenas-audit` does NETLINK_AUDIT FFI — both are reachable from the default-member demo but
+# tested behaviorally, not held to the line gate). See the workspace Cargo.toml.
+IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-jsonrpc-server/|truenas-audit/)'
 
 # Merged line coverage, exported as lcov (the standard interchange format Codecov/Coveralls
 # consume): a source line is covered if ANY test executed it. We deliberately gate on this

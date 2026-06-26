@@ -72,6 +72,62 @@ pub struct Spec {
     pub defs: OrderedMap<SchemaNode>,
     /// Wire-name → method.
     pub methods: OrderedMap<MethodSpec>,
+    /// Top-level audit configuration. Omitting the whole block keeps auditing **on** with
+    /// defaults (the generated server installs a `truenas-audit` sink); see [`AuditConfig`].
+    #[serde(default)]
+    pub audit: Option<AuditConfig>,
+}
+
+impl Spec {
+    /// The resolved audit settings after defaults, or `None` when auditing is disabled
+    /// (`audit.enabled == false`). An absent `audit` block ⇒ enabled with defaults.
+    pub fn resolved_audit(&self) -> Option<ResolvedAudit> {
+        if let Some(a) = &self.audit {
+            if !a.enabled {
+                return None;
+            }
+        }
+        Some(ResolvedAudit {
+            service: self
+                .audit
+                .as_ref()
+                .and_then(|a| a.service.clone())
+                .unwrap_or_else(|| self.name.clone()),
+            queue_bound: self.audit.as_ref().and_then(|a| a.queue_bound),
+        })
+    }
+}
+
+/// Top-level audit configuration. The generated server installs a Linux kernel-audit sink
+/// (`truenas-audit`) unless `enabled` is `false`.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct AuditConfig {
+    /// Install an audit sink in the generated server. Default `true` — auditing is **on by
+    /// default**; `false` generates a server with no audit backend (and no `truenas-audit`
+    /// dependency).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    /// The auditd `svc=` / `op=<service>:<verb>` namespace. Defaults to the spec `name`.
+    #[serde(default)]
+    pub service: Option<String>,
+    /// The drain-queue bound (records buffered before drop-and-count). Omitted ⇒ the sink's
+    /// own default.
+    #[serde(rename = "queueBound", default)]
+    pub queue_bound: Option<u64>,
+}
+
+/// Resolved audit settings (defaults applied) for the emitter.
+#[derive(Debug, Clone)]
+pub struct ResolvedAudit {
+    /// The `svc=` / `op=` namespace (defaulted to the spec `name`).
+    pub service: String,
+    /// The drain-queue bound, if configured.
+    pub queue_bound: Option<u64>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// A single method definition.
