@@ -42,6 +42,7 @@ mod outcome;
 mod passthrough;
 #[cfg(feature = "scram")]
 mod scram;
+mod sessions;
 mod stack;
 mod state;
 mod wire;
@@ -58,6 +59,7 @@ pub use passthrough::{
 };
 #[cfg(feature = "scram")]
 pub use scram::{derive_verifier, CredentialSource, Scram, ScramCredentials, SCRAM_TAG};
+pub use sessions::render_auth_session;
 pub use stack::{install, AuthStack, AuthStackBuilder, FULL_ADMIN};
 pub use state::{AuthSession, AuthSessionState};
 pub use wire::{AuthResponse, AuthResult, ContinueArgs, SetupArgs};

@@ -31,7 +31,7 @@ use truenas_jsonrpc::{FileTransfer, JsonRpcError, Session, SessionId, SessionLif
 
 use crate::channel::{Capability, Channel};
 use crate::mechanism::Mechanism;
-use crate::outcome::{AuthProgress, Outcome, RejectKind};
+use crate::outcome::{AuthProgress, Outcome, Principal, RejectKind};
 use crate::stack::AuthStackBuilder;
 use crate::state::AuthSession;
 use crate::wire::{AuthResponse, AuthResult};
@@ -112,10 +112,21 @@ pub(crate) fn takeover(
     let ctx = BrokerContext::from_channel(channel);
     SetupHandoff::new(true, move |ft: &dyn FileTransfer| {
         let outcome = Passthrough::new(&broker).handoff(ft.as_raw_fd(), &ctx);
+        // Record the credential summary from the broker's verdict for `$/sessions`. This path
+        // commits without the role gate (pre-existing), so the uid comes straight from the
+        // verdict's principal — a broker reports peer-cred, not an account name to resolve.
+        let uid = match &outcome {
+            Outcome::Authenticated { principal: Principal::Uid(u), .. } => Some(*u),
+            _ => None,
+        };
+        let credential = crate::stack::credential_of(&outcome, PASSTHROUGH_TAG, uid);
         let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
             Some(auth) => crate::stack::commit(auth, outcome, session_id),
             None => (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }),
         });
+        if let Some(cred) = credential {
+            session.set_credential(cred);
+        }
         let raw = serde_json::value::to_raw_value(&result)
             .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
         Ok((lifecycle, raw))

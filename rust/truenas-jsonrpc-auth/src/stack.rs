@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use truenas_jsonrpc::{
-    JsonRpcError, JsonRpcProtocolBuilder, MethodDef, RoleMask, Roles, Session, SessionId,
-    SessionLifecycle, SetupOutcome,
+    Credential, JsonRpcError, JsonRpcProtocolBuilder, MethodDef, RoleMask, Roles, Session,
+    SessionId, SessionLifecycle, SetupOutcome,
 };
 use truenas_jsonrpc_server::Transport;
 
@@ -88,16 +88,20 @@ impl AuthStack {
         })
     }
 
-    /// The role *names* a [`Principal`] is granted: resolve it to a uid (a peer-cred uid directly,
-    /// an account name via the username→uid resolver), then read its roles from the role source —
-    /// except **uid 0, which is always full admin**. An unresolvable principal, or no
-    /// resolver/source configured, grants nothing.
-    fn principal_roles(&self, principal: &Principal) -> Vec<String> {
-        let uid = match principal {
+    /// Resolve a [`Principal`] to the uid authorization (and the session credential) key off: a
+    /// peer-cred uid directly, an account name via the username→uid resolver. [`Principal::None`],
+    /// an unresolvable name, or no resolver configured yields `None`.
+    fn principal_uid(&self, principal: &Principal) -> Option<u32> {
+        match principal {
             Principal::Uid(uid) => Some(*uid),
             Principal::User(name) => self.user_resolver.as_ref().and_then(|f| f(name)),
             Principal::None => None,
-        };
+        }
+    }
+
+    /// The role *names* granted to a resolved uid: **uid 0 is always full admin**; any other uid
+    /// reads its roles from the role source (nothing if none is configured); `None` grants nothing.
+    fn roles_for_uid(&self, uid: Option<u32>) -> Vec<String> {
         match uid {
             Some(0) => vec![FULL_ADMIN.to_string()],
             Some(uid) => self.role_source.as_ref().map(|f| f(uid)).unwrap_or_default(),
@@ -105,14 +109,17 @@ impl AuthStack {
         }
     }
 
-    /// The granted mask an [`Outcome`] confers (only [`Outcome::Authenticated`] grants roles):
-    /// resolve its principal to role names, then intern them via the registry.
-    fn granted_mask_of(&self, outcome: &Outcome) -> RoleMask {
+    /// Authorize an [`Outcome`] (only [`Outcome::Authenticated`] grants anything): resolve its
+    /// principal to a uid **once**, then to the granted [`RoleMask`] via the role source + registry.
+    /// Returns the uid alongside so the caller can record it in the session [`Credential`] without
+    /// resolving the principal a second time.
+    fn authorize(&self, outcome: &Outcome) -> (RoleMask, Option<u32>) {
         match outcome {
             Outcome::Authenticated { principal, .. } => {
-                self.granted_mask(&self.principal_roles(principal))
+                let uid = self.principal_uid(principal);
+                (self.granted_mask(&self.roles_for_uid(uid)), uid)
             }
-            _ => RoleMask::NONE,
+            _ => (RoleMask::NONE, None),
         }
     }
 
@@ -149,11 +156,13 @@ impl AuthStack {
         let channel = session
             .with_internal(|slot| slot.map(|a| a.channel.clone()))
             .ok_or_else(missing_state)?;
-        let outcome = match &args.mechanism {
-            None => self.peercred_default(&channel),
-            Some(mech) => self.dispatch(mech, &channel, None),
+        // The credential's mechanism label: the peer-cred default (no mechanism) is `UNIX_SOCKET`,
+        // otherwise the wire tag the client selected (`SCRAM`, `CLIENT_CERTIFICATE`, …).
+        let (outcome, label) = match &args.mechanism {
+            None => (self.peercred_default(&channel), "UNIX_SOCKET"),
+            Some(mech) => (self.dispatch(mech, &channel, None), mech_tag(mech).unwrap_or("UNKNOWN")),
         };
-        Ok(self.build_setup_outcome(outcome, session, session_id, &channel))
+        Ok(self.build_setup_outcome(outcome, label, session, session_id, &channel))
     }
 
     /// Map a mechanism [`Outcome`] onto the core's [`SetupOutcome`]: a passthrough becomes a
@@ -161,6 +170,7 @@ impl AuthStack {
     fn build_setup_outcome(
         &self,
         outcome: Outcome,
+        mech: &str,
         session: &Arc<Session<AuthSession>>,
         session_id: SessionId,
         channel: &Channel,
@@ -175,13 +185,18 @@ impl AuthStack {
             ));
         }
         let _ = channel;
-        // The granted roles (if any) become the session's role mask for the per-call gate.
-        let granted = self.granted_mask_of(&outcome);
+        // Resolve authorization once → the per-call gate mask + the account uid; derive the
+        // credential summary before `commit` consumes the outcome.
+        let (granted, uid) = self.authorize(&outcome);
+        let credential = credential_of(&outcome, mech, uid);
         let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
             Some(auth) => commit(auth, outcome, session_id),
             None => (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }),
         });
         session.set_roles(granted);
+        if let Some(cred) = credential {
+            session.set_credential(cred);
+        }
         SetupOutcome::Commit(lifecycle, result)
     }
 
@@ -192,29 +207,35 @@ impl AuthStack {
         session: &Session<AuthSession>,
     ) -> Result<(SessionLifecycle, AuthResult), JsonRpcError> {
         let session_id = session.id();
-        type Committed = ((SessionLifecycle, AuthResult), RoleMask);
-        let (committed, granted) = session.with_internal_mut(|slot| -> Result<Committed, JsonRpcError> {
-            let auth = slot.as_mut().ok_or_else(missing_state)?;
-            // Take the carried in-progress state; anything else is out of sequence.
-            let progress = match std::mem::replace(&mut auth.state, AuthSessionState::Unauthenticated)
-            {
-                AuthSessionState::InProgress(p) => p,
-                other => {
-                    auth.state = other;
-                    let reject = AuthResult { response: AuthResponse::AuthErr };
-                    return Ok(((SessionLifecycle::None, reject), RoleMask::NONE));
-                }
-            };
-            // A continue must stay on the in-progress mechanism.
-            let outcome = if mech_tag(&args.mechanism) == Some(progress.tag) {
-                self.dispatch(&args.mechanism, &auth.channel, Some(progress))
-            } else {
-                Outcome::Reject(RejectKind::AuthErr)
-            };
-            let granted = self.granted_mask_of(&outcome);
-            Ok((commit(auth, outcome, session_id), granted))
-        })?;
+        type Committed = ((SessionLifecycle, AuthResult), RoleMask, Option<Credential>);
+        let (committed, granted, credential) =
+            session.with_internal_mut(|slot| -> Result<Committed, JsonRpcError> {
+                let auth = slot.as_mut().ok_or_else(missing_state)?;
+                // Take the carried in-progress state; anything else is out of sequence.
+                let progress =
+                    match std::mem::replace(&mut auth.state, AuthSessionState::Unauthenticated) {
+                        AuthSessionState::InProgress(p) => p,
+                        other => {
+                            auth.state = other;
+                            let reject = AuthResult { response: AuthResponse::AuthErr };
+                            return Ok(((SessionLifecycle::None, reject), RoleMask::NONE, None));
+                        }
+                    };
+                // A continue must stay on the in-progress mechanism.
+                let outcome = if mech_tag(&args.mechanism) == Some(progress.tag) {
+                    self.dispatch(&args.mechanism, &auth.channel, Some(progress))
+                } else {
+                    Outcome::Reject(RejectKind::AuthErr)
+                };
+                let (granted, uid) = self.authorize(&outcome);
+                let credential =
+                    credential_of(&outcome, mech_tag(&args.mechanism).unwrap_or("UNKNOWN"), uid);
+                Ok((commit(auth, outcome, session_id), granted, credential))
+            })?;
         session.set_roles(granted);
+        if let Some(cred) = credential {
+            session.set_credential(cred);
+        }
         Ok(committed)
     }
 }
@@ -334,6 +355,22 @@ fn missing_state() -> JsonRpcError {
     )
 }
 
+/// Build the standardized [`Credential`] summary the `$/sessions` listing surfaces — present only
+/// for an authenticated outcome. `mech` is the mechanism label (`"UNIX_SOCKET"` for the peer-cred
+/// default, else the wire tag: `"SCRAM"`, `"CLIENT_CERTIFICATE"`, `"PASSTHROUGH"`, …); `uid` is the
+/// account uid [`AuthStack::authorize`] already resolved (so the principal isn't resolved twice).
+pub(crate) fn credential_of(outcome: &Outcome, mech: &str, uid: Option<u32>) -> Option<Credential> {
+    let Outcome::Authenticated { principal, .. } = outcome else {
+        return None;
+    };
+    let who = match principal {
+        Principal::Uid(u) => format!(" uid={u}"),
+        Principal::User(name) => format!(" user={name}"),
+        Principal::None => String::new(),
+    };
+    Some(Credential { description: format!("{mech}{who}"), uid })
+}
+
 /// Map a mechanism [`Outcome`] onto the `(lifecycle, reply)` the core commits, advancing the
 /// session's auth state in place. `session_id` is returned to the client on success. (Shared with
 /// the passthrough takeover closure, which commits the broker's verdict the same way.)
@@ -343,7 +380,7 @@ pub(crate) fn commit(
     session_id: SessionId,
 ) -> (SessionLifecycle, AuthResult) {
     match outcome {
-        // The `principal` was resolved to the session's role mask by the caller (`granted_mask_of`).
+        // The `principal` was resolved to the session's role mask + uid by the caller (`authorize`).
         Outcome::Authenticated { identity, principal: _, user_info, extra } => {
             auth.state = AuthSessionState::Authenticated(identity);
             let response =

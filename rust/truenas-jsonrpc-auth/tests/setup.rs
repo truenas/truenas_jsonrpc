@@ -38,6 +38,15 @@ fn session(proto: &JsonRpcProtocol<AuthSession>, peer: &Peer) -> Arc<Session<Aut
     proto.new_session(AuthSession::from_peer(peer), Arc::new(NullOutbound))
 }
 
+/// The credential summary the auth layer committed on this session (`$/sessions` surfaces it):
+/// the human-readable description + the resolved account uid.
+fn credential(s: &Session<AuthSession>) -> (String, Option<u32>) {
+    s.with_credential(|c| {
+        let c = c.expect("a credential is set after a successful setup");
+        (c.description.clone(), c.uid)
+    })
+}
+
 /// Dispatch one setup/continue call and return the parsed reply envelope.
 async fn call(
     proto: &JsonRpcProtocol<AuthSession>,
@@ -73,6 +82,8 @@ async fn peercred_unix_root_establishes() {
     assert_eq!(reply["result"]["response"]["session_id"].as_str().unwrap(), s.id().to_string());
     let id = s.with_internal(|a| a.unwrap().identity().cloned());
     assert_eq!(id, Some(json!({ "uid": 0 })));
+    // The peer-cred default commits a `UNIX_SOCKET` credential carrying the peer's uid.
+    assert_eq!(credential(&s), ("UNIX_SOCKET uid=0".to_string(), Some(0)));
 }
 
 #[tokio::test]
@@ -88,6 +99,8 @@ async fn peercred_non_root_falls_through_to_auth_err() {
     assert_eq!(response_type(&reply), "AUTH_ERR");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
     assert!(s.with_internal(|a| a.unwrap().identity().is_none()));
+    // A rejected setup commits no credential.
+    assert!(s.with_credential(|c| c.is_none()));
 }
 
 #[tokio::test]
@@ -230,6 +243,8 @@ async fn multi_round_mechanism_challenges_then_establishes() {
     assert_eq!(r2["result"]["response"]["user_info"], json!({ "hello": true }));
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
     assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "user": "t" })));
+    // Committed on the continue round; `Principal::None` → just the mechanism label, no uid.
+    assert_eq!(credential(&s), ("TEST".to_string(), None));
 }
 
 #[tokio::test]
@@ -273,6 +288,8 @@ async fn user_principal_resolves_via_user_resolver_then_role_source() {
     let r = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "USER" } })).await;
     assert_eq!(response_type(&r), "SUCCESS");
     assert_eq!(s.granted_roles(), registry.get("ops").unwrap());
+    // The credential names the mechanism + account and carries the resolved uid (no second lookup).
+    assert_eq!(credential(&s), ("USER user=alice".to_string(), Some(5)));
 }
 
 #[tokio::test]
