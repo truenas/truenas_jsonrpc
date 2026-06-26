@@ -68,14 +68,13 @@ pub(crate) trait ErasedSync<S>: Send + Sync {
         want_value: bool,
     ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError>;
     /// XDR analogue of [`run`](Self::run): run the handler on the decoded params and XDR-encode
-    /// the result for the wire; when `want_value`, also reflect the typed result to a JSON
-    /// `Value` for the audit record.
+    /// the result for the wire. The result is not reflected to JSON — the audit record carries the
+    /// structured outcome, not the payload (only the params are reflected, in [`xdr_decode`](Self::xdr_decode)).
     fn xdr_run(
         &self,
         decoded: Box<dyn Any + Send>,
         cx: &RequestCtx<S>,
-        want_value: bool,
-    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError>;
+    ) -> Result<Vec<u8>, JsonRpcError>;
 }
 
 #[async_trait]
@@ -90,16 +89,15 @@ pub(crate) trait ErasedAsync<S>: Send + Sync {
         params: &[u8],
         want_value: bool,
     ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError>;
-    /// XDR analogue of [`run`](Self::run): await the handler and XDR-encode the result; when
-    /// `want_value`, also reflect the typed result to a JSON `Value` for the audit record. Run
-    /// inline on the runtime (the async handler yields), so — unlike the sync XDR path — there is
-    /// no `spawn_blocking` hop.
+    /// XDR analogue of [`run`](Self::run): await the handler and XDR-encode the result. Run inline
+    /// on the runtime (the async handler yields), so — unlike the sync XDR path — there is no
+    /// `spawn_blocking` hop. The result is not reflected to JSON (the audit record carries the
+    /// outcome; only the params are reflected, in [`xdr_decode`](Self::xdr_decode)).
     async fn xdr_run(
         &self,
         decoded: Box<dyn Any + Send>,
         cx: RequestCtx<S>,
-        want_value: bool,
-    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError>;
+    ) -> Result<Vec<u8>, JsonRpcError>;
 }
 
 struct ClosureSync<A, R, F> {
@@ -142,14 +140,11 @@ where
         &self,
         decoded: Box<dyn Any + Send>,
         cx: &RequestCtx<S>,
-        want_value: bool,
-    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError> {
+    ) -> Result<Vec<u8>, JsonRpcError> {
         let accepts = *decoded.downcast::<A>().expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx)?;
-        let bytes = truenas_xdr::to_bytes(&result)
-            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))?;
-        let value = want_value.then(|| serde_json::to_value(&result).unwrap_or(Value::Null));
-        Ok((bytes, value))
+        truenas_xdr::to_bytes(&result)
+            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))
     }
 }
 
@@ -196,14 +191,11 @@ where
         &self,
         decoded: Box<dyn Any + Send>,
         cx: RequestCtx<S>,
-        want_value: bool,
-    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError> {
+    ) -> Result<Vec<u8>, JsonRpcError> {
         let accepts = *decoded.downcast::<A>().expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx).await?;
-        let bytes = truenas_xdr::to_bytes(&result)
-            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))?;
-        let value = want_value.then(|| serde_json::to_value(&result).unwrap_or(Value::Null));
-        Ok((bytes, value))
+        truenas_xdr::to_bytes(&result)
+            .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))
     }
 }
 
@@ -329,8 +321,7 @@ where
         &self,
         decoded: Box<dyn Any + Send>,
         cx: &RequestCtx<S>,
-        want_value: bool,
-    ) -> Result<(Vec<u8>, Option<Value>), JsonRpcError> {
+    ) -> Result<Vec<u8>, JsonRpcError> {
         let (base, xopts, filters_json) = *decoded
             .downcast::<(A, XdrQueryOptions, String)>()
             .expect("decoded params type matches the method");
@@ -339,14 +330,7 @@ where
         let cf = compile_filters(&filters)?;
         let co = compile_options(&xopts.into_query_options())?;
         let out = (self.f)(base, cx, &cf, &co)?;
-        // The result is the Zig/Python count-or-(count+entries) shape; reflect it (count → the
-        // integer, rows → the array) for the audit record before XDR-encoding for the wire.
-        let value = want_value.then(|| match &out {
-            Filtered::Count(n) => serde_json::to_value(n).unwrap_or(Value::Null),
-            Filtered::Rows(rows) => serde_json::to_value(rows).unwrap_or(Value::Null),
-        });
-        let bytes = finalize_xdr(out)?;
-        Ok((bytes, value))
+        finalize_xdr(out)
     }
 }
 

@@ -1736,11 +1736,11 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         if need_params {
             self.req.params = params_value;
         }
-        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` skips the
-        // result→`Value` reflection: no envelope is synthesized and nothing is re-parsed.
+        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` returns
+        // just the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
         let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.xdr_run(decoded, &cx, false).map(|(bytes, _)| bytes),
+            Ok(()) => erased.xdr_run(decoded, &cx),
         };
         if want_audit {
             self.do_audit(audit_outcome(&outcome), &audit_detail);
@@ -1766,11 +1766,11 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         if need_params {
             self.req.params = params_value;
         }
-        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` skips the
-        // result→`Value` reflection: no envelope is synthesized and nothing is re-parsed.
+        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` returns
+        // just the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
         let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.xdr_run(decoded, cx, false).await.map(|(bytes, _)| bytes),
+            Ok(()) => erased.xdr_run(decoded, cx).await,
         };
         if want_audit {
             self.do_audit(audit_outcome(&outcome), &audit_detail);
