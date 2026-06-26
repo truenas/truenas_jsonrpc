@@ -109,6 +109,102 @@ async fn websocket_round_trip() {
     task.abort();
 }
 
+/// WebSocket over AF_UNIX (the nginx→ws-over-unix path): a `tokio-tungstenite` client over a
+/// `UnixStream` negotiates + dispatches. `serve_ws` is generic over the stream, so the unix-backed
+/// listener reuses it. The listener is declared trusted-local here (an unauthenticated transport test).
+#[tokio::test]
+async fn websocket_over_unix_round_trip() {
+    use truenas_jsonrpc_server::{UnixConfig, UnixTrust};
+
+    let srv = server();
+    let path = std::env::temp_dir().join(format!("tn-ws-unix-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let task = {
+        let srv = srv.clone();
+        tokio::spawn(async move { srv.serve_websocket_unix_listener(listener, UnixTrust::Local).await })
+    };
+
+    let unix = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let (mut ws, _resp) = tokio_tungstenite::client_async("ws://localhost/", unix).await.unwrap();
+
+    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}})).await;
+    let neg = recv_json(&mut ws).await;
+    assert_eq!(neg["result"]["protocol"], "main");
+
+    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}})).await;
+    let add = recv_json(&mut ws).await;
+    assert_eq!(add["result"]["sum"], 42);
+
+    task.abort();
+    let _ = std::fs::remove_file(&path);
+}
+
+/// A **Proxied** ws-over-unix listener with a `forwarded_extractor`: the upgrade carries nginx's
+/// `X-Real-Remote-*` headers, so `$/sessions` shows the real client — not the unix peer.
+#[tokio::test]
+async fn websocket_unix_forwarded_origin_surfaces_the_real_client() {
+    use tokio_tungstenite::tungstenite::handshake::client::generate_key;
+    use truenas_jsonrpc::{RoleMask, Session, SessionLifecycle};
+    use truenas_jsonrpc_server::{ForwardedOrigin, UnixConfig, UnixTrust};
+
+    #[derive(serde::Deserialize, serde::Serialize)]
+    struct Empty {}
+
+    // $/sessionSetup grants FULL_ADMIN so this connection may call $/sessions.
+    let proto = JsonRpcProtocol::<()>::builder("main", "1")
+        .session_setup(MethodDef::new("$/sessionSetup"), |_a: Empty, s: &Session<()>| {
+            s.set_roles(RoleMask::FULL_ADMIN);
+            Ok::<_, JsonRpcError>((SessionLifecycle::Established, json!({ "ok": true })))
+        })
+        .build();
+    let srv = JsonRpcServer::<()>::builder("fwd-server")
+        .protocol("main", proto)
+        .forwarded_extractor(|_peer, headers| ForwardedOrigin::from_real_remote_headers(headers))
+        .build();
+
+    let path = std::env::temp_dir().join(format!("tn-ws-fwd-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let task = {
+        let srv = srv.clone();
+        tokio::spawn(async move {
+            srv.serve_websocket_unix_listener(listener, UnixTrust::Proxied).await
+        })
+    };
+
+    // A ws client over unix whose upgrade carries the nginx-style forwarded headers.
+    let unix = tokio::net::UnixStream::connect(&path).await.unwrap();
+    let req = http::Request::builder()
+        .uri("ws://localhost/")
+        .header("Host", "localhost")
+        .header("Connection", "Upgrade")
+        .header("Upgrade", "websocket")
+        .header("Sec-WebSocket-Version", "13")
+        .header("Sec-WebSocket-Key", generate_key())
+        .header("X-Real-Remote-Addr", "203.0.113.7")
+        .header("X-Real-Remote-Port", "54321")
+        .header("X-Https", "on")
+        .body(())
+        .unwrap();
+    let (mut ws, _resp) = tokio_tungstenite::client_async(req, unix).await.unwrap();
+
+    let uuid = "123e4567-e89b-12d3-a456-426614174000";
+    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}})).await;
+    assert_eq!(recv_json(&mut ws).await["result"]["protocol"], "main");
+    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/sessionSetup","id":uuid,"params":{}})).await;
+    assert_eq!(recv_json(&mut ws).await["result"]["ok"], true);
+
+    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/sessions","id":uuid})).await;
+    let list = recv_json(&mut ws).await;
+    let entry = &list["result"][0];
+    assert_eq!(entry["origin"], "203.0.113.7:54321"); // the real client, not the unix peer
+    assert_eq!(entry["secure_transport"], true); // X-Https: on
+
+    task.abort();
+    let _ = std::fs::remove_file(&path);
+}
+
 /// WebSocket over TLS (`wss://`): TLS handshake (userspace) then a WebSocket handshake over the
 /// encrypted stream, then negotiate + dispatch. Requires both `tls` and `websocket`.
 #[cfg(feature = "tls")]

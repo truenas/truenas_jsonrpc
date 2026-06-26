@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use truenas_jsonrpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_jsonrpc_server::{framing, JsonRpcServer, UnixConfig};
+use truenas_jsonrpc_server::{framing, JsonRpcServer, UnixConfig, UnixTrust};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -83,7 +83,7 @@ async fn unix_round_trip() {
     let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_unix_listener(listener).await })
+        tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await })
     };
 
     let mut client = UnixStream::connect(&path).await.unwrap();
@@ -151,7 +151,7 @@ async fn network_auth_guard() {
     let _ = std::fs::remove_file(&path);
     let srv = unauth();
     let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
-    let task = tokio::spawn(async move { srv.serve_unix_listener(listener).await });
+    let task = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
     let mut client = UnixStream::connect(&path).await.unwrap();
     negotiate_then_add(&mut client).await;
     task.abort();

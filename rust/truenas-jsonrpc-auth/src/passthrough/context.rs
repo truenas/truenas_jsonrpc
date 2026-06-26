@@ -2,7 +2,7 @@
 //! verdict the broker returns.
 
 use serde::{Deserialize, Serialize};
-use truenas_jsonrpc_server::Transport;
+use truenas_jsonrpc_server::{Transport, TransportPosture};
 
 use crate::channel::Channel;
 use crate::outcome::{Outcome, Principal, RejectKind};
@@ -41,6 +41,11 @@ pub struct BrokerContext {
     /// The `tls-server-end-point` channel binding (RFC 5929), if the channel is bound.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub channel_binding: Option<Vec<u8>>,
+    /// The connection's declared [`TransportPosture`] — the trust the server vouched for. The broker
+    /// should re-validate it against the passed fd (e.g. probe `SOL_TLS` for kTLS, confirm AF_UNIX
+    /// for the unix postures) before honoring it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posture: Option<TransportPosture>,
 }
 
 impl BrokerContext {
@@ -58,6 +63,7 @@ impl BrokerContext {
             encrypted: channel.encrypted,
             client_cert: channel.client_cert.clone(),
             channel_binding: channel.channel_binding.clone(),
+            posture: channel.posture,
         }
     }
 
@@ -78,6 +84,10 @@ pub enum BrokerVerdict {
     Authenticated {
         /// The server-internal identity to store on the session.
         identity: serde_json::Value,
+        /// The authentication mechanism the broker actually used (`"SCRAM"`, `"GSSAPI"`, …). The
+        /// server authorizes `(uid, mechanism)` from this and records it in the session credential,
+        /// so a brokered session is granted roles like an in-process one of the same method.
+        mechanism: String,
         /// Who to authorize as — the [`Principal`] the stack resolves roles from (a uid, or an
         /// account name resolved via the username→uid resolver). Defaults to [`Principal::None`].
         #[serde(default)]
@@ -95,14 +105,17 @@ pub enum BrokerVerdict {
 }
 
 impl BrokerVerdict {
-    /// Map the verdict onto the mechanism [`Outcome`] the auth stack commits.
-    pub(crate) fn into_outcome(self) -> Outcome {
+    /// Map the verdict onto the [`Outcome`] the auth stack commits, plus — when authenticated — the
+    /// mechanism the broker reported using (so the server authorizes `(uid, mechanism)` and records
+    /// it in the credential). The mechanism is `None` on a non-authenticated verdict.
+    pub(crate) fn into_handoff(self) -> (Outcome, Option<String>) {
         match self {
-            BrokerVerdict::Authenticated { identity, principal, user_info } => {
-                Outcome::Authenticated { identity, principal, user_info, extra: None }
-            }
-            BrokerVerdict::Denied => Outcome::Reject(RejectKind::Denied),
-            BrokerVerdict::AuthErr => Outcome::Reject(RejectKind::AuthErr),
+            BrokerVerdict::Authenticated { identity, mechanism, principal, user_info } => (
+                Outcome::Authenticated { identity, principal, user_info, extra: None },
+                Some(mechanism),
+            ),
+            BrokerVerdict::Denied => (Outcome::Reject(RejectKind::Denied), None),
+            BrokerVerdict::AuthErr => (Outcome::Reject(RejectKind::AuthErr), None),
         }
     }
 }

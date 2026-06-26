@@ -10,7 +10,7 @@ use std::process::Command;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use truenas_jsonrpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_jsonrpc_server::{JsonRpcServer, UnixConfig};
+use truenas_jsonrpc_server::{JsonRpcServer, UnixConfig, UnixTrust};
 
 #[derive(Deserialize, Serialize)]
 struct AddArgs {
@@ -60,7 +60,7 @@ async fn python_client_drives_rust_server() {
     let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_unix_listener(listener).await })
+        tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await })
     };
 
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/conformance/python_client.py");

@@ -38,6 +38,9 @@ openssl = { version = "0.10", optional = true }
 openssl-sys = { version = "0.9", optional = true } # socket-BIO FFI for the kTLS handshake
 tokio-openssl = { version = "0.6", optional = true } # the userspace-TLS SslStream pump
 foreign-types = { version = "0.3", optional = true } # ForeignType::as_ptr for the raw SSL*
+# Header types (`http::HeaderMap`) for the forwarded-origin extractor — read on the WebSocket
+# upgrade request. Already in the lock (transitive via tokio-tungstenite), so no new crate.
+http = "1"
 # WebSocket transport: JSON-RPC framed as WebSocket messages (the library owns the framing, so
 # no raw-fd transfer). Mirrors Python's optional `websockets` extra.
 tokio-tungstenite = { version = "0.24", optional = true }

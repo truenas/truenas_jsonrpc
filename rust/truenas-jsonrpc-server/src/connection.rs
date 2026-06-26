@@ -351,11 +351,11 @@ async fn run_passthrough<IO>(
     // broker's client I/O on the shared fd.
     let _gate = writer.lock().await;
 
-    // Passthrough needs a plaintext fd (a userspace-TLS connection has none) and — for SCM_RIGHTS
-    // fd passing — an AF_UNIX transport. If either is missing, refuse: the session stays
-    // unauthenticated (the takeover directive is dropped without committing).
+    // Passthrough needs a passable plaintext fd (WebSocket / userspace-TLS have none → `transfer_fd`
+    // is `None`) *and* a secure transport posture (plain TCP has a fd but no posture). If either is
+    // missing, refuse: the session stays unauthenticated (the directive is dropped without committing).
     let Some(raw_fd) = transfer_fd else { return };
-    if takeover.requires_af_unix() && peer.transport != Transport::Unix {
+    if takeover.hands_off_fd() && peer.posture.is_none() {
         return;
     }
 
@@ -465,6 +465,17 @@ where
 
 /// Derive the connection [`SessionOrigin`] from the peer — surfaced in the `$/sessions` listing.
 fn origin_from_peer(peer: &Peer) -> SessionOrigin {
+    // A reverse-proxied connection: surface the *real client* the proxy reported, not the proxy's
+    // own socket (peer-cred / addr here belong to the proxy). The forwarded origin is set only on a
+    // `Proxied` listener by the configured `forwarded_extractor`.
+    if let Some(f) = &peer.forwarded {
+        return SessionOrigin {
+            transport: "proxied",
+            remote: Some(f.render()),
+            uid: None,
+            secure: f.secure,
+        };
+    }
     SessionOrigin {
         transport: match peer.transport {
             Transport::Unix => "unix",

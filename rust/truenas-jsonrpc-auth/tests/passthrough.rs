@@ -3,8 +3,9 @@
 //! - the **broker wire** end to end: [`Passthrough::handoff`] passes a real client socket fd
 //!   (`SCM_RIGHTS`) + context to a [`BrokerServer`], which reads/writes that very fd and returns a
 //!   verdict — proving the broker receives a working dup of the client connection;
-//! - the **mechanism** through the real `$/sessionSetup` dispatch: it is registered, gated on a
-//!   local (AF_UNIX) channel, and (until the connection-takeover seam lands) refuses in `step`.
+//! - the **mechanism** through the real `$/sessionSetup` dispatch: `$/sessionSetup{PASSTHROUGH}`
+//!   over a local (AF_UNIX) channel yields a takeover directive that, when run with the connection
+//!   fd, hands off to the broker and commits the verdict (identity + `(uid, mechanism)` roles).
 #![cfg(feature = "passthrough")]
 
 use std::io::{Read, Write};
@@ -22,7 +23,7 @@ use truenas_jsonrpc_auth::{
     install, AuthSession, AuthStack, BrokerContext, BrokerServer, BrokerVerdict, Channel, Outcome,
     Passthrough, Principal, RejectKind,
 };
-use truenas_jsonrpc_server::{Peer, Ucred};
+use truenas_jsonrpc_server::{Peer, TlsPeer, TransportPosture, Ucred};
 
 const ID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -44,6 +45,20 @@ fn unix_channel(uid: u32) -> Channel {
     Channel::from_peer(&Peer::unix(Some(Ucred { pid: 1000, uid, gid: uid })))
 }
 
+/// A kTLS peer — a secure direct-TLS posture with a passable plaintext fd.
+fn ktls_peer() -> Peer {
+    Peer {
+        tls: Some(TlsPeer::default()),
+        posture: Some(TransportPosture::KernelTls),
+        ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
+    }
+}
+
+/// A reverse-proxied AF_UNIX peer — the nginx-over-unix case (peer-cred is the proxy's).
+fn proxied_unix_peer(uid: u32) -> Peer {
+    Peer::unix(Some(Ucred { pid: 1000, uid, gid: uid })).with_posture(TransportPosture::ProxiedUnix)
+}
+
 // --- the broker wire, end to end ----------------------------------------------------------------
 
 /// The hand-off passes the *actual* client socket: the broker reads a byte the client wrote on it,
@@ -58,6 +73,7 @@ fn passthrough_hands_the_real_client_fd_to_the_broker() {
         let server = BrokerServer::new(|ctx: BrokerContext, fd| {
             assert_eq!(ctx.transport, "unix");
             assert_eq!(ctx.protocol.as_deref(), Some("main"));
+            assert_eq!(ctx.posture, Some(TransportPosture::TrustedLocalUnix)); // posture rides to the broker
             let mut client = UnixStream::from(fd);
             let mut byte = [0u8; 1];
             if client.read_exact(&mut byte).is_err() {
@@ -66,6 +82,7 @@ fn passthrough_hands_the_real_client_fd_to_the_broker() {
             client.write_all(b"ok").unwrap(); // talk back on the passed fd
             BrokerVerdict::Authenticated {
                 identity: json!({ "uid": byte[0] }),
+                mechanism: "SCRAM".into(),
                 principal: Principal::None,
                 user_info: None,
             }
@@ -80,7 +97,7 @@ fn passthrough_hands_the_real_client_fd_to_the_broker() {
     client_end.write_all(&[7u8]).unwrap(); // the "client" sends a byte the broker will read
 
     let ctx = BrokerContext::from_channel(&unix_channel(7)).with_protocol("main");
-    let outcome = Passthrough::new(&path).handoff(conn_fd.as_raw_fd(), &ctx);
+    let (outcome, _) = Passthrough::new(&path).handoff(conn_fd.as_raw_fd(), &ctx);
 
     match outcome {
         Outcome::Authenticated { identity, .. } => assert_eq!(identity, json!({ "uid": 7 })),
@@ -108,7 +125,7 @@ fn broker_denial_maps_to_reject() {
 
     let (conn_fd, _client_end) = UnixStream::pair().unwrap();
     let ctx = BrokerContext::from_channel(&unix_channel(0));
-    let outcome = Passthrough::new(&path).handoff(conn_fd.as_raw_fd(), &ctx);
+    let (outcome, _) = Passthrough::new(&path).handoff(conn_fd.as_raw_fd(), &ctx);
     assert!(matches!(outcome, Outcome::Reject(RejectKind::Denied)));
 
     broker.join().unwrap();
@@ -120,7 +137,7 @@ fn broker_denial_maps_to_reject() {
 fn passthrough_with_no_broker_is_auth_err() {
     let (conn_fd, _client_end) = UnixStream::pair().unwrap();
     let ctx = BrokerContext::from_channel(&unix_channel(0));
-    let outcome = Passthrough::new("/nonexistent/tn-broker.sock").handoff(conn_fd.as_raw_fd(), &ctx);
+    let (outcome, _) = Passthrough::new("/nonexistent/tn-broker.sock").handoff(conn_fd.as_raw_fd(), &ctx);
     assert!(matches!(outcome, Outcome::Reject(RejectKind::AuthErr)));
 }
 
@@ -184,7 +201,8 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
             client.write_all(b"hello-from-broker").unwrap();
             BrokerVerdict::Authenticated {
                 identity: json!({ "uid": ctx.peercred.unwrap().uid }),
-                principal: Principal::None,
+                mechanism: "SCRAM".into(),
+                principal: Principal::Uid(ctx.peercred.unwrap().uid),
                 user_info: None,
             }
         });
@@ -192,7 +210,18 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
         server.serve_conn(&conn).unwrap();
     });
 
-    let proto = proto(&path);
+    // A stack with an explicit (uid, mechanism) role policy, so the brokered session is authorized
+    // from the mechanism the broker reports (`SCRAM`), exactly like an in-process SCRAM session.
+    use truenas_jsonrpc::Roles;
+    let registry = Roles::new(["vm_read"]);
+    let stack = AuthStack::builder()
+        .passthrough(path.clone())
+        .roles(registry.clone())
+        .role_source(
+            |uid, mech| if (uid, mech) == (1000, "SCRAM") { vec!["vm_read".into()] } else { vec![] },
+        )
+        .build();
+    let proto = install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build();
     let s = session(&proto, &Peer::unix(Some(Ucred { pid: 1, uid: 1000, gid: 1000 })));
 
     // dispatch → a passthrough takeover directive; nothing committed yet.
@@ -204,7 +233,7 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
     let Dispatched::Passthrough(takeover) = proto.dispatch(&wire, &s).await else {
         panic!("expected a passthrough takeover directive");
     };
-    assert!(takeover.requires_af_unix());
+    assert!(takeover.hands_off_fd());
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 
     // The server runs the takeover with the connection fd; here a socketpair stands in for the
@@ -218,19 +247,43 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
     assert_eq!(&buf, b"hello-from-broker");
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
     assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "uid": 1000 })));
+    // Roles are resolved on the passthrough path too — from (uid 1000, broker mechanism `SCRAM`).
+    assert_eq!(s.granted_roles(), registry.get("vm_read").unwrap());
 
     broker.join().unwrap();
     let _ = std::fs::remove_file(&path);
 }
 
-/// Over TCP the `Local` capability is absent, so the gate refuses (`DENIED`) before `step` runs —
-/// SCM_RIGHTS fd-passing is AF_UNIX-only.
+/// Plain TCP has no declared secure posture, so the auth stack refuses the setup (`DENIED`) before
+/// any mechanism runs — passthrough included.
 #[tokio::test]
-async fn passthrough_over_tcp_is_denied_by_the_capability_gate() {
+async fn passthrough_over_plain_tcp_is_denied() {
     let path = sock_path("unused2");
     let proto = proto(&path);
     let s = session(&proto, &Peer::tcp("127.0.0.1:9000".parse().unwrap()));
     let r = setup(&proto, &s).await;
     assert_eq!(rtype(&r), "DENIED");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
+}
+
+/// Passthrough is eligible over any secure posture with a passable fd — kTLS and proxied-unix, not
+/// just trusted-local AF_UNIX. (The server's `run_passthrough` additionally requires a real fd, so
+/// WebSocket is refused there.) Each yields a `Dispatched::Passthrough` takeover directive.
+#[tokio::test]
+async fn passthrough_eligible_over_ktls_and_proxied_unix() {
+    let path = sock_path("secure");
+    let proto = proto(&path);
+    let wire = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "method": "$/sessionSetup", "id": ID,
+        "params": { "mechanism": { "mechanism": "PASSTHROUGH" } },
+    }))
+    .unwrap();
+    for peer in [ktls_peer(), proxied_unix_peer(1000)] {
+        let s = session(&proto, &peer);
+        assert!(
+            matches!(proto.dispatch(&wire, &s).await, Dispatched::Passthrough(_)),
+            "passthrough should be eligible over {:?}",
+            peer.posture
+        );
+    }
 }

@@ -781,6 +781,7 @@ dependencies = [
  "bytes",
  "foreign-types",
  "futures-util",
+ "http",
  "libc",
  "nix",
  "openssl",

@@ -29,7 +29,7 @@ use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_openssl::SslStream;
 
 use crate::connection;
-use crate::peer::{Peer, TlsPeer};
+use crate::peer::{Peer, TlsPeer, TransportPosture};
 use crate::server::JsonRpcServer;
 
 // Linux kTLS confirmation: getsockopt(SOL_TLS, TLS_TX/TLS_RX) returns the 4-byte
@@ -139,13 +139,13 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                         let fd = kfd.as_raw_fd();
                         let Ok(stream) = TcpStream::from_std(kfd) else { return };
                         // kTLS: the fd is plaintext to us / kernel-encrypted → transfer works.
-                        connection::serve(stream, Some(fd), tls_peer(addr, cert, binding), shared).await;
+                        connection::serve(stream, Some(fd), tls_peer(addr, cert, binding, Some(TransportPosture::KernelTls)), shared).await;
                     }
                     TlsMode::Userspace => {
                         let Some(stream) = userspace_accept(&acceptor, tcp).await else { return };
                         let (cert, binding) = tls_facts(stream.ssl());
                         // Userspace TLS: ciphertext on the fd → no raw-fd transfer (None).
-                        connection::serve(stream, None, tls_peer(addr, cert, binding), shared).await;
+                        connection::serve(stream, None, tls_peer(addr, cert, binding, None), shared).await;
                     }
                 }
             });
@@ -289,8 +289,9 @@ pub(crate) fn tls_peer(
     addr: SocketAddr,
     peer_cert: Option<Vec<u8>>,
     channel_binding: Option<Vec<u8>>,
+    posture: Option<TransportPosture>,
 ) -> Peer {
-    Peer { tls: Some(TlsPeer { peer_cert, channel_binding }), ..Peer::tcp(addr) }
+    Peer { tls: Some(TlsPeer { peer_cert, channel_binding }), posture, ..Peer::tcp(addr) }
 }
 
 /// Refuse unless the kernel installed TLS crypto for both directions on `fd`.

@@ -17,7 +17,7 @@ use truenas_jsonrpc::{JsonRpcProtocol, NullOutbound, Session, SessionLifecycle};
 use truenas_jsonrpc_auth::{
     install, AuthSession, AuthStack, CredentialSource, ScramCredentials,
 };
-use truenas_jsonrpc_server::{Peer, TlsPeer};
+use truenas_jsonrpc_server::{Peer, TlsPeer, TransportPosture};
 
 const ID: &str = "123e4567-e89b-12d3-a456-426614174000";
 const BINDING: &[u8] = b"a-32-byte-tls-server-end-point!!";
@@ -103,6 +103,7 @@ fn server_with<C: CredentialSource + 'static>(source: C) -> JsonRpcProtocol<Auth
 fn tls_session(proto: &JsonRpcProtocol<AuthSession>, binding: Option<Vec<u8>>) -> Arc<Session<AuthSession>> {
     let peer = Peer {
         tls: Some(TlsPeer { peer_cert: None, channel_binding: binding }),
+        posture: Some(TransportPosture::KernelTls), // a secure (kTLS) channel can authenticate
         ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
     };
     proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))

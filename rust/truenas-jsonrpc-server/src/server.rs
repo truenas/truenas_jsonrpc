@@ -9,12 +9,13 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use http::HeaderMap;
 use tokio::net::{TcpListener, ToSocketAddrs, UnixListener};
 use truenas_jsonrpc::JsonRpcProtocol;
 
 use crate::connection;
 use crate::framing::DEFAULT_LIMIT;
-use crate::peer::{self, Peer};
+use crate::peer::{self, ForwardedOrigin, Peer, UnixTrust};
 
 /// Listen on an AF_UNIX socket. `mode` is applied to the socket file after bind (`None`
 /// leaves the umask default). The path must not already exist (the caller manages stale
@@ -24,12 +25,16 @@ pub struct UnixConfig {
     pub path: PathBuf,
     /// Permission bits to `chmod` the socket file to after bind (default `0o660`).
     pub mode: Option<u32>,
+    /// The listener's trust posture (default [`UnixTrust::Local`] — peer-cred is the caller). Set
+    /// [`UnixTrust::Proxied`] when a reverse proxy forwards remote clients over this socket.
+    pub trust: UnixTrust,
 }
 
 impl UnixConfig {
-    /// An AF_UNIX config for `path`, defaulting the socket mode to `0o660` (owner+group rw).
+    /// An AF_UNIX config for `path`, defaulting the socket mode to `0o660` (owner+group rw) and the
+    /// trust to [`UnixTrust::Local`].
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        UnixConfig { path: path.into(), mode: Some(0o660) }
+        UnixConfig { path: path.into(), mode: Some(0o660), trust: UnixTrust::Local }
     }
 
     /// Override the post-bind socket file mode (`None` leaves the umask default).
@@ -38,10 +43,22 @@ impl UnixConfig {
         self.mode = mode;
         self
     }
+
+    /// Declare the listener's trust posture (e.g. [`UnixTrust::Proxied`] for a reverse-proxied
+    /// socket where `SO_PEERCRED` is the proxy, not the end client).
+    #[must_use]
+    pub fn trust(mut self, trust: UnixTrust) -> Self {
+        self.trust = trust;
+        self
+    }
 }
 
 /// Maps a connecting [`Peer`] to the per-connection session server state.
 type StateFn<S> = Box<dyn Fn(&Peer) -> Option<S> + Send + Sync>;
+
+/// A user-supplied parser of a reverse proxy's forwarded request metadata (the WebSocket upgrade
+/// headers) into the real client [`ForwardedOrigin`]. Run only on a `Proxied` listener.
+type ForwardedFn = Arc<dyn Fn(&Peer, &HeaderMap) -> Option<ForwardedOrigin> + Send + Sync>;
 
 /// Shared, immutable server state behind an `Arc`, read by every connection task.
 pub(crate) struct ServerShared<S> {
@@ -50,6 +67,9 @@ pub(crate) struct ServerShared<S> {
     pub(crate) state_fn: StateFn<S>,
     pub(crate) limit: usize,
     pub(crate) allow_unauthenticated: bool,
+    /// User-supplied forwarded-origin parser; only read by the WebSocket accept path.
+    #[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+    pub(crate) forwarded_extractor: Option<ForwardedFn>,
 }
 
 impl<S> ServerShared<S> {
@@ -69,6 +89,7 @@ pub struct JsonRpcServerBuilder<S> {
     state_fn: Option<StateFn<S>>,
     limit: usize,
     allow_unauthenticated: bool,
+    forwarded_extractor: Option<ForwardedFn>,
 }
 
 impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
@@ -110,6 +131,23 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
         self
     }
 
+    /// Set a parser that recovers the real client [`ForwardedOrigin`] from a reverse proxy's
+    /// forwarded request metadata — the WebSocket upgrade headers — on a `Proxied` listener. The
+    /// closure receives the immediate [`Peer`] (e.g. the proxy's `SO_PEERCRED`) and the upgrade
+    /// [`HeaderMap`]; it returns the parsed real client, or `None` to leave the origin as the
+    /// immediate peer. [`ForwardedOrigin::from_real_remote_headers`] is the drop-in for the standard
+    /// nginx setup. **Honored only on a `Proxied` listener** (trust is the listener's posture +
+    /// socket permissions) — never on a trusted-local or direct connection, where a client could
+    /// forge the headers.
+    #[must_use]
+    pub fn forwarded_extractor(
+        mut self,
+        f: impl Fn(&Peer, &HeaderMap) -> Option<ForwardedOrigin> + Send + Sync + 'static,
+    ) -> Self {
+        self.forwarded_extractor = Some(Arc::new(f));
+        self
+    }
+
     /// Finish building the server.
     #[must_use]
     pub fn build(self) -> JsonRpcServer<S> {
@@ -120,6 +158,7 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
                 state_fn: self.state_fn.unwrap_or_else(|| Box::new(|_| None)),
                 limit: self.limit,
                 allow_unauthenticated: self.allow_unauthenticated,
+                forwarded_extractor: self.forwarded_extractor,
             }),
         }
     }
@@ -146,6 +185,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             state_fn: None,
             limit: DEFAULT_LIMIT,
             allow_unauthenticated: false,
+            forwarded_extractor: None,
         }
     }
 
@@ -193,21 +233,33 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     }
 
     /// Accept connections on a bound AF_UNIX `listener` until an accept error occurs. Each
-    /// connection carries the peer's `SO_PEERCRED`.
-    pub async fn serve_unix_listener(&self, listener: UnixListener) -> std::io::Result<()> {
+    /// connection carries the peer's `SO_PEERCRED` and the listener's declared `trust` posture
+    /// ([`UnixTrust::Local`] for a genuinely-local socket; [`UnixTrust::Proxied`] when a reverse
+    /// proxy forwards remote clients here, so `SO_PEERCRED` is the proxy's and must not be trusted).
+    pub async fn serve_unix_listener(
+        &self,
+        listener: UnixListener,
+        trust: UnixTrust,
+    ) -> std::io::Result<()> {
+        // A proxied AF_UNIX listener is network-facing (a reverse proxy forwards remote clients in),
+        // so — like a TCP/TLS listener — every protocol must authenticate (peer-cred is the proxy's).
+        if trust == UnixTrust::Proxied {
+            self.require_network_auth()?;
+        }
         loop {
             let (stream, _addr) = listener.accept().await?;
             let fd = stream.as_raw_fd();
-            let peer = Peer::unix(peer::peer_cred(fd));
+            let peer = Peer::unix(peer::peer_cred(fd)).with_posture(trust.into());
             tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
         }
     }
 
-    /// Bind and serve an AF_UNIX socket (bind + accept loop). Runs forever on the happy path —
-    /// spawn it (or `tokio::join!` several transports) to run alongside other work.
+    /// Bind and serve an AF_UNIX socket (bind + accept loop), with the config's [`trust`](UnixConfig::trust)
+    /// posture. Runs forever on the happy path — spawn it (or `tokio::join!` several transports).
     pub async fn serve_unix(&self, config: UnixConfig) -> std::io::Result<()> {
+        let trust = config.trust;
         let listener = Self::bind_unix(&config)?;
-        self.serve_unix_listener(listener).await
+        self.serve_unix_listener(listener, trust).await
     }
 
     /// Bind and serve a TCP `addr` (length-prefixed JSON framing). Refuses (before binding) if a

@@ -1417,7 +1417,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 let rid2 = rid.clone();
                 let secret_fields = slot.meta.secret_fields.clone();
                 let audit_message = slot.meta.audit_message.clone();
-                let af_unix = handoff.af_unix;
+                let fd_handoff = handoff.fd_handoff;
                 let complete = handoff.complete;
                 let run = Box::new(move |ft: &dyn FileTransfer| {
                     let outcome = (complete)(ft);
@@ -1441,7 +1441,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                         );
                     }
                 });
-                Dispatched::Passthrough(SetupTakeover::new(rid, af_unix, run))
+                Dispatched::Passthrough(SetupTakeover::new(rid, fd_handoff, run))
             }
         }
     }

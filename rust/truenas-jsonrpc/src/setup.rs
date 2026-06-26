@@ -30,22 +30,23 @@ pub enum SetupOutcome<R> {
 /// already-encoded reply. The core wraps this with the session-lifecycle commit and the audit
 /// record, so the closure only does the hand-off and reports what happened.
 pub struct SetupHandoff {
-    pub(crate) af_unix: bool,
+    pub(crate) fd_handoff: bool,
     #[allow(clippy::type_complexity)]
     pub(crate) complete:
         Box<dyn FnOnce(&dyn FileTransfer) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError> + Send>,
 }
 
 impl SetupHandoff {
-    /// Build a takeover. `af_unix` marks that the hand-off needs an AF_UNIX connection (SCM_RIGHTS
-    /// fd passing); the server refuses it on any other transport before running it. `complete` runs
-    /// on the server's blocking worker once the connection is gated and the fd is available, and
-    /// returns the lifecycle + encoded reply (or an error, which leaves the session unauthenticated).
-    pub fn new<F>(af_unix: bool, complete: F) -> Self
+    /// Build a takeover. `fd_handoff` marks that the hand-off passes the connection's fd to an
+    /// out-of-band authenticator (a broker), so the server applies its transport-posture policy and
+    /// supplies the fd before running it. `complete` runs on the server's blocking worker once the
+    /// connection is gated and the fd is available, and returns the lifecycle + encoded reply (or an
+    /// error, which leaves the session unauthenticated).
+    pub fn new<F>(fd_handoff: bool, complete: F) -> Self
     where
         F: FnOnce(&dyn FileTransfer) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError> + Send + 'static,
     {
-        Self { af_unix, complete: Box::new(complete) }
+        Self { fd_handoff, complete: Box::new(complete) }
     }
 }
 
@@ -53,28 +54,28 @@ impl SetupHandoff {
 pub(crate) type TakeoverRun = Box<dyn FnOnce(&dyn FileTransfer) + Send>;
 
 /// The [`crate::Dispatched::Passthrough`] directive: a `$/sessionSetup` handler took over the
-/// connection. The server gates the connection, checks the transport ([`requires_af_unix`]), puts
-/// the fd in blocking mode, and calls [`run`] with it. `run` performs the hand-off and commits the
-/// session (lifecycle + audit) inside the core; the broker has already replied to the client over
-/// the fd, so the server sends nothing further.
+/// connection. The server gates the connection, applies its transport-posture policy
+/// ([`hands_off_fd`]), puts the fd in blocking mode, and calls [`run`] with it. `run` performs the
+/// hand-off and commits the session (lifecycle + audit) inside the core; the broker has already
+/// replied to the client over the fd, so the server sends nothing further.
 ///
-/// [`requires_af_unix`]: SetupTakeover::requires_af_unix
+/// [`hands_off_fd`]: SetupTakeover::hands_off_fd
 /// [`run`]: SetupTakeover::run
 pub struct SetupTakeover {
-    af_unix: bool,
+    fd_handoff: bool,
     rid: Option<String>,
     run: TakeoverRun,
 }
 
 impl SetupTakeover {
-    pub(crate) fn new(rid: Option<String>, af_unix: bool, run: TakeoverRun) -> Self {
-        Self { af_unix, rid, run }
+    pub(crate) fn new(rid: Option<String>, fd_handoff: bool, run: TakeoverRun) -> Self {
+        Self { fd_handoff, rid, run }
     }
 
-    /// Whether the hand-off requires an AF_UNIX connection (SCM_RIGHTS fd passing); the server
-    /// refuses the takeover on any other transport.
-    pub fn requires_af_unix(&self) -> bool {
-        self.af_unix
+    /// Whether the hand-off passes the connection's fd to an out-of-band authenticator — the server
+    /// applies its transport-posture policy (and supplies the fd) before running it.
+    pub fn hands_off_fd(&self) -> bool {
+        self.fd_handoff
     }
 
     /// The request id of the `$/sessionSetup` that initiated the takeover.
@@ -91,6 +92,6 @@ impl SetupTakeover {
 
 impl std::fmt::Debug for SetupTakeover {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SetupTakeover").field("af_unix", &self.af_unix).field("rid", &self.rid).finish_non_exhaustive()
+        f.debug_struct("SetupTakeover").field("fd_handoff", &self.fd_handoff).field("rid", &self.rid).finish_non_exhaustive()
     }
 }

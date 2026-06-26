@@ -28,7 +28,7 @@ mod transfer;
 #[cfg(feature = "websocket")]
 mod ws;
 
-pub use peer::{Peer, TlsPeer, Transport, Ucred};
+pub use peer::{ForwardedOrigin, Peer, TlsPeer, Transport, TransportPosture, Ucred, UnixTrust};
 pub use server::{JsonRpcServer, JsonRpcServerBuilder, UnixConfig};
 pub use transfer::FileTransferExt;
 #[cfg(feature = "tls")]

@@ -8,7 +8,7 @@ use truenas_jsonrpc::{
     Credential, JsonRpcError, JsonRpcProtocolBuilder, MethodDef, RoleMask, Roles, Session,
     SessionId, SessionLifecycle, SetupOutcome,
 };
-use truenas_jsonrpc_server::Transport;
+use truenas_jsonrpc_server::TransportPosture;
 
 /// The conventional role name that grants every privilege (mapped to [`RoleMask::FULL_ADMIN`]).
 pub const FULL_ADMIN: &str = "FULL_ADMIN";
@@ -28,8 +28,10 @@ type PeercredFn = Box<dyn Fn(&Channel) -> Option<Identity> + Send + Sync>;
 /// account is unknown / rejected. Used for [`Principal::User`] (SCRAM / mTLS).
 type UserResolverFn = Box<dyn Fn(&str) -> Option<u32> + Send + Sync>;
 
-/// A uid→roles source (e.g. the `server_roles` keyring): the role names granted to a uid.
-type RoleSourceFn = Box<dyn Fn(u32) -> Vec<String> + Send + Sync>;
+/// A `(uid, mechanism)`→roles source (e.g. the `server_roles` keyring): the role names granted to a
+/// uid that authenticated via a given mechanism. Authorization is **assurance/channel-based** — one
+/// account may be granted different roles over different mechanisms (local socket vs SCRAM vs mTLS).
+type RoleSourceFn = Box<dyn Fn(u32, &str) -> Vec<String> + Send + Sync>;
 
 /// The configured authentication stack: the mechanisms enabled for this protocol (keyed by wire
 /// tag) plus an optional AF_UNIX peer-cred default. Build it with [`AuthStack::builder`] and wire
@@ -61,7 +63,9 @@ impl AuthStack {
     /// Run the channel default for `$/sessionSetup` with no mechanism: AF_UNIX peer-cred, or a
     /// refusal on a network transport (which must declare a mechanism).
     fn peercred_default(&self, channel: &Channel) -> Outcome {
-        if channel.transport != Transport::Unix {
+        // Peer-cred is trusted only on a genuinely-local socket. A proxied unix socket carries the
+        // reverse proxy's uid (not the client's), and a network transport has none — both refuse.
+        if channel.posture != Some(TransportPosture::TrustedLocalUnix) {
             return Outcome::Reject(RejectKind::Denied);
         }
         // Authorization keys off the peer's uid (`SO_PEERCRED`); without it we can't authorize.
@@ -99,25 +103,27 @@ impl AuthStack {
         }
     }
 
-    /// The role *names* granted to a resolved uid: **uid 0 is always full admin**; any other uid
-    /// reads its roles from the role source (nothing if none is configured); `None` grants nothing.
-    fn roles_for_uid(&self, uid: Option<u32>) -> Vec<String> {
+    /// The role *names* granted to a resolved uid authenticating via `mechanism`: **uid 0 is always
+    /// full admin** (an anti-lockout net — root over any mechanism, no record needed); any other uid
+    /// reads its roles from the `(uid, mechanism)` source (nothing if none is configured); `None`
+    /// grants nothing.
+    fn roles_for(&self, uid: Option<u32>, mechanism: &str) -> Vec<String> {
         match uid {
             Some(0) => vec![FULL_ADMIN.to_string()],
-            Some(uid) => self.role_source.as_ref().map(|f| f(uid)).unwrap_or_default(),
+            Some(uid) => self.role_source.as_ref().map(|f| f(uid, mechanism)).unwrap_or_default(),
             None => Vec::new(),
         }
     }
 
-    /// Authorize an [`Outcome`] (only [`Outcome::Authenticated`] grants anything): resolve its
-    /// principal to a uid **once**, then to the granted [`RoleMask`] via the role source + registry.
-    /// Returns the uid alongside so the caller can record it in the session [`Credential`] without
-    /// resolving the principal a second time.
-    fn authorize(&self, outcome: &Outcome) -> (RoleMask, Option<u32>) {
+    /// Authorize an [`Outcome`] (only [`Outcome::Authenticated`] grants anything) for a session that
+    /// authenticated via `mechanism`: resolve the principal to a uid **once**, then to the granted
+    /// [`RoleMask`] via the `(uid, mechanism)` role source + registry. Returns the uid alongside so
+    /// the caller can record it in the session [`Credential`] without resolving the principal twice.
+    pub(crate) fn authorize(&self, outcome: &Outcome, mechanism: &str) -> (RoleMask, Option<u32>) {
         match outcome {
             Outcome::Authenticated { principal, .. } => {
                 let uid = self.principal_uid(principal);
-                (self.granted_mask(&self.roles_for_uid(uid)), uid)
+                (self.granted_mask(&self.roles_for(uid, mechanism)), uid)
             }
             _ => (RoleMask::NONE, None),
         }
@@ -146,7 +152,7 @@ impl AuthStack {
     /// commit synchronously; passthrough instead returns a [`SetupOutcome::Takeover`] so the server
     /// can hand the connection fd to the broker.
     fn on_setup(
-        &self,
+        self: &Arc<Self>,
         args: SetupArgs,
         session: &Arc<Session<AuthSession>>,
     ) -> Result<SetupOutcome<AuthResult>, JsonRpcError> {
@@ -156,11 +162,16 @@ impl AuthStack {
         let channel = session
             .with_internal(|slot| slot.map(|a| a.channel.clone()))
             .ok_or_else(missing_state)?;
-        // The credential's mechanism label: the peer-cred default (no mechanism) is `UNIX_SOCKET`,
-        // otherwise the wire tag the client selected (`SCRAM`, `CLIENT_CERTIFICATE`, …).
-        let (outcome, label) = match &args.mechanism {
-            None => (self.peercred_default(&channel), "UNIX_SOCKET"),
-            Some(mech) => (self.dispatch(mech, &channel, None), mech_tag(mech).unwrap_or("UNKNOWN")),
+        // A connection with no declared secure posture (plain TCP / userspace-TLS) may not
+        // authenticate — refuse every mechanism before it runs. Otherwise the credential's mechanism
+        // label is `UNIX_SOCKET` for the peer-cred default, else the wire tag the client selected.
+        let (outcome, label) = if channel.posture.is_none() {
+            (Outcome::Reject(RejectKind::Denied), "NONE")
+        } else {
+            match &args.mechanism {
+                None => (self.peercred_default(&channel), "UNIX_SOCKET"),
+                Some(mech) => (self.dispatch(mech, &channel, None), mech_tag(mech).unwrap_or("UNKNOWN")),
+            }
         };
         Ok(self.build_setup_outcome(outcome, label, session, session_id, &channel))
     }
@@ -168,7 +179,7 @@ impl AuthStack {
     /// Map a mechanism [`Outcome`] onto the core's [`SetupOutcome`]: a passthrough becomes a
     /// connection takeover; everything else commits synchronously in place.
     fn build_setup_outcome(
-        &self,
+        self: &Arc<Self>,
         outcome: Outcome,
         mech: &str,
         session: &Arc<Session<AuthSession>>,
@@ -178,6 +189,7 @@ impl AuthStack {
         #[cfg(feature = "passthrough")]
         if let Outcome::Passthrough(broker) = outcome {
             return SetupOutcome::Takeover(crate::passthrough::takeover(
+                self.clone(),
                 broker,
                 channel,
                 session.clone(),
@@ -187,7 +199,7 @@ impl AuthStack {
         let _ = channel;
         // Resolve authorization once → the per-call gate mask + the account uid; derive the
         // credential summary before `commit` consumes the outcome.
-        let (granted, uid) = self.authorize(&outcome);
+        let (granted, uid) = self.authorize(&outcome, mech);
         let credential = credential_of(&outcome, mech, uid);
         let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
             Some(auth) => commit(auth, outcome, session_id),
@@ -227,9 +239,9 @@ impl AuthStack {
                 } else {
                     Outcome::Reject(RejectKind::AuthErr)
                 };
-                let (granted, uid) = self.authorize(&outcome);
-                let credential =
-                    credential_of(&outcome, mech_tag(&args.mechanism).unwrap_or("UNKNOWN"), uid);
+                let mech = mech_tag(&args.mechanism).unwrap_or("UNKNOWN");
+                let (granted, uid) = self.authorize(&outcome, mech);
+                let credential = credential_of(&outcome, mech, uid);
                 Ok((commit(auth, outcome, session_id), granted, credential))
             })?;
         session.set_roles(granted);
@@ -271,11 +283,13 @@ impl AuthStackBuilder {
         self
     }
 
-    /// Set the uid→roles source: it returns the role names granted to a uid (uid 0 is full admin
-    /// regardless). With the `keyring` feature, [`roles_from_keyring`](Self::roles_from_keyring)
-    /// wires the `server_roles` ring here.
+    /// Set the `(uid, mechanism)`→roles source: it returns the role names granted to a uid that
+    /// authenticated via the given mechanism (`"UNIX_SOCKET"` / `"SCRAM"` / `"CLIENT_CERTIFICATE"` /
+    /// …) — assurance/channel-based authorization. **uid 0 is always full admin** regardless (an
+    /// anti-lockout net), so the source is consulted only for non-root uids. With the `keyring`
+    /// feature, [`roles_from_keyring`](Self::roles_from_keyring) wires the `server_roles` ring here.
     #[must_use]
-    pub fn role_source(mut self, f: impl Fn(u32) -> Vec<String> + Send + Sync + 'static) -> Self {
+    pub fn role_source(mut self, f: impl Fn(u32, &str) -> Vec<String> + Send + Sync + 'static) -> Self {
         self.role_source = Some(Box::new(f));
         self
     }
@@ -288,16 +302,18 @@ impl AuthStackBuilder {
         self.user_resolver(|name| truenas_nss::getpwnam(name).ok().flatten().map(|e| e.uid))
     }
 
-    /// Read a uid's roles from a keyring [`server_roles`](truenas_keyring::SERVER_ROLES) ring — the
-    /// built-in [`role_source`](Self::role_source). A uid with no record (or an unreadable one)
-    /// grants no roles.
+    /// Read a `(uid, mechanism)`'s roles from a keyring
+    /// [`server_roles`](truenas_keyring::SERVER_ROLES) ring — the built-in
+    /// [`role_source`](Self::role_source). Records are keyed `"<uid>_<mechanism>"` (e.g.
+    /// `"0_UNIX_SOCKET"`, `"1000_SCRAM"`); a pair with no record (or an unreadable one) grants no
+    /// roles.
     #[cfg(feature = "keyring")]
     #[must_use]
     pub fn roles_from_keyring(self, store: Arc<truenas_keyring::KeyringStore>) -> Self {
-        self.role_source(move |uid| {
+        self.role_source(move |uid, mechanism| {
             store
                 .server_roles()
-                .get_record::<truenas_keyring::RoleRecord>(&uid.to_string())
+                .get_record::<truenas_keyring::RoleRecord>(&format!("{uid}_{mechanism}"))
                 .ok()
                 .flatten()
                 .map(|r| r.roles)

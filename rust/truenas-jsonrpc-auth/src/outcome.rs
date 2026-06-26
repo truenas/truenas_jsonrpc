@@ -23,7 +23,7 @@ pub enum Outcome {
         /// Who was authenticated, as the auth stack resolves authorization: a uid (AF_UNIX
         /// peer-cred), an account name (SCRAM / mTLS — resolved to a uid via the configured
         /// username→uid resolver), or [`Principal::None`]. The stack maps it to a uid, looks the
-        /// uid's roles up in `server_roles` (uid 0 ⇒ full admin), interns them via its
+        /// uid's roles up in `server_roles` keyed on `(uid, mechanism)`, interns them via its
         /// [`Roles`](truenas_jsonrpc::Roles) registry, and stores the [`RoleMask`](truenas_jsonrpc::RoleMask)
         /// on the session for the per-call gate.
         principal: Principal,
@@ -69,9 +69,9 @@ impl Outcome {
 /// username→uid resolver, e.g. `getpwnam`). [`None`](Principal::None) grants no roles.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Principal {
-    /// A Unix user id — roles come from `server_roles[uid]` (uid 0 ⇒ full admin).
+    /// A Unix user id — roles come from `server_roles` keyed on `(uid, mechanism)` (uid 0 ⇒ full admin).
     Uid(u32),
-    /// An account name — resolved to a uid (then `server_roles[uid]`) by the stack's resolver.
+    /// An account name — resolved to a uid (then `server_roles[(uid, mechanism)]`) by the resolver.
     User(String),
     /// No authorization principal: the session is authenticated but granted no roles.
     #[default]

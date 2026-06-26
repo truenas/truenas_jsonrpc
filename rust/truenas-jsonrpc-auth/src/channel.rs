@@ -3,7 +3,7 @@
 
 use std::net::SocketAddr;
 
-use truenas_jsonrpc_server::{Peer, Transport, Ucred};
+use truenas_jsonrpc_server::{Peer, Transport, TransportPosture, Ucred};
 
 /// A capability the channel may provide. A [`Mechanism`](crate::Mechanism) declares the set it
 /// requires; the stack rejects (`DENIED`) before running it if the channel lacks any of them.
@@ -13,7 +13,8 @@ pub enum Capability {
     Local,
     /// The channel is encrypted (AF_UNIX local trust, or TLS — set once the TLS phase lands).
     Encrypted,
-    /// AF_UNIX with `SO_PEERCRED` credentials present.
+    /// A genuinely-local AF_UNIX socket with `SO_PEERCRED` present — peer-cred is the calling
+    /// process, not a reverse proxy's (so it's trustworthy for authorization).
     Peercred,
     /// The peer presented a (TLS-verified) client certificate.
     ClientCert,
@@ -39,6 +40,9 @@ pub struct Channel {
     /// The server's `tls-server-end-point` channel-binding value (RFC 5929) for this connection —
     /// required by SCRAM-SHA-512-PLUS. Populated in the transport phase; `None` off TLS.
     pub channel_binding: Option<Vec<u8>>,
+    /// The listener's declared [`TransportPosture`] (the trust the auth layer keys off). `None` = an
+    /// insecure transport (plain TCP / userspace-TLS) that may not authenticate.
+    pub posture: Option<TransportPosture>,
 }
 
 impl Channel {
@@ -53,6 +57,7 @@ impl Channel {
             encrypted: peer.transport == Transport::Unix || tls.is_some(),
             client_cert: tls.and_then(|t| t.peer_cert.clone()),
             channel_binding: tls.and_then(|t| t.channel_binding.clone()),
+            posture: peer.posture,
         }
     }
 
@@ -61,7 +66,11 @@ impl Channel {
         match cap {
             Capability::Local => self.transport == Transport::Unix,
             Capability::Encrypted => self.encrypted,
-            Capability::Peercred => self.transport == Transport::Unix && self.ucred.is_some(),
+            // Peer-cred is meaningful only on a genuinely-local socket — a proxied unix socket
+            // carries the reverse proxy's uid, not the end client's.
+            Capability::Peercred => {
+                self.posture == Some(TransportPosture::TrustedLocalUnix) && self.ucred.is_some()
+            }
             Capability::ClientCert => self.client_cert.is_some(),
         }
     }

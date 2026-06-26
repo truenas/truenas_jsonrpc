@@ -4,6 +4,9 @@
 
 use std::net::SocketAddr;
 
+use http::HeaderMap;
+use serde::{Deserialize, Serialize};
+
 /// Which transport a connection arrived on.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
@@ -11,6 +14,86 @@ pub enum Transport {
     Unix,
     /// A TCP socket — carries the peer [`SocketAddr`].
     Tcp,
+}
+
+/// The trust/encryption posture a listener declares for its connections — what the auth layer may
+/// rely on. A property of the underlying socket + TLS termination, **independent of framing** (raw
+/// JSON-RPC and WebSocket over the same socket share a posture). A connection with no posture
+/// (`Peer::posture == None`) — plain TCP or userspace-TLS — is not trusted and may not authenticate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TransportPosture {
+    /// In-app kTLS termination: a direct, encrypted connection with a kernel-plaintext fd.
+    KernelTls,
+    /// Behind a reverse proxy over AF_UNIX (TLS terminated upstream). `SO_PEERCRED` is the proxy's
+    /// uid, **not** the end client's — never trusted; auth via a credential mechanism or the broker.
+    ProxiedUnix,
+    /// A genuinely local AF_UNIX peer: `SO_PEERCRED` **is** the calling process, trusted for
+    /// peer-cred auth.
+    TrustedLocalUnix,
+}
+
+/// The trust a local AF_UNIX listener declares: a reverse proxy in front, or a genuinely local peer.
+/// Maps to [`TransportPosture::ProxiedUnix`] / [`TransportPosture::TrustedLocalUnix`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnixTrust {
+    /// Behind a reverse proxy — peer-cred is the proxy's, not the client's.
+    Proxied,
+    /// A genuinely local peer — peer-cred is the calling process.
+    Local,
+}
+
+impl From<UnixTrust> for TransportPosture {
+    fn from(t: UnixTrust) -> Self {
+        match t {
+            UnixTrust::Proxied => TransportPosture::ProxiedUnix,
+            UnixTrust::Local => TransportPosture::TrustedLocalUnix,
+        }
+    }
+}
+
+/// The real client behind a reverse proxy, recovered from proxy-forwarded request metadata (e.g.
+/// nginx's `X-Real-Remote-*` headers on the WebSocket upgrade). Trusted only on a
+/// [`Proxied`](UnixTrust::Proxied) listener (where the proxy owns the socket); surfaced as the
+/// connection's `origin` in `$/sessions`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardedOrigin {
+    /// The real client address the proxy reported (typically an IP).
+    pub addr: String,
+    /// The real client port, if the proxy reported it.
+    pub port: Option<u16>,
+    /// Whether the client→proxy leg was TLS (the proxy terminated https).
+    pub secure: bool,
+}
+
+impl ForwardedOrigin {
+    /// Render as `addr:port` (or `[addr]:port` for an IPv6 literal); just `addr` when there's no port.
+    pub fn render(&self) -> String {
+        match self.port {
+            Some(p) if self.addr.contains(':') => format!("[{}]:{p}", self.addr),
+            Some(p) => format!("{}:{p}", self.addr),
+            None => self.addr.clone(),
+        }
+    }
+
+    /// Parse the real client from the TrueNAS-middleware nginx headers: `X-Real-Remote-Addr`,
+    /// `X-Real-Remote-Port`, and `X-Https` (`"on"` ⇒ the client→proxy leg was TLS). `None` if the
+    /// address header is absent or empty. A drop-in
+    /// [`forwarded_extractor`](crate::JsonRpcServerBuilder::forwarded_extractor) for the standard
+    /// nginx setup; pass your own closure to read different headers.
+    pub fn from_real_remote_headers(headers: &HeaderMap) -> Option<Self> {
+        let addr = headers.get("x-real-remote-addr")?.to_str().ok()?.trim();
+        if addr.is_empty() {
+            return None;
+        }
+        let port = headers
+            .get("x-real-remote-port")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|s| s.trim().parse().ok());
+        let secure =
+            headers.get("x-https").and_then(|v| v.to_str().ok()).is_some_and(|s| s.trim() == "on");
+        Some(ForwardedOrigin { addr: addr.to_string(), port, secure })
+    }
 }
 
 /// Unix peer credentials from `SO_PEERCRED` (the connecting process's pid/uid/gid).
@@ -36,6 +119,12 @@ pub struct Peer {
     /// TLS context — `Some` iff the connection is TLS / `wss` (so its presence marks the channel
     /// encrypted). Carries the verified client certificate (mTLS) and the channel-binding value.
     pub tls: Option<TlsPeer>,
+    /// The listener's declared [`TransportPosture`] — the trust the auth layer may rely on. `None` =
+    /// an insecure / undeclared transport (plain TCP, userspace-TLS) that may not authenticate.
+    pub posture: Option<TransportPosture>,
+    /// The real client behind a reverse proxy, if a `forwarded_extractor` recovered it on a
+    /// `Proxied` listener. `None` otherwise — the origin then comes from the immediate peer.
+    pub forwarded: Option<ForwardedOrigin>,
 }
 
 /// TLS facts about a connection, surfaced to the authentication layer.
@@ -52,14 +141,47 @@ pub struct TlsPeer {
 }
 
 impl Peer {
-    /// An AF_UNIX peer with the given `SO_PEERCRED` credentials.
+    /// An AF_UNIX peer with the given `SO_PEERCRED` credentials, defaulting to the
+    /// [trusted-local](TransportPosture::TrustedLocalUnix) posture (peer-cred is the caller). A
+    /// proxied AF_UNIX listener overrides it via [`with_posture`](Self::with_posture) /
+    /// [`UnixTrust::Proxied`].
     pub fn unix(ucred: Option<Ucred>) -> Self {
-        Self { transport: Transport::Unix, ucred, addr: None, tls: None }
+        Self {
+            transport: Transport::Unix,
+            ucred,
+            addr: None,
+            tls: None,
+            posture: Some(TransportPosture::TrustedLocalUnix),
+            forwarded: None,
+        }
     }
 
-    /// A plain (non-TLS) TCP peer at `addr`.
+    /// A plain (non-TLS) TCP peer at `addr` — **no** posture (an insecure transport that may not
+    /// authenticate).
     pub fn tcp(addr: SocketAddr) -> Self {
-        Self { transport: Transport::Tcp, ucred: None, addr: Some(addr), tls: None }
+        Self {
+            transport: Transport::Tcp,
+            ucred: None,
+            addr: Some(addr),
+            tls: None,
+            posture: None,
+            forwarded: None,
+        }
+    }
+
+    /// Stamp the listener's declared [`TransportPosture`] (builder form for the serve loops).
+    #[must_use]
+    pub fn with_posture(mut self, posture: TransportPosture) -> Self {
+        self.posture = Some(posture);
+        self
+    }
+
+    /// Attach the real client [`ForwardedOrigin`] recovered from proxy-forwarded metadata (the serve
+    /// loop sets this on a `Proxied` listener via the configured `forwarded_extractor`).
+    #[must_use]
+    pub fn with_forwarded(mut self, forwarded: ForwardedOrigin) -> Self {
+        self.forwarded = Some(forwarded);
+        self
     }
 }
 
@@ -106,5 +228,53 @@ pub(crate) fn set_blocking(fd: std::os::fd::RawFd, blocking: bool) -> std::io::R
             return Err(std::io::Error::last_os_error());
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(
+                http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+
+    #[test]
+    fn forwarded_origin_parses_real_remote_headers() {
+        let o = ForwardedOrigin::from_real_remote_headers(&headers(&[
+            ("X-Real-Remote-Addr", "203.0.113.7"),
+            ("X-Real-Remote-Port", "54321"),
+            ("X-Https", "on"),
+        ]))
+        .unwrap();
+        assert_eq!(
+            o,
+            ForwardedOrigin { addr: "203.0.113.7".into(), port: Some(54321), secure: true }
+        );
+        assert_eq!(o.render(), "203.0.113.7:54321");
+    }
+
+    #[test]
+    fn forwarded_origin_handles_ipv6_and_plain_http() {
+        let o = ForwardedOrigin::from_real_remote_headers(&headers(&[
+            ("X-Real-Remote-Addr", "2001:db8::1"),
+            ("X-Real-Remote-Port", "443"),
+        ]))
+        .unwrap();
+        assert!(!o.secure); // no X-Https header
+        assert_eq!(o.render(), "[2001:db8::1]:443"); // bracketed IPv6
+    }
+
+    #[test]
+    fn forwarded_origin_is_none_without_an_address() {
+        assert!(ForwardedOrigin::from_real_remote_headers(&headers(&[("X-Https", "on")])).is_none());
+        assert!(ForwardedOrigin::from_real_remote_headers(&HeaderMap::new()).is_none());
     }
 }

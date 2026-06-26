@@ -7,19 +7,22 @@
 //! **refused** on a WebSocket connection — the library owns the wire, so there's no plaintext
 //! fd to hand off.
 
+use std::os::fd::AsRawFd;
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
+use http::HeaderMap;
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::{TcpListener, ToSocketAddrs};
+use tokio::net::{TcpListener, ToSocketAddrs, UnixListener};
 use tokio::sync::mpsc::unbounded_channel;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::WebSocketStream;
 use truenas_jsonrpc::{Dispatched, ErrorCode};
 
 use crate::connection::{self, BoundConn};
-use crate::peer::Peer;
+use crate::peer::{self, Peer, UnixTrust};
 use crate::server::{JsonRpcServer, ServerShared};
 
 impl<S: Send + Sync + 'static> JsonRpcServer<S> {
@@ -43,6 +46,55 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     pub async fn serve_websocket(&self, addr: impl ToSocketAddrs) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr).await?;
         self.serve_websocket_listener(listener).await
+    }
+
+    /// Accept **WebSocket over AF_UNIX** connections on a bound `listener` — the reverse-proxy path
+    /// (nginx terminates wss and forwards WebSocket over a unix socket). Each connection carries the
+    /// peer's `SO_PEERCRED` and the listener's `trust` posture ([`UnixTrust::Proxied`] for the
+    /// proxied case, where peer-cred is the proxy's and must not be trusted). A failed WebSocket
+    /// handshake drops just that connection. WebSocket owns the wire, so there is no raw-fd transfer
+    /// or broker hand-off over it — credential mechanisms (SCRAM/mTLS) still apply.
+    pub async fn serve_websocket_unix_listener(
+        &self,
+        listener: UnixListener,
+        trust: UnixTrust,
+    ) -> std::io::Result<()> {
+        // A proxied listener is network-facing (nginx forwards remote clients), so every protocol
+        // must authenticate — peer-cred is the proxy's, not the end client's.
+        if trust == UnixTrust::Proxied {
+            self.require_network_auth()?;
+        }
+        loop {
+            let (stream, _addr) = listener.accept().await?;
+            let fd = stream.as_raw_fd();
+            let shared = self.shared.clone();
+            tokio::spawn(async move {
+                let mut peer = Peer::unix(peer::peer_cred(fd)).with_posture(trust.into());
+                // On a proxied listener with a configured extractor, capture the WebSocket upgrade
+                // headers during the handshake and recover the real client origin (peer-cred here is
+                // the proxy's). Otherwise the plain handshake — no headers are read/trusted.
+                let ws = if trust == UnixTrust::Proxied && shared.forwarded_extractor.is_some() {
+                    let mut headers: Option<HeaderMap> = None;
+                    let capture = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+                        headers = Some(req.headers().clone());
+                        Ok(resp)
+                    };
+                    let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, capture).await else {
+                        return;
+                    };
+                    if let (Some(h), Some(extract)) = (headers, shared.forwarded_extractor.as_ref()) {
+                        if let Some(fwd) = extract(&peer, &h) {
+                            peer = peer.with_forwarded(fwd);
+                        }
+                    }
+                    ws
+                } else {
+                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                    ws
+                };
+                serve_ws(ws, peer, shared).await;
+            });
+        }
     }
 }
 
@@ -71,7 +123,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                 // Surface the verified client cert + channel binding before the WS handshake consumes the stream.
                 let (cert, binding) = crate::tls::tls_facts(tls_stream.ssl());
                 let Ok(ws) = tokio_tungstenite::accept_async(tls_stream).await else { return };
-                serve_ws(ws, crate::tls::tls_peer(addr, cert, binding), shared).await;
+                serve_ws(ws, crate::tls::tls_peer(addr, cert, binding, None), shared).await;
             });
         }
     }

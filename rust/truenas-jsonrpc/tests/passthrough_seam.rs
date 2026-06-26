@@ -46,7 +46,7 @@ fn proto(captured: Option<Captured>) -> JsonRpcProtocol<()> {
                     assert_eq!(ft.as_raw_fd(), 42);
                     Ok((SessionLifecycle::Established, raw(json!({ "ident": "alice" }))))
                 })),
-                // Hand off → established but a null reply (no external identity), and not AF_UNIX.
+                // Hand off → established but a null reply (no external identity), and no fd hand-off.
                 "null" => SetupOutcome::Takeover(SetupHandoff::new(false, |_ft| {
                     Ok((SessionLifecycle::Established, raw(Value::Null)))
                 })),
@@ -94,7 +94,7 @@ async fn takeover_commits_after_the_handoff_runs() {
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     let takeover = dispatch_takeover(&proto, &s, "ok").await;
 
-    assert!(takeover.requires_af_unix());
+    assert!(takeover.hands_off_fd());
     assert_eq!(takeover.request_id(), Some(RID));
     assert!(format!("{takeover:?}").contains("SetupTakeover"));
     // Nothing is committed until the server runs the hand-off with the fd.
@@ -106,11 +106,11 @@ async fn takeover_commits_after_the_handoff_runs() {
 }
 
 #[tokio::test]
-async fn takeover_without_af_unix_and_a_null_reply() {
+async fn takeover_without_fd_handoff_and_a_null_reply() {
     let proto = proto(None);
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     let takeover = dispatch_takeover(&proto, &s, "null").await;
-    assert!(!takeover.requires_af_unix());
+    assert!(!takeover.hands_off_fd());
 
     takeover.run(&FakeFt(-1));
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
