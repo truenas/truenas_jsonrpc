@@ -33,8 +33,8 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
 use tokio::io::AsyncRead;
 use truenas_jsonrpc::{
-    Dispatched, ErrorCode, JsonRpcProtocol, Outbound, Session, SetupTakeover, Transfer,
-    TransferDirection,
+    Dispatched, ErrorCode, JsonRpcProtocol, Outbound, Session, SessionOrigin, SetupTakeover,
+    Transfer, TransferDirection,
 };
 
 use crate::negotiate::{NegotiateParams, NegotiateResult, NEGOTIATE_METHOD};
@@ -221,6 +221,13 @@ pub(crate) async fn serve<S, IO>(
                 // paused) like a transfer; the broker conducts the client handshake on the fd.
                 Dispatched::Passthrough(takeover) => {
                     run_passthrough(takeover, &writer, transfer_fd, &peer).await;
+                }
+                // A FULL_ADMIN `$/sessions` listing (the core gated + audited it): assemble the
+                // server-wide list by walking every protocol's session registry, then reply.
+                Dispatched::Sessions { rid, caller } => {
+                    let entries: Vec<Value> =
+                        shared.protocols.values().flat_map(|p| p.render_sessions(caller)).collect();
+                    let _ = out_tx.send(success_envelope(Some(&rid), &Value::Array(entries)));
                 }
             },
         }
@@ -446,6 +453,7 @@ where
 
     let state = (shared.state_fn)(peer);
     let session = proto.new_session(state, outbound.clone());
+    session.set_origin(origin_from_peer(peer)); // surface the connection origin in `$/sessions`
     let result = NegotiateResult {
         protocol: params.protocol,
         server: shared.name.clone(),
@@ -455,9 +463,23 @@ where
     Ok((proto, session, reply))
 }
 
-fn success_envelope<T: Serialize>(id: Option<&str>, result: &T) -> Vec<u8> {
+/// Derive the connection [`SessionOrigin`] from the peer — surfaced in the `$/sessions` listing.
+fn origin_from_peer(peer: &Peer) -> SessionOrigin {
+    SessionOrigin {
+        transport: match peer.transport {
+            Transport::Unix => "unix",
+            Transport::Tcp => "tcp",
+        },
+        remote: peer.addr.map(|a| a.to_string()),
+        uid: peer.ucred.map(|c| c.uid),
+        // Confidential over TLS or AF_UNIX local trust (mirrors `Channel::from_peer`).
+        secure: peer.transport == Transport::Unix || peer.tls.is_some(),
+    }
+}
+
+pub(crate) fn success_envelope<T: Serialize>(id: Option<&str>, result: &T) -> Vec<u8> {
     serde_json::to_vec(&json!({ "jsonrpc": VERSION, "result": result, "id": id }))
-        .expect("encoding a negotiate reply cannot fail")
+        .expect("encoding a success reply cannot fail")
 }
 
 pub(crate) fn error_envelope(id: Option<&str>, code: i32, message: &str, data: Option<Value>) -> Vec<u8> {

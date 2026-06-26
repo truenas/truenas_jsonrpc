@@ -3,13 +3,41 @@
 //! dispatch deterministic for unit tests and the A/B harness.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, OnceLock, PoisonError, RwLock};
+use std::time::Instant;
 
 use crate::role::RoleMask;
 use crate::types::SessionLifecycle;
 
 /// A session / subscription / connection identifier.
 pub type SessionId = uuid::Uuid;
+
+/// Where a connection came from, for the `$/sessions` admin listing. The **server** attaches this
+/// from the connection's peer at session creation (via [`Session::set_origin`]); the generic core
+/// stores it opaquely — it never names a transport type itself.
+#[derive(Clone, Debug)]
+pub struct SessionOrigin {
+    /// The transport the connection arrived on (`"unix"` / `"tcp"`).
+    pub transport: &'static str,
+    /// The TCP peer address (`"addr:port"`), or `None` on AF_UNIX.
+    pub remote: Option<String>,
+    /// The AF_UNIX peer uid (`SO_PEERCRED`), or `None` on TCP.
+    pub uid: Option<u32>,
+    /// Whether the transport is confidential (TLS, or AF_UNIX local trust).
+    pub secure: bool,
+}
+
+/// A standardized summary of the credential a session authenticated with, for the `$/sessions`
+/// listing. The **auth layer** sets this at `$/sessionSetup` (via [`Session::set_credential`]):
+/// `description` names the mechanism + principal (e.g. `"UNIX_SOCKET uid=0"`, `"SCRAM user=alice"`),
+/// `uid` is the resolved account uid if any.
+#[derive(Clone, Debug)]
+pub struct Credential {
+    /// A human-readable credential description (mechanism + principal).
+    pub description: String,
+    /// The authenticated account uid, if resolved.
+    pub uid: Option<u32>,
+}
 
 /// Generates ids (session ids, subscription ids). Injectable so tests and the A/B
 /// harness can pin them; the default is a random UUIDv4.
@@ -101,12 +129,19 @@ fn decode(v: u8) -> SessionLifecycle {
 pub struct Session<S> {
     id: SessionId,
     protocol_name: Arc<str>,
+    // When the session was created — a **monotonic** `Instant` (the session registry is in-memory
+    // and dies on reboot, so age + ordering is what matters, not wall-clock; immune to NTP jumps).
+    created: Instant,
     lifecycle: AtomicLifecycle,
     internal: RwLock<Option<S>>,
     external: RwLock<Option<serde_json::Value>>,
     // The granted-roles [`RoleMask`] (u64): written once at `sessionSetup` (`set_roles`), read
     // lock-free on every gated call (`granted_roles`).
     roles: AtomicU64,
+    // Connection origin (set once by the server at connect) + the authenticated credential summary
+    // (set by the auth layer at setup). Both are surfaced by the `$/sessions` default listing.
+    origin: OnceLock<SessionOrigin>,
+    credential: RwLock<Option<Credential>>,
     out: Arc<dyn Outbound>,
 }
 
@@ -120,10 +155,13 @@ impl<S> Session<S> {
         Self {
             id,
             protocol_name,
+            created: Instant::now(),
             lifecycle: AtomicLifecycle::new(SessionLifecycle::None),
             internal: RwLock::new(internal),
             external: RwLock::new(None),
             roles: AtomicU64::new(0),
+            origin: OnceLock::new(),
+            credential: RwLock::new(None),
             out,
         }
     }
@@ -131,6 +169,13 @@ impl<S> Session<S> {
     /// The protocol-generated session id (never serialized to the wire).
     pub fn id(&self) -> SessionId {
         self.id
+    }
+
+    /// When the session was created, as a **monotonic** [`Instant`]. The session registry is
+    /// in-memory (it doesn't survive a reboot), so what matters is age + ordering, not an absolute
+    /// wall-clock time; this is also immune to NTP / clock adjustments. Age is `created().elapsed()`.
+    pub fn created(&self) -> Instant {
+        self.created
     }
 
     /// The owning protocol's `name`.
@@ -184,6 +229,29 @@ impl<S> Session<S> {
     /// a method's required roles against this; a handler may also read it for resource-level checks.
     pub fn granted_roles(&self) -> RoleMask {
         RoleMask::from_bits(self.roles.load(Ordering::Acquire))
+    }
+
+    /// Attach the connection [`SessionOrigin`]. The server calls this once at connect, from the
+    /// peer; origin is fixed per connection, so a second call is ignored.
+    pub fn set_origin(&self, origin: SessionOrigin) {
+        let _ = self.origin.set(origin);
+    }
+
+    /// The connection [`SessionOrigin`], if the server attached one (surfaced by `$/sessions`).
+    pub fn origin(&self) -> Option<&SessionOrigin> {
+        self.origin.get()
+    }
+
+    /// Set the authenticated [`Credential`] summary. The auth layer calls this at `$/sessionSetup`
+    /// (re-settable across multi-round auth).
+    pub fn set_credential(&self, credential: Credential) {
+        *self.credential.write().unwrap_or_else(PoisonError::into_inner) = Some(credential);
+    }
+
+    /// Read the [`Credential`] summary (set by the auth layer); the closure runs under a brief read
+    /// lock — do not `.await` inside it.
+    pub fn with_credential<R>(&self, f: impl FnOnce(Option<&Credential>) -> R) -> R {
+        f(self.credential.read().unwrap_or_else(PoisonError::into_inner).as_ref())
     }
 
     pub(crate) fn outbound(&self) -> &Arc<dyn Outbound> {

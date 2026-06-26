@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -27,7 +27,7 @@ use crate::method::{
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::RequestCtx;
 use crate::role::{RoleMask, Roles};
-use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SystemClock, UuidGen};
+use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SessionOrigin, SystemClock, UuidGen};
 use crate::setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 use crate::transfer::{FileTransfer, Transfer, TransferDirection};
 use crate::types::{JsonRpcRequest, MessageDirection, SessionLifecycle};
@@ -39,6 +39,7 @@ const SESSION_SETUP_METHOD: &str = "$/sessionSetup";
 const SESSION_SETUP_CONTINUE_METHOD: &str = "$/sessionSetupContinue";
 const SESSION_CLOSE_METHOD: &str = "$/sessionClose";
 const DESCRIBE_METHOD: &str = "$/describe";
+const SESSIONS_METHOD: &str = "$/sessions";
 const TRANSFER_READY_METHOD: &str = "$/transferReady";
 
 /// The result of dispatching one inbound message.
@@ -56,16 +57,30 @@ pub enum Dispatched {
     /// connection's fd. The broker replies to the client over that fd, so there is no envelope to
     /// send here. JSON wire only.
     Passthrough(SetupTakeover),
+    /// A FULL_ADMIN `$/sessions` listing: the core gated + audited the call, but the listing is
+    /// **server-wide** (across every negotiated protocol), which only the server can assemble. The
+    /// server walks each protocol's [`JsonRpcProtocol::render_sessions`], concatenates them, and
+    /// replies with `id == rid`. Returned only for an authorized request that carried an id.
+    Sessions {
+        /// The request id to reply to.
+        rid: String,
+        /// The calling session's id — the server marks the matching listing entry `current`.
+        caller: SessionId,
+    },
 }
 
 impl Dispatched {
     /// The reply bytes, if any (`None` for [`Dispatched::Nothing`]; a [`Dispatched::Transfer`]
     /// has no single reply — it yields the `$/transferReady` envelope then a final response
-    /// via the server's handshake, so this is `None`).
+    /// via the server's handshake, so this is `None`; a [`Dispatched::Sessions`] is fulfilled by
+    /// the server, so it has no core-built reply either).
     pub fn into_bytes(self) -> Option<Vec<u8>> {
         match self {
             Dispatched::Reply(b) => Some(b),
-            Dispatched::Nothing | Dispatched::Transfer(_) | Dispatched::Passthrough(_) => None,
+            Dispatched::Nothing
+            | Dispatched::Transfer(_)
+            | Dispatched::Passthrough(_)
+            | Dispatched::Sessions { .. } => None,
         }
     }
 }
@@ -187,6 +202,26 @@ where
     }
 }
 
+/// Augments a `$/sessions` listing entry with per-connection fields the generic core can't see (the
+/// identity held in `S`). The core always builds the base entry (`session_id`, `age_seconds`,
+/// `created_at`, `lifecycle`, `protocol`, `current`, and — when the server/auth set them — `origin`,
+/// `secure_transport`, `internal`, `credential`); the value returned here is **merged on top** of
+/// that base (its keys win on collision). Return a JSON **object** of extra fields; a non-object is
+/// ignored. The same pattern as the audit principal extractor.
+pub trait SessionInfo<S>: Send + Sync {
+    /// Produce the **extra** fields (a JSON object) to merge into `session`'s listing entry.
+    fn render(&self, session: &Session<S>) -> Value;
+}
+
+impl<S, F> SessionInfo<S> for F
+where
+    F: Fn(&Session<S>) -> Value + Send + Sync,
+{
+    fn render(&self, session: &Session<S>) -> Value {
+        (self)(session)
+    }
+}
+
 /// Erased `$/sessionSetup` / `$/sessionSetupContinue` handler: authenticates, sets the
 /// session's server-internal identity as a side effect, and returns the next lifecycle +
 /// the client-facing result. Provided as a closure
@@ -282,6 +317,7 @@ pub struct JsonRpcProtocolBuilder<S> {
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     canceller: Option<Arc<dyn Canceller<S>>>,
     server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
+    session_info: Option<Arc<dyn SessionInfo<S>>>,
     setup: Option<SetupSlot<S>>,
     setup_continue: Option<SetupSlot<S>>,
     describe: Option<Box<RawValue>>,
@@ -302,6 +338,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             audit_sink: None,
             canceller: None,
             server_info: None,
+            session_info: None,
             setup: None,
             setup_continue: None,
             describe: None,
@@ -474,6 +511,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
         self
     }
 
+    /// Customize how each session is rendered in the FULL_ADMIN `$/sessions` listing — e.g. to add
+    /// the authenticated user / origin read from the per-connection state `S`. Without it, entries
+    /// carry only the core-visible fields (`session_id`, `age_seconds`, `lifecycle`, `protocol`).
+    pub fn session_info(mut self, renderer: impl SessionInfo<S> + 'static) -> Self {
+        self.session_info = Some(Arc::new(renderer));
+        self
+    }
+
     /// Provide the OpenRPC service description served by the unauthenticated `$/describe`
     /// introspection method (typically the generated `openrpc.json`, embedded with
     /// `include_str!` and parsed once into a [`RawValue`]). Without it, `$/describe`
@@ -579,6 +624,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             audit_sink: self.audit_sink,
             canceller: self.canceller,
             server_info: self.server_info,
+            session_info: self.session_info,
             setup: self.setup,
             setup_continue: self.setup_continue,
             describe: self.describe,
@@ -588,6 +634,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             clock: self.clock,
             inflight: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(HashMap::new()),
             never_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -605,6 +652,7 @@ pub struct JsonRpcProtocol<S> {
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     canceller: Option<Arc<dyn Canceller<S>>>,
     server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
+    session_info: Option<Arc<dyn SessionInfo<S>>>,
     setup: Option<SetupSlot<S>>,
     setup_continue: Option<SetupSlot<S>>,
     describe: Option<Box<RawValue>>,
@@ -617,6 +665,11 @@ pub struct JsonRpcProtocol<S> {
     /// SERVER_CLIENT subscriptions: topic -> {sub_id -> Subscription}. Runtime-mutable
     /// (subscribe/unsubscribe during dispatch), like `inflight`.
     subscriptions: Mutex<Subscriptions<S>>,
+    /// Active sessions by id → a `Weak` handle. The connection task owns the `Arc`, so a dropped
+    /// session's `Weak` simply fails to upgrade — this never leaks or keeps a connection alive.
+    /// Inserted in [`new_session`](Self::new_session), pruned in [`close_session`](Self::close_session);
+    /// read by the FULL_ADMIN `$/sessions` control method.
+    sessions: Mutex<HashMap<SessionId, Weak<Session<S>>>>,
     /// A shared always-false flag handed to non-cancellable requests so they don't each
     /// allocate a cancel `Arc`.
     never_cancel: Arc<AtomicBool>,
@@ -647,15 +700,25 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         self.has_session_setup
     }
 
-    /// Create a fresh [`Session`] for a connection. `out` is the back-channel sink.
+    /// Create a fresh [`Session`] for a connection (and track it in the session registry). `out`
+    /// is the back-channel sink.
     pub fn new_session(&self, server_state: Option<S>, out: Arc<dyn Outbound>) -> Arc<Session<S>> {
-        Arc::new(Session::new(self.id_gen.new_id(), self.name.clone(), server_state, out))
+        let session =
+            Arc::new(Session::new(self.id_gen.new_id(), self.name.clone(), server_state, out));
+        // Register a `Weak` handle — the caller (connection task) owns the returned `Arc`.
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(session.id(), Arc::downgrade(&session));
+        session
     }
 
-    /// Mark a session `CLOSED` and drop all of its subscriptions. Call on socket drop.
+    /// Mark a session `CLOSED`, drop all of its subscriptions, and remove it from the session
+    /// registry. Call on socket drop.
     pub fn close_session(&self, session: &Session<S>) {
         session.set_lifecycle(SessionLifecycle::Closed);
         self.unsubscribe_all(session);
+        self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&session.id());
     }
 
     /// Drop a single subscription by id. Returns `true` if it existed.
@@ -869,6 +932,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             SESSION_SETUP_METHOD => return self.handle_setup(parsed, session, true).await,
             SESSION_SETUP_CONTINUE_METHOD => return self.handle_setup(parsed, session, false).await,
             SESSION_CLOSE_METHOD => return self.handle_close(parsed, session),
+            SESSIONS_METHOD => return self.handle_sessions(parsed, session),
             _ => {}
         }
 
@@ -1185,6 +1249,69 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             ),
         };
         finish(note, bytes)
+    }
+
+    /// `$/sessions`: a **FULL_ADMIN**-only listing of the active sessions on this protocol, so an
+    /// admin can correlate an audit event's `sess=<id>` to a live session. Audited like the other
+    /// control ops; a non-admin (including unauthenticated) caller is denied, and the denial is
+    /// audited. Each entry is rendered by the configured [`SessionInfo`] (or the default core view).
+    fn handle_sessions(&self, parsed: ParsedRequest, session: &Arc<Session<S>>) -> Dispatched {
+        let note = parsed.id.is_none();
+        let rid = parsed.id.clone();
+        let req = JsonRpcRequest {
+            method: parsed.method.clone(),
+            id: rid.clone(),
+            params: Value::Null,
+            roles: Vec::new(),
+        };
+
+        if !session.granted_roles().is_full_admin() {
+            let denied = JsonRpcError::not_authorized("Not authorized");
+            self.audit_control(&req, AuditOutcome::Failure(&denied), session);
+            return finish(
+                note,
+                envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
+            );
+        }
+
+        // Authorized. The listing is server-wide (across every protocol), which only the server can
+        // assemble — so audit the call here and defer the aggregation to it via a directive (the
+        // server walks each protocol's `render_sessions`). A no-id call is a notification → nothing.
+        self.audit_control(&req, AuditOutcome::Success, session);
+        match rid {
+            Some(rid) => Dispatched::Sessions { rid, caller: session.id() },
+            None => Dispatched::Nothing,
+        }
+    }
+
+    /// Snapshot this protocol's active sessions for the `$/sessions` listing (the server calls this
+    /// on every protocol and concatenates them). Upgrades each registry `Weak` under the lock (a
+    /// dropped session won't upgrade), then renders off the lock via the configured [`SessionInfo`].
+    pub fn render_sessions(&self, current: SessionId) -> Vec<Value> {
+        // Upgrade live sessions under the lock; a dropped session won't upgrade.
+        let mut live: Vec<Arc<Session<S>>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .values()
+            .filter_map(Weak::upgrade)
+            .collect();
+        live.sort_by_key(|s| s.created()); // stable output, oldest first (mirrors the middleware)
+        let now_unix = unix_now();
+        live.iter().map(|s| self.render_session(s, current, now_unix)).collect()
+    }
+
+    /// Render one session for `$/sessions`: the core base entry, `current` marked for the caller,
+    /// then the configured [`SessionInfo`]'s **extra** fields merged on top (embedder keys win).
+    fn render_session(&self, session: &Session<S>, current: SessionId, now_unix: f64) -> Value {
+        let mut base = default_session_entry(session, now_unix);
+        base.insert("current".to_string(), Value::Bool(session.id() == current));
+        if let Some(renderer) = &self.session_info {
+            if let Value::Object(extra) = renderer.render(session) {
+                base.extend(extra); // embedder fields augment / override the core base
+            }
+        }
+        Value::Object(base)
     }
 
     /// `$/describe`: return the configured OpenRPC service description. Unauthenticated and
@@ -1634,6 +1761,61 @@ fn build_session_view<S>(session: &Session<S>) -> Vec<u8> {
         "external": session.external(),
     });
     serde_json::to_vec(&view).expect("a serde_json::Value always serializes")
+}
+
+/// The core base `$/sessions` entry, as a JSON object **map** (so [`render_session`] folds in
+/// `current` + any [`SessionInfo`] extras without an unreachable non-object branch): `session_id`,
+/// the monotonic `age_seconds` plus the derived wall-clock `created_at`, `lifecycle`, `protocol`,
+/// and — when the server / auth layers attached them — the connection `origin` / `secure_transport`
+/// / `internal` and the authenticated `credential`. An embedder's renderer augments this with the
+/// per-connection identity it reads from `S` (which the generic protocol can't see).
+fn default_session_entry<S>(session: &Session<S>, now_unix: f64) -> serde_json::Map<String, Value> {
+    let age = session.created().elapsed().as_secs_f64();
+    let mut entry = serde_json::Map::new();
+    entry.insert("session_id".to_string(), json!(session.id().to_string()));
+    entry.insert("age_seconds".to_string(), json!(age));
+    // Wall-clock creation time derived from the monotonic `created` instant (mirrors the
+    // middleware: store monotonic, present absolute) — unix epoch seconds.
+    entry.insert("created_at".to_string(), json!(now_unix - age));
+    entry.insert("lifecycle".to_string(), json!(session.lifecycle() as u8));
+    entry.insert("protocol".to_string(), json!(session.protocol_name()));
+    // Connection origin (set by the server from the peer): origin string, secure transport, and
+    // whether this is an internal/system session (root over a local socket).
+    if let Some(o) = session.origin() {
+        entry.insert("origin".to_string(), Value::String(format_origin(o)));
+        entry.insert("secure_transport".to_string(), Value::Bool(o.secure));
+        entry.insert("internal".to_string(), Value::Bool(o.transport == "unix" && o.uid == Some(0)));
+    }
+    // Authenticated credential summary (set by the auth layer at `$/sessionSetup`).
+    session.with_credential(|c| {
+        if let Some(c) = c {
+            entry.insert(
+                "credential".to_string(),
+                json!({ "description": c.description, "uid": c.uid }),
+            );
+        }
+    });
+    entry
+}
+
+/// Format a [`SessionOrigin`] for the listing: `unix:uid=N` (AF_UNIX peer-cred) or the TCP remote.
+fn format_origin(o: &SessionOrigin) -> String {
+    if o.transport == "unix" {
+        match o.uid {
+            Some(uid) => format!("unix:uid={uid}"),
+            None => "unix".to_string(),
+        }
+    } else {
+        o.remote.clone().unwrap_or_else(|| o.transport.to_string())
+    }
+}
+
+/// Seconds since the Unix epoch — used to derive a wall-clock `created_at` from the monotonic age.
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 impl<S: Send + Sync + 'static> Pipeline<S> {

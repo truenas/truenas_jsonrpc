@@ -23,7 +23,13 @@ reply bytes (or a directive); it owns no socket. For a runnable transport see
 - `MethodDef` — per-method flags: `pre_auth`, `audit`, `audit_message`, `cancellable`,
   `roles`, `doc`, `secret_fields`, and `xdr(proc_id)` (also expose over the binary wire).
 - Control messages: `$/serverInfo`, `$/sessionSetup` (+`Continue`), `$/sessionClose`,
-  `$/cancelRequest`, `$/describe`.
+  `$/cancelRequest`, `$/describe`, `$/sessions` (a **FULL_ADMIN** listing of active sessions — the
+  core gates + audits it and returns a `Dispatched::Sessions` directive that the server fulfills by
+  walking every protocol's session registry, so the list is **server-wide** across protocols). Each
+  entry's core base carries `session_id`, the monotonic `age_seconds` + derived wall-clock
+  `created_at`, `lifecycle`, `protocol`, `current` (the calling session), and — when the server/auth
+  layers attach them — the connection `origin` / `secure_transport` / `internal` and a standardized
+  `credential` (`{ description, uid }`).
 - Authorization is a native role gate, not a callback: `Roles` interns role *names* to a
   `RoleMask` — a `u64` bitset, so **at most 64 roles**. A method's `roles` become its required
   mask, a session's granted mask is set once at `sessionSetup`, and dispatch checks
@@ -33,9 +39,12 @@ reply bytes (or a directive); it owns no socket. For a runnable transport see
 - Seams: `AuditSink` — called with a structured `AuditOutcome` (`Success` | `Failure(&JsonRpcError)`)
   and the request params (secrets already redacted), **not** a re-parsed response envelope, so the
   dispatch path never serializes-then-reparses the reply just to audit it; covers method calls plus
-  the `$/sessionSetup` / `$/sessionClose` / `$/cancelRequest` control ops. Other seams: `Canceller`,
-  `ServerInfoHandler`, `Outbound` (the pub/sub / `$/progress` back-channel), `PyDispatcher` (runs
-  `python:true` bodies), `Secret<T>` (audit redaction).
+  the `$/sessionSetup` / `$/sessionClose` / `$/cancelRequest` / `$/sessions` control ops. Other
+  seams: `Canceller`, `ServerInfoHandler`, `SessionInfo` (**augments** each `$/sessions` entry —
+  returns a JSON object of extra fields the generic core can't see, e.g. the per-connection identity,
+  which is merged on top of the core base), `Outbound` (the
+  pub/sub / `$/progress` back-channel), `PyDispatcher` (runs `python:true` bodies), `Secret<T>`
+  (audit redaction).
 
 ## Dependencies
 

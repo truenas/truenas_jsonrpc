@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use futures_util::{SinkExt, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, ToSocketAddrs};
 use tokio::sync::mpsc::unbounded_channel;
@@ -128,6 +128,7 @@ where
                 let proto = proto.clone();
                 let session = session.clone();
                 let out_tx = out_tx.clone();
+                let shared = shared.clone(); // to assemble the server-wide `$/sessions` listing
                 tokio::spawn(async move {
                     match proto.dispatch(&frame, &session).await {
                         Dispatched::Reply(bytes) => {
@@ -150,6 +151,19 @@ where
                                 ErrorCode::RequestFailed.code(),
                                 "Request failed",
                                 Some(json!("passthrough authentication is not supported over WebSocket")),
+                            ));
+                        }
+                        // `$/sessions` has no fd dependency, so WebSocket fulfills it like the
+                        // byte-stream transport: walk every protocol's registry and reply.
+                        Dispatched::Sessions { rid, caller } => {
+                            let entries: Vec<Value> = shared
+                                .protocols
+                                .values()
+                                .flat_map(|p| p.render_sessions(caller))
+                                .collect();
+                            let _ = out_tx.send(connection::success_envelope(
+                                Some(&rid),
+                                &Value::Array(entries),
                             ));
                         }
                     }

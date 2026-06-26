@@ -61,7 +61,7 @@ async fn call(p: &JsonRpcProtocol<()>, params: Value) -> Value {
     match p.dispatch(req.to_string().as_bytes(), &s).await {
         Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
         Dispatched::Nothing => panic!("expected a reply"),
-        Dispatched::Transfer(_) | Dispatched::Passthrough(_) => unreachable!("transfer/passthrough directive unexpected in this test"),
+        Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => unreachable!("transfer/passthrough directive unexpected in this test"),
     }
 }
 
