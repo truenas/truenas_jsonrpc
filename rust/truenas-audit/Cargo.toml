@@ -1,0 +1,33 @@
+# `truenas-audit` — emit TrueNAS audit records to the Linux kernel audit subsystem.
+#
+# A [`truenas_jsonrpc::AuditSink`] backend that writes one record per audited call to `NETLINK_AUDIT`
+# (auditd → `/var/log/audit/audit.log`, queryable with `ausearch`/`aureport`). Records use the
+# linux-PAM field conventions (`op=<svc>:<verb>`, `acct=`, `res=success|failed`) plus the TrueNAS
+# audit payload flattened to native `svc_*` / `event_data_<key>` fields. The netlink send happens on
+# a dedicated drain thread so the sink never blocks the dispatch path. Excluded from
+# `default-members` (needs `CAP_AUDIT_WRITE` + a live kernel audit to exercise end to end).
+[package]
+name = "truenas-audit"
+version = "0.1.0"
+description = "Linux kernel audit (NETLINK_AUDIT) backend for the truenas-jsonrpc AuditSink"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-jsonrpc = { path = "../truenas-jsonrpc" }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+# The `NETLINK_AUDIT` socket (socket/sendto/recvfrom/poll) is issued directly via libc — we own the
+# ~4-call surface rather than depend on the stale, ~zero-adoption rust-netlink `audit` crate.
+libc = "0.2"
+
+# Like the keyring/nss crates it does FFI, so it can't use the workspace's `unsafe_code = "forbid"`.
+# It denies unsafe and allows it only in narrow, audited blocks (`#[allow(unsafe_code)]` +
+# `// SAFETY:`), all confined to `netlink.rs`.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

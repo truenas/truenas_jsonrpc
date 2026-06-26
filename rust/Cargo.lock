@@ -709,6 +709,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "truenas-audit"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde_json",
+ "thiserror 2.0.18",
+ "truenas-jsonrpc",
+ "uuid",
+]
+
+[[package]]
 name = "truenas-filter"
 version = "0.1.0"
 dependencies = [

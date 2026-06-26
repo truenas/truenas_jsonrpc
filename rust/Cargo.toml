@@ -17,16 +17,18 @@ members = [
     "truenas-jsonrpc-auth",
     "truenas-keyring",
     "truenas-nss",
+    "truenas-audit",
     "examples/demo",
 ]
-# Five crates are excluded from the default set (a plain `cargo build`/`cargo test` and
+# Six crates are excluded from the default set (a plain `cargo build`/`cargo test` and
 # `coverage.sh`, which run without `-p`, skip them): `truenas-jsonrpc-pyo3` links libpython
 # (so the default build links none, mirroring Zig's `-Dpython` opt-in); `truenas-jsonrpc-server`
 # does socket / kTLS / SCM_RIGHTS I/O that can't be unit-tested to 100% deterministically; the
 # opt-in auth layers above the core — `truenas-jsonrpc-auth` (peer-cred / mTLS / SCRAM, the latter
 # behind feature flags + OpenSSL) and `truenas-keyring` (raw kernel-keyring syscalls, whose tests
-# skip when no keyring is available); and `truenas-nss` (passwd FFI, whose tests need a passwd db).
-# All are covered behaviorally and excluded from the coverage gate, but still built by
+# skip when no keyring is available); `truenas-nss` (passwd FFI, whose tests need a passwd db); and
+# `truenas-audit` (NETLINK_AUDIT FFI, whose end-to-end test needs CAP_AUDIT_WRITE + a live kernel
+# audit). All are covered behaviorally and excluded from the coverage gate, but still built by
 # `cargo clippy --workspace` and tested with `cargo test -p …`.
 default-members = [
     "truenas-jsonrpc",
