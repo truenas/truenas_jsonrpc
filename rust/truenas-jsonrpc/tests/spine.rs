@@ -297,3 +297,34 @@ async fn progress_reaches_the_outbound_sink() {
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0], json!({"jsonrpc": "2.0", "method": "$/progress", "params": {"id": ID, "percent": 50.0, "description": "half"}}));
 }
+
+#[tokio::test]
+async fn cancel_and_close_control_ops_are_audited() {
+    // `$/cancelRequest` and `$/sessionClose` are audited through the structured-outcome sink —
+    // success or failure — with no method metadata (so no redaction, no static message). Close
+    // needs an ESTABLISHED session, so set one up first (the setup is audited too).
+    let captured: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
+    let sink = captured.clone();
+    let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
+        .session_setup(MethodDef::new("$/sessionSetup"), |_a: Value, _s: &Session<()>| {
+            Ok((SessionLifecycle::Established, json!({ "ok": true })))
+        })
+        .audit_sink(move |r: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+            sink.lock().unwrap().push((r.method.clone(), outcome.succeeded()));
+        })
+        .build();
+    let s = session(&proto, Some(()));
+
+    call(&proto, &s, &req("$/sessionSetup", Some(json!({})), Some(ID))).await;
+    // Cancel an unknown target → audited as a failed control op (the wire reply is an error).
+    let cancel = call(&proto, &s, &req("$/cancelRequest", Some(json!({ "target_id": ID })), Some(ID))).await;
+    assert!(cancel.unwrap()["error"]["code"].is_i64());
+    // Close the (ESTABLISHED) session → audited as a successful control op.
+    call(&proto, &s, &req("$/sessionClose", None, Some(ID))).await;
+    assert_eq!(s.lifecycle(), SessionLifecycle::Closed);
+
+    let rows = captured.lock().unwrap();
+    assert!(rows.iter().any(|(m, ok)| m == "$/sessionSetup" && *ok), "setup audited");
+    assert!(rows.iter().any(|(m, ok)| m == "$/cancelRequest" && !*ok), "cancel-denial audited");
+    assert!(rows.iter().any(|(m, ok)| m == "$/sessionClose" && *ok), "close audited");
+}

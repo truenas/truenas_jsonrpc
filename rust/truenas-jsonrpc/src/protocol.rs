@@ -1343,6 +1343,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
     }
 
+    /// Audit a control op (`$/sessionClose`, `$/cancelRequest`): no method metadata, so there are
+    /// no `secret_fields` to redact (the params are ids, not credentials) and no static message.
+    fn audit_control(&self, req: &JsonRpcRequest, outcome: AuditOutcome<'_>, session: &Session<S>) {
+        if let Some(sink) = self.audit_sink.as_deref() {
+            sink.audit(req, outcome, session, None);
+        }
+    }
+
     fn handle_close(&self, parsed: ParsedRequest, session: &Arc<Session<S>>) -> Dispatched {
         let note = parsed.id.is_none();
         let rid = parsed.id.clone();
@@ -1359,6 +1367,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             );
         }
         self.close_session(session);
+        // The session was closed → audit the successful control op (no params).
+        let req = JsonRpcRequest {
+            method: parsed.method,
+            id: rid.clone(),
+            params: Value::Null,
+            roles: Vec::new(),
+        };
+        self.audit_control(&req, AuditOutcome::Success, session);
         let raw = to_raw_value(&true).expect("encoding `true` cannot fail");
         finish(note, envelope::success(rid.as_deref(), &raw))
     }
@@ -1418,6 +1434,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         );
         if !owns && !session.granted_roles().is_full_admin() {
             let denied = JsonRpcError::not_authorized("Not authorized");
+            self.audit_control(&req, AuditOutcome::Failure(&denied), session);
             return finish(
                 note,
                 envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
@@ -1431,6 +1448,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 if let Some(c) = &self.canceller {
                     c.cancel(&req, session);
                 }
+                self.audit_control(&req, AuditOutcome::Success, session);
                 let raw = to_raw_value(&true).expect("encoding `true` cannot fail");
                 finish(note, envelope::success(rid.as_deref(), &raw))
             }
@@ -1438,18 +1456,19 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             // unsubscribe. The `Canceller` is for in-flight requests only; not invoked here.
             None if cancel_target.is_some() => {
                 self.unsubscribe(&target_id);
+                self.audit_control(&req, AuditOutcome::Success, session);
                 let raw = to_raw_value(&true).expect("encoding `true` cannot fail");
                 finish(note, envelope::success(rid.as_deref(), &raw))
             }
-            None => finish(
-                note,
-                envelope::error(
-                    rid.as_deref(),
-                    ErrorCode::RequestFailed.code(),
-                    "Request failed",
-                    Some(&json!("no active request or subscription for the given id")),
-                ),
-            ),
+            None => {
+                let err = JsonRpcError {
+                    code: ErrorCode::RequestFailed.code(),
+                    message: "Request failed".to_string(),
+                    data: Some(json!("no active request or subscription for the given id")),
+                };
+                self.audit_control(&req, AuditOutcome::Failure(&err), session);
+                finish(note, envelope::error(rid.as_deref(), err.code, &err.message, err.data.as_ref()))
+            }
         }
     }
 }
