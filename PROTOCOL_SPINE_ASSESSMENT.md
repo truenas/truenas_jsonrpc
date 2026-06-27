@@ -57,7 +57,9 @@ hardcodes a 4-byte big-endian length prefix and yields an opaque body. DSI (AFP'
 **16-byte header carrying command + requestID + dataOffset + totalDataLength *before* the payload** —
 the framing layer must surface the opcode, not just "a blob." A `Framing` trait yielding
 `(header-metadata, body)` is required, and it must coexist with the write-coalescing fast path
-(`connection.rs:112+`) that today assumes opaque pre-framed bytes.
+(`connection.rs:112+`) that today assumes opaque pre-framed bytes. **Grounded design notes for this
+seam — what it must surface, fragment reassembly, and the write-path impact — live in
+[`FRAMING.md`](FRAMING.md).**
 
 **Gap 3 — No `dyn ProtocolEngine` dispatch seam.** The wire is chosen by a single magic-byte `if` at
 `dispatch()` (`protocol.rs:790-801`: `if is_xdr(wire) …`). Making the protocol *replaceable* (not just
