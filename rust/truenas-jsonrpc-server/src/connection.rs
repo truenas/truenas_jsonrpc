@@ -18,6 +18,7 @@
 //! response.
 
 use std::future::Future;
+use std::io::IoSlice;
 use std::os::fd::RawFd;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -123,18 +124,61 @@ async fn write_loop<IO: AsyncWrite + Unpin>(
     mut rx: UnboundedReceiver<Vec<u8>>,
 ) {
     while let Some(first) = rx.recv().await {
-        // Build the batch before taking the lock: the first payload (awaited above) plus whatever
+        // Collect the burst before taking the lock: the first payload (awaited above) plus whatever
         // else is already queued, drained non-blockingly so we never await the channel under lock.
-        let mut batch = Vec::new();
-        crate::framing::frame_into(&mut batch, &first);
+        // Just move the body handles in here — no copy; framing happens at write time below.
+        let mut bodies = vec![first];
         while let Ok(next) = rx.try_recv() {
-            crate::framing::frame_into(&mut batch, &next);
+            bodies.push(next);
         }
         let mut w = writer.lock().await;
-        if w.write_all(&batch).await.is_err() || w.flush().await.is_err() {
+        // Prefer a vectored write — each reply as `[len4][body]` IoSlices in one syscall with **no
+        // body copy** — when the socket supports it (plain TCP/Unix, and kTLS, which is a plain
+        // socket to us). Userspace TLS reports `is_write_vectored() == false` (it needs one
+        // contiguous buffer), so fall back to coalescing into one buffer (one memcpy per reply).
+        let wrote = if w.is_write_vectored() {
+            write_all_vectored(&mut *w, &bodies).await
+        } else {
+            let mut batch = Vec::new();
+            for body in &bodies {
+                crate::framing::frame_into(&mut batch, body);
+            }
+            w.write_all(&batch).await
+        };
+        if wrote.is_err() || w.flush().await.is_err() {
             break;
         }
     }
+}
+
+/// Write each `body` framed (`[4-byte big-endian length][body]`) in one vectored write, looping on
+/// partial writes via [`IoSlice::advance_slices`]. Avoids copying the bodies into one contiguous
+/// buffer — the small length headers are the only allocation. Used when the socket reports
+/// [`AsyncWrite::is_write_vectored`] (a plain/kTLS socket); FIFO order is the slice order.
+async fn write_all_vectored<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    bodies: &[Vec<u8>],
+) -> std::io::Result<()> {
+    // The length prefixes need stable storage for the `IoSlice`s to borrow across the writes.
+    let headers: Vec<[u8; 4]> = bodies.iter().map(|b| (b.len() as u32).to_be_bytes()).collect();
+    let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(bodies.len() * 2);
+    for (header, body) in headers.iter().zip(bodies) {
+        slices.push(IoSlice::new(header));
+        slices.push(IoSlice::new(body));
+    }
+    let mut rest: &mut [IoSlice<'_>] = &mut slices;
+    while !rest.is_empty() {
+        match w.write_vectored(rest).await? {
+            0 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "write_vectored wrote 0 bytes",
+                ))
+            }
+            n => IoSlice::advance_slices(&mut rest, n),
+        }
+    }
+    Ok(())
 }
 
 /// Serve one accepted connection to completion. `transfer_fd` is the connection's socket fd
@@ -500,4 +544,74 @@ pub(crate) fn error_envelope(id: Option<&str>, code: i32, message: &str, data: O
     }
     serde_json::to_vec(&json!({ "jsonrpc": VERSION, "error": error, "id": id }))
         .expect("encoding an error envelope cannot fail")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::{Context, Poll};
+
+    /// An `AsyncWrite` that accepts at most `chunk` bytes per (vectored) write and records all bytes
+    /// written — to exercise `write_all_vectored`'s partial-write loop, framing, and FIFO order.
+    struct ChunkWriter {
+        out: Vec<u8>,
+        chunk: usize,
+    }
+
+    impl AsyncWrite for ChunkWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            let this = self.get_mut();
+            let n = buf.len().min(this.chunk);
+            this.out.extend_from_slice(&buf[..n]);
+            Poll::Ready(Ok(n))
+        }
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<std::io::Result<usize>> {
+            // Emulate a real vectored write that may stop early: write at most `chunk` bytes total.
+            let this = self.get_mut();
+            let mut remaining = this.chunk;
+            let mut written = 0;
+            for s in bufs {
+                if remaining == 0 {
+                    break;
+                }
+                let n = s.len().min(remaining);
+                this.out.extend_from_slice(&s[..n]);
+                written += n;
+                remaining -= n;
+            }
+            Poll::Ready(Ok(written))
+        }
+        fn is_write_vectored(&self) -> bool {
+            true
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn vectored_write_frames_each_body_in_fifo_order_across_partial_writes() {
+        let bodies = vec![b"hello".to_vec(), Vec::new(), b"world!".to_vec()];
+        // chunk=3 forces repeated short vectored writes, exercising the advance_slices loop and an
+        // empty-body frame.
+        let mut w = ChunkWriter { out: Vec::new(), chunk: 3 };
+        write_all_vectored(&mut w, &bodies).await.unwrap();
+        // Each body framed `[len4][body]`, concatenated in order — identical to the coalescing path.
+        let mut expected = Vec::new();
+        for body in &bodies {
+            crate::framing::frame_into(&mut expected, body);
+        }
+        assert_eq!(w.out, expected);
+    }
 }

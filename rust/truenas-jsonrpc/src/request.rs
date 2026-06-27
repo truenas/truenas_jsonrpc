@@ -48,7 +48,7 @@ pub struct RequestCtx<S> {
     id: ReqId,
     session: Arc<Session<S>>,
     cancel: Arc<AtomicBool>,
-    audit_detail: Arc<Mutex<Option<String>>>,
+    audit_detail: Option<Arc<Mutex<Option<String>>>>,
 }
 
 #[derive(Serialize)]
@@ -70,9 +70,14 @@ struct ProgressEnvelope<'a> {
 }
 
 impl<S> RequestCtx<S> {
-    pub(crate) fn new(id: Option<String>, session: Arc<Session<S>>, cancel: Arc<AtomicBool>) -> Self {
+    pub(crate) fn new(
+        id: Option<String>,
+        session: Arc<Session<S>>,
+        cancel: Arc<AtomicBool>,
+        audit: bool,
+    ) -> Self {
         let id = id.map_or(ReqId::None, ReqId::Str);
-        Self { id, session, cancel, audit_detail: Arc::new(Mutex::new(None)) }
+        Self { id, session, cancel, audit_detail: audit.then(|| Arc::new(Mutex::new(None))) }
     }
 
     /// Like [`new`](Self::new) but from the XDR wire's raw 16 id bytes — formatted to the
@@ -82,14 +87,15 @@ impl<S> RequestCtx<S> {
         rid: Option<[u8; 16]>,
         session: Arc<Session<S>>,
         cancel: Arc<AtomicBool>,
+        audit: bool,
     ) -> Self {
         let id = rid.map_or(ReqId::None, |b| ReqId::Xdr(b, OnceLock::new()));
-        Self { id, session, cancel, audit_detail: Arc::new(Mutex::new(None)) }
+        Self { id, session, cancel, audit_detail: audit.then(|| Arc::new(Mutex::new(None))) }
     }
 
     /// A shared handle to the audit-detail slot, so the dispatch pipeline can read the
     /// runtime detail after the handler has run (and possibly moved `cx`).
-    pub(crate) fn audit_handle(&self) -> Arc<Mutex<Option<String>>> {
+    pub(crate) fn audit_handle(&self) -> Option<Arc<Mutex<Option<String>>>> {
         self.audit_detail.clone()
     }
 
@@ -121,7 +127,10 @@ impl<S> RequestCtx<S> {
     /// Record a runtime audit detail (joined with the method's static `audit_message`).
     /// Last write wins.
     pub fn set_audit(&self, message: impl Into<String>) {
-        *self.audit_detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.into());
+        // Only audited methods allocate the slot; for the rest the detail is never read, so drop it.
+        if let Some(detail) = &self.audit_detail {
+            *detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message.into());
+        }
     }
 
     /// Emit a `$/progress` notification for this request. A no-op for a notification
@@ -152,7 +161,7 @@ mod tests {
     fn ctx(id: Option<String>) -> RequestCtx<()> {
         let session =
             Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)));
-        RequestCtx::new(id, session, Arc::new(AtomicBool::new(false)))
+        RequestCtx::new(id, session, Arc::new(AtomicBool::new(false)), false)
     }
 
     #[test]
@@ -163,5 +172,21 @@ mod tests {
         let note = ctx(None);
         assert_eq!(note.id(), None);
         note.update_progress(Some(50.0), None, None); // no id → no notification emitted
+    }
+
+    #[test]
+    fn audit_detail_slot_is_allocated_only_when_audited() {
+        let mk =
+            || Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)));
+        // Audited: the slot exists; `set_audit` records it and the pipeline reads it back.
+        let audited = RequestCtx::<()>::new(None, mk(), Arc::new(AtomicBool::new(false)), true);
+        assert!(audited.audit_handle().is_some());
+        audited.set_audit("did the thing");
+        let got = audited.audit_handle().unwrap().lock().unwrap().clone();
+        assert_eq!(got.as_deref(), Some("did the thing"));
+        // Unaudited: no slot — `set_audit` is a silent no-op and the handle is `None`.
+        let plain = ctx(None);
+        assert!(plain.audit_handle().is_none());
+        plain.set_audit("dropped");
     }
 }

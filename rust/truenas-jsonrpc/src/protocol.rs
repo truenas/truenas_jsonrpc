@@ -868,7 +868,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // An async method runs inline (it yields, so it can't stall the reactor — parity with the
         // JSON async path); a sync/filterable method runs on the blocking pool.
         let is_async = matches!(method.imp, MethodImpl::Async(_));
-        let cx = RequestCtx::new_xdr(rid, session.clone(), self.never_cancel.clone());
+        let cx = RequestCtx::new_xdr(rid, session.clone(), self.never_cancel.clone(), method.meta.audit);
         let pipeline = Pipeline {
             method,
             session: session.clone(),
@@ -1014,12 +1014,16 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         } else {
             self.never_cancel.clone()
         };
-        let cx = RequestCtx::new(rid.clone(), session.clone(), cancel);
+        let cx = RequestCtx::new(rid.clone(), session.clone(), cancel, method.meta.audit);
         // The authz/audit snapshot (a full re-parse of params into a `Value`) is only
         // needed when an authorizer or an audited method will actually read it.
         let need_snapshot = method.meta.audit;
+        // `req` (method name + params snapshot) is read only by an audited method's record or a
+        // python body (`run_python` reads `req.method`); a plain method never touches it. So move
+        // `parsed.method` in only when needed (mirroring the XDR path) rather than cloning it.
+        let need_method = need_snapshot || matches!(method.imp, MethodImpl::Python);
         let req = JsonRpcRequest {
-            method: parsed.method.clone(),
+            method: if need_method { parsed.method } else { String::new() },
             id: rid.clone(),
             params: if need_snapshot { raw_to_value(parsed.params.as_deref()) } else { Value::Null },
             roles: if need_snapshot { method.meta.roles.to_vec() } else { Vec::new() },
@@ -1178,7 +1182,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
 
         // Negotiate → the interim "ready" result (a refusal is audited like a handler error).
-        let cx = RequestCtx::new(Some(rid.clone()), session.clone(), self.never_cancel.clone());
+        let cx = RequestCtx::new(Some(rid.clone()), session.clone(), self.never_cancel.clone(), method.meta.audit);
         let interim = match erased.negotiate(decoded.as_ref(), &cx) {
             Ok(raw) => raw,
             Err(e) => {
@@ -1864,7 +1868,9 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
                     let PyResult { outcome, audit_message } =
                         dispatcher.dispatch(self.req.method.as_str(), params_json, &view);
                     if let Some(message) = audit_message {
-                        *audit_detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+                        if let Some(detail) = &audit_detail {
+                            *detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
+                        }
                     }
                     match outcome {
                         PyOutcome::Ok(raw) => Ok(raw),
@@ -1963,12 +1969,18 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
     /// Audit one call (success / handler error / authz denial — never a decode failure):
     /// redacts the method's `secret_fields` in the params. A no-op when the method isn't audited
     /// or no sink is configured.
-    fn do_audit(&self, outcome: AuditOutcome<'_>, audit_detail: &Mutex<Option<String>>) {
+    fn do_audit(
+        &self,
+        outcome: AuditOutcome<'_>,
+        audit_detail: &Option<Arc<Mutex<Option<String>>>>,
+    ) {
         if !self.method.meta.audit {
             return;
         }
         let Some(sink) = self.audit_sink.as_deref() else { return };
-        let detail = audit_detail.lock().unwrap_or_else(PoisonError::into_inner).take();
+        // The slot is `Some` exactly when the method is audited (we're past the guard above).
+        let detail =
+            audit_detail.as_ref().and_then(|d| d.lock().unwrap_or_else(PoisonError::into_inner).take());
         audit_call(sink, &self.method.meta, &self.req, outcome, detail.as_deref(), &self.session);
     }
 }
@@ -1982,7 +1994,7 @@ mod tests {
         Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)))
     }
     fn dummy_cx(session: &Arc<Session<()>>) -> RequestCtx<()> {
-        RequestCtx::new(None, session.clone(), Arc::new(AtomicBool::new(false)))
+        RequestCtx::new(None, session.clone(), Arc::new(AtomicBool::new(false)), false)
     }
     fn pipeline(method: Method<()>) -> Pipeline<()> {
         Pipeline {
