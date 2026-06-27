@@ -305,10 +305,32 @@ typed-decode only; `rtrip` = decode → handler → encode.)
 - Behavior parity is guaranteed separately by `cargo test --workspace --all-features` + `./coverage.sh`
   (the JSON/XDR suites are the acceptance spec); the codec seam is behavior-preserving.
 
-**End-to-end backstop (not yet run).** `bench/unix_ab` (`run_xdr_vs_json.sh`) can confirm the seam choice
-vanishes into systemic noise at the socket level; given B1/B2-enum sit within ±2% even in isolation, the
-e2e delta should be unmeasurable. Worth a confirming run before landing the refactor.
+**Implemented (2026-06-27) — B2-enum landed in the core.** The open-coded JSON/XDR method-pairs are
+collapsed: `ErasedSync`/`ErasedAsync` go from four wire-methods (`decode`/`run` + `xdr_decode`/`xdr_run`)
+to one `decode`/`run` pair delegating to a `Codec` (`Json | Xdr`) seam — a `WireParams` in, a `WireReply`
+out, with the per-wire serde behind `decode_plain` + `Codec::encode_result`
+(`truenas-jsonrpc/src/method.rs`). The four `protocol.rs` dispatch sites pass `WireParams::{Json,Xdr}` /
+`Codec::{Json,Xdr}` and unwrap the reply. Adding a third serde-shaped wire is now a new `Codec` arm + a
+dispatch entry, not a method-pair on every erasure. Behavior-preserving: `cargo test --workspace
+--all-features` green, `./coverage.sh` 100%, `cargo clippy --workspace --all-features --all-targets` clean.
 
-**Reproduce.** `cd rust/bench/codec_ab && ./run.sh [iters] [runs] [cpu]` (defaults `600000 5`; the crate
-is its own workspace; deps = `truenas-xdr` + `serde` + `serde_json`, plus `erased-serde` for the B2-dyn
-arm only).
+**End-to-end backstop (run 2026-06-27).** Rust `bench/unix_ab` `bench_server` (serves `bench.add` over
+both wires), current dispatch vs the Tier-2 dispatch, conns=8 × 30k iters/conn. req/s, before → after:
+
+| mode  | depth | wire | before  | after   |   Δ   |
+|-------|-------|------|--------:|--------:|------:|
+| async | 16    | xdr  | 350,883 | 346,160 | −1.3% |
+| async | 16    | json | 242,493 | 239,402 | −1.3% |
+| sync  | 16    | xdr  | 105,437 | 110,496 | +4.8% |
+| sync  | 16    | json |  92,925 |  93,538 | +0.7% |
+| async |  1    | xdr  |  63,231 |  63,162 | −0.1% |
+| async |  1    | json |  56,645 |  54,885 | −3.1% |
+| sync  |  1    | xdr  |  46,391 |  44,313 | −4.5% |
+| sync  |  1    | json |  39,166 |  38,937 | −0.6% |
+
+All within ±5% with no systematic direction (the sync-XDR rows move opposite ways) — single-run socket
+noise, not signal. The seam choice vanishes into systemic wire cost, as the microbench predicted.
+
+**Reproduce.** Microbench: `cd rust/bench/codec_ab && ./run.sh [iters] [runs] [cpu]` (defaults `600000 5`;
+its own workspace; deps = `truenas-xdr` + `serde` + `serde_json`, plus `erased-serde` for the B2-dyn arm).
+E2e: the Rust rows of `rust/bench/unix_ab/run_xdr_vs_json.sh` (`bench_server` over both wires).

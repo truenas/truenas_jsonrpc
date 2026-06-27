@@ -20,9 +20,9 @@ use serde_json::{json, Value};
 use crate::envelope::{self, ParsedRequest};
 use crate::error::{BuildResult, Error, ErrorCode, JsonRpcError};
 use crate::method::{
-    decode_params, encode_result, AsyncJsonRpcMethod, ErasedTransfer, FilterableJsonRpcMethod,
+    decode_params, encode_result, AsyncJsonRpcMethod, Codec, ErasedTransfer, FilterableJsonRpcMethod,
     JsonRpcFdPassMethod, JsonRpcFdTransferMethod, JsonRpcMethod, Method, MethodDef, MethodImpl,
-    MethodMeta, SubscriptionDef, SubscriptionImpl,
+    MethodMeta, SubscriptionDef, SubscriptionImpl, WireParams, WireReply,
 };
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::RequestCtx;
@@ -1826,13 +1826,13 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             unreachable!("run_sync on a non-sync method")
         };
         let audit_detail = cx.audit_handle();
-        let decoded = match erased.decode(params) {
-            Ok(d) => d,
+        let decoded = match erased.decode(WireParams::Json(params), false) {
+            Ok((d, _)) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
         let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.run(decoded, &cx),
+            Ok(()) => erased.run(Codec::Json, decoded, &cx).map(WireReply::into_json),
         };
         self.do_audit(audit_outcome(&outcome), &audit_detail);
         response_bytes(self.rid.as_deref(), &outcome)
@@ -1884,13 +1884,13 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             unreachable!("run_async on a non-async method")
         };
         let audit_detail = cx.audit_handle();
-        let decoded = match erased.decode(params.as_deref()) {
-            Ok(d) => d,
+        let decoded = match erased.decode(WireParams::Json(params.as_deref()), false) {
+            Ok((d, _)) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
         let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.run(decoded, cx).await,
+            Ok(()) => erased.run(Codec::Json, decoded, cx).await.map(WireReply::into_json),
         };
         self.do_audit(audit_outcome(&outcome), &audit_detail);
         response_bytes(self.rid.as_deref(), &outcome)
@@ -1914,15 +1914,15 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let want_audit = self.method.meta.audit && self.audit_sink.is_some();
         // Decode before authz; a decode failure returns here, before the audit point, so it is
         // not audited (matching the JSON path's early return).
-        let (decoded, params_value) = erased.xdr_decode(params, need_params)?;
+        let (decoded, params_value) = erased.decode(WireParams::Xdr(params), need_params)?;
         if need_params {
             self.req.params = params_value;
         }
-        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` returns
-        // just the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
+        // Audit needs the params (reflected at decode) but not the result, so `run` returns just
+        // the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
         let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.xdr_run(decoded, &cx),
+            Ok(()) => erased.run(Codec::Xdr, decoded, &cx).map(WireReply::into_xdr),
         };
         if want_audit {
             self.do_audit(audit_outcome(&outcome), &audit_detail);
@@ -1944,15 +1944,15 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let want_audit = self.method.meta.audit && self.audit_sink.is_some();
         // Decode before authz; a decode failure returns here, before the audit point (matching the
         // JSON path's early return), so it is not audited.
-        let (decoded, params_value) = erased.xdr_decode(params, need_params)?;
+        let (decoded, params_value) = erased.decode(WireParams::Xdr(params), need_params)?;
         if need_params {
             self.req.params = params_value;
         }
-        // Audit needs the params (reflected at decode) but not the result, so `xdr_run` returns
-        // just the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
+        // Audit needs the params (reflected at decode) but not the result, so `run` returns just
+        // the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
         let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.xdr_run(decoded, cx).await,
+            Ok(()) => erased.run(Codec::Xdr, decoded, cx).await.map(WireReply::into_xdr),
         };
         if want_audit {
             self.do_audit(audit_outcome(&outcome), &audit_detail);
