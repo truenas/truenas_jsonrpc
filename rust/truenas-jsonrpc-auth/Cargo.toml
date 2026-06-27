@@ -36,6 +36,17 @@ truenas-keyring = { path = "../truenas-keyring", optional = true }
 # The passwd lookup (the `nss` feature): resolve a SCRAM username → uid so authorization can key off
 # the uid. Optional — an embedder may supply its own username→uid resolver instead.
 truenas-nss = { path = "../truenas-nss", optional = true }
+# OIDC ID-token verification (the `oauth` feature): offline JWT signature + claim validation. The
+# IdP's JWKS is supplied by a `JwksProvider` (no HTTP client in this crate). The 9.x line is the
+# rust-1.75-compatible release (10.x requires a newer toolchain).
+jsonwebtoken = { version = "9.3", optional = true }
+# Native GSSAPI/Kerberos acceptor (the `gssapi` feature): links the system MIT krb5 GSSAPI for the
+# in-process multi-round token exchange (native/CLI clients). Its context types are `Send + Sync`,
+# so the half-built context rides in `AuthProgress` without this crate writing any `unsafe`.
+libgssapi = { version = "0.11", optional = true }
+# Base64 for the GSSAPI token wire encoding (the `gssapi` feature). Standard, padded — matches the
+# msgspec `bytes` encoding the Python reference uses.
+base64 = { version = "0.22", optional = true }
 
 [features]
 # SCRAM-SHA-512(-PLUS) challenge-response. Off by default.
@@ -44,6 +55,11 @@ scram = ["dep:openssl"]
 keyring = ["scram", "dep:truenas-keyring"]
 # A built-in passwd-backed username→uid resolver (`getpwnam`) for keying authorization off the uid.
 nss = ["dep:truenas-nss"]
+# OIDC/OAuth ID-token verification: offline JWT signature + claim validation against IdP JWKS keys
+# the embedder supplies (no HTTP client here). Off by default.
+oauth = ["dep:jsonwebtoken"]
+# Native GSSAPI/Kerberos: in-process multi-round acceptor (links the system MIT krb5). Off by default.
+gssapi = ["dep:libgssapi", "dep:base64"]
 # Passthrough auth: hand the client fd to a local AF_UNIX broker (+ the broker-server mode). Pulls
 # the server crate's SCM_RIGHTS primitives (no new external dep). Off by default.
 passthrough = ["truenas-jsonrpc-server/passthrough"]

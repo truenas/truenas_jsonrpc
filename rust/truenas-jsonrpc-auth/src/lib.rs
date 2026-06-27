@@ -32,11 +32,16 @@
 //!     .build();
 //! ```
 
+mod bearer;
 mod channel;
+#[cfg(feature = "gssapi")]
+mod gssapi;
 #[cfg(feature = "keyring")]
 mod keyring;
 mod mechanism;
 mod mtls;
+#[cfg(feature = "oauth")]
+mod oauth;
 mod outcome;
 #[cfg(feature = "passthrough")]
 mod passthrough;
@@ -47,11 +52,20 @@ mod stack;
 mod state;
 mod wire;
 
+pub use bearer::{
+    BearerCredential, BearerTokenSource, BearerVerdict, GssapiBearerToken, GSSAPI_BEARER_TOKEN_TAG,
+};
+#[cfg(feature = "keyring")]
+pub use bearer::{BearerTokenRecord, KeyringBearerTokens};
 pub use channel::{Capability, Channel};
+#[cfg(feature = "gssapi")]
+pub use gssapi::{default_principal_map, Gssapi, GSSAPI_TAG};
 #[cfg(feature = "keyring")]
 pub use keyring::KeyringCredentials;
 pub use mechanism::Mechanism;
 pub use mtls::{Mtls, MTLS_TAG};
+#[cfg(feature = "oauth")]
+pub use oauth::{Algorithm, DecodingKey, JwksProvider, Oauth, OauthConfig, OAUTH_TAG};
 pub use outcome::{AuthProgress, Identity, Outcome, Principal, RejectKind};
 #[cfg(feature = "passthrough")]
 pub use passthrough::{
