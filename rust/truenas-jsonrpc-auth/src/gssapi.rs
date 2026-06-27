@@ -13,10 +13,9 @@
 
 use std::sync::Mutex;
 
-use base64::engine::general_purpose::STANDARD as B64;
-use base64::Engine;
-use libgssapi::context::{SecurityContext, ServerCtx};
+use openssl::base64::{decode_block, encode_block};
 use serde_json::{json, Value};
+use truenas_gssapi::ServerCtx;
 
 use crate::channel::{Capability, Channel};
 use crate::mechanism::Mechanism;
@@ -87,14 +86,14 @@ impl Mechanism for Gssapi {
         let Some(token_b64) = payload.get("token").and_then(Value::as_str) else {
             return Outcome::Reject(RejectKind::AuthErr);
         };
-        let Ok(token) = B64.decode(token_b64) else {
+        let Ok(token) = decode_block(token_b64) else {
             return Outcome::Reject(RejectKind::AuthErr);
         };
 
         // Round 1 creates a fresh acceptor over the host keytab; later rounds recover the carried
         // context (taking it back out of its Mutex).
         let mut ctx = match progress {
-            None => ServerCtx::new(None),
+            None => ServerCtx::new(),
             Some(p) => {
                 let Ok(pending) = p.state.downcast::<GssPending>() else {
                     return Outcome::Reject(RejectKind::AuthErr);
@@ -114,24 +113,21 @@ impl Mechanism for Gssapi {
 
         if ctx.is_complete() {
             let name = match ctx.source_name() {
-                Ok(n) => n.to_string(),
+                Ok(name) => name,
                 Err(_) => return Outcome::Reject(RejectKind::AuthErr),
             };
             let Some((identity, principal)) = (self.principal_map)(&name) else {
                 return Outcome::Reject(RejectKind::AuthErr); // mapped to no account
             };
             // A final (non-empty) token is the mutual-auth reply the client verifies.
-            let extra = out
-                .filter(|b| !b.is_empty())
-                .map(|b| json!({ "token": B64.encode(&b[..]) }));
+            let extra = (!out.is_empty()).then(|| json!({ "token": encode_block(&out) }));
             Outcome::Authenticated { identity, principal, user_info: None, extra }
         } else {
-            // Another round: hand the server's output token back as the challenge.
-            let token_out = out.map(|b| B64.encode(&b[..])).unwrap_or_default();
+            // Another round: hand the server's output token back as the challenge (empty → "").
             Outcome::Challenge {
                 reply: crate::wire::AuthResponse::Challenge {
                     mechanism: GSSAPI_TAG.to_string(),
-                    data: json!({ "token": token_out }),
+                    data: json!({ "token": encode_block(&out) }),
                 },
                 next: AuthProgress::new(GSSAPI_TAG, GssPending { ctx: Mutex::new(ctx) }),
             }

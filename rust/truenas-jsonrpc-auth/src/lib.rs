@@ -65,7 +65,7 @@ pub use keyring::KeyringCredentials;
 pub use mechanism::Mechanism;
 pub use mtls::{Mtls, MTLS_TAG};
 #[cfg(feature = "oauth")]
-pub use oauth::{Algorithm, DecodingKey, JwksProvider, Oauth, OauthConfig, OAUTH_TAG};
+pub use oauth::{Algorithm, JwksProvider, Oauth, OauthConfig, OAUTH_TAG};
 pub use outcome::{AuthProgress, Identity, Outcome, Principal, RejectKind};
 #[cfg(feature = "passthrough")]
 pub use passthrough::{

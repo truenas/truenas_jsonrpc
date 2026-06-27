@@ -1,24 +1,28 @@
 //! The `OAUTH` mechanism through the real `$/sessionSetup` dispatch: a presented OIDC ID token
-//! (minted here with a throwaway RSA key) verified offline against a static [`JwksProvider`].
-//! Asserts a valid token authenticates + resolves `(uid, "OAUTH")` roles, and that a wrong
-//! `aud`/`iss`, an expired token, a tampered signature, a disallowed algorithm (HS256), and a
+//! (minted here with OpenSSL — no `jsonwebtoken`) verified offline against a static [`JwksProvider`].
+//! Asserts a valid RS256/ES256/EdDSA token authenticates + resolves `(uid, "OAUTH")` roles, and that
+//! a wrong `aud`/`iss`, an expired token, a tampered signature, a disallowed algorithm (HS256), and a
 //! missing account claim are each refused.
 #![cfg(feature = "oauth")]
 
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
+use openssl::ec::{EcGroup, EcKey};
+use openssl::ecdsa::EcdsaSig;
+use openssl::hash::MessageDigest;
+use openssl::nid::Nid;
+use openssl::pkey::{Id, PKey, Private, Public};
+use openssl::sha::sha256;
+use openssl::sign::Signer;
 use serde_json::{json, Value};
 use truenas_jsonrpc::{JsonRpcProtocol, NullOutbound, Roles, Session, SessionLifecycle};
-use truenas_jsonrpc_auth::{
-    install, AuthSession, AuthStack, DecodingKey, JwksProvider, OauthConfig,
-};
+use truenas_jsonrpc_auth::{install, AuthSession, AuthStack, JwksProvider, OauthConfig};
 use truenas_jsonrpc_server::{Peer, TlsPeer, TransportPosture};
 
 const ID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
-// A throwaway RSA keypair (generated offline) — the IdP's signing key for the test.
+// A throwaway RSA keypair (generated offline) — the IdP's RS256 signing key for the test.
 const PRIV_PEM: &[u8] = br"-----BEGIN PRIVATE KEY-----
 MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQC0VM7wk6N0t09N
 KACtkhnlPH2DAwcksxm7i+EpBqWwDSQrG4WVWSrQKUCUrkmG6UDyyOmk7/EqLXMA
@@ -60,11 +64,22 @@ LwIDAQAB
 -----END PUBLIC KEY-----
 ";
 
-/// A static one-key JWKS — the IdP's published verification key.
-struct StaticJwks;
-impl JwksProvider for StaticJwks {
-    fn decoding_key(&self, _kid: Option<&str>) -> Option<DecodingKey> {
-        DecodingKey::from_rsa_pem(PUB_PEM).ok()
+/// A static one-key JWKS — the IdP's published verification key, stored as SPKI DER (so each lookup
+/// returns a fresh, owned `PKey<Public>`; `PKey` isn't `Clone`).
+struct StaticKey(Vec<u8>);
+
+impl StaticKey {
+    fn from_pem(spki_pem: &[u8]) -> Self {
+        Self(PKey::public_key_from_pem(spki_pem).unwrap().public_key_to_der().unwrap())
+    }
+    fn from_pkey(key: &PKey<Public>) -> Self {
+        Self(key.public_key_to_der().unwrap())
+    }
+}
+
+impl JwksProvider for StaticKey {
+    fn verifying_key(&self, _kid: Option<&str>) -> Option<PKey<Public>> {
+        PKey::public_key_from_der(&self.0).ok()
     }
 }
 
@@ -84,18 +99,91 @@ fn valid_claims() -> Value {
     })
 }
 
-/// Sign `claims` as an RS256 JWT with the test key (the IdP minting an ID token).
-fn mint(claims: &Value) -> String {
-    let mut header = Header::new(Algorithm::RS256);
-    header.kid = Some("test-key".into());
-    encode(&header, claims, &EncodingKey::from_rsa_pem(PRIV_PEM).unwrap()).unwrap()
+// --- token minting over OpenSSL (the IdP side of the test) ---------------------------------------
+
+/// Base64url, unpadded — the JWT segment encoding.
+fn b64url(data: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for c in data.chunks(3) {
+        let n = (u32::from(c[0]) << 16)
+            | (u32::from(*c.get(1).unwrap_or(&0)) << 8)
+            | u32::from(*c.get(2).unwrap_or(&0));
+        out.push(A[((n >> 18) & 63) as usize] as char);
+        out.push(A[((n >> 12) & 63) as usize] as char);
+        if c.len() > 1 {
+            out.push(A[((n >> 6) & 63) as usize] as char);
+        }
+        if c.len() > 2 {
+            out.push(A[(n & 63) as usize] as char);
+        }
+    }
+    out
 }
 
-fn server(registry: Roles) -> JsonRpcProtocol<AuthSession> {
+/// Assemble `header.payload.signature` from a signing closure over the `header.payload` bytes.
+fn jwt(header: &Value, claims: &Value, sign: impl FnOnce(&[u8]) -> Vec<u8>) -> String {
+    let signing_input = format!(
+        "{}.{}",
+        b64url(&serde_json::to_vec(header).unwrap()),
+        b64url(&serde_json::to_vec(claims).unwrap())
+    );
+    let sig = sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", b64url(&sig))
+}
+
+/// Mint an RS256 ID token with the embedded RSA key.
+fn mint(claims: &Value) -> String {
+    let pkey = PKey::private_key_from_pem(PRIV_PEM).unwrap();
+    jwt(&json!({ "alg": "RS256", "typ": "JWT", "kid": "test-key" }), claims, |input| {
+        let mut signer = Signer::new(MessageDigest::sha256(), &pkey).unwrap();
+        signer.update(input).unwrap();
+        signer.sign_to_vec().unwrap()
+    })
+}
+
+fn es256_keypair() -> (PKey<Private>, PKey<Public>) {
+    let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
+    let ec = EcKey::generate(&group).unwrap();
+    let public = PKey::from_ec_key(EcKey::from_public_key(&group, ec.public_key()).unwrap()).unwrap();
+    (PKey::from_ec_key(ec).unwrap(), public)
+}
+
+/// Mint an ES256 token: ECDSA sign the SHA-256 of the signing input, emit the raw `r || s` (the JWS
+/// form, not DER), each half left-padded to 32 bytes.
+fn mint_es256(claims: &Value, key: &PKey<Private>) -> String {
+    let ec = key.ec_key().unwrap();
+    jwt(&json!({ "alg": "ES256", "typ": "JWT" }), claims, move |input| {
+        let sig = EcdsaSig::sign(&sha256(input), &ec).unwrap();
+        let (r, s) = (sig.r().to_vec(), sig.s().to_vec());
+        let mut raw = vec![0u8; 64];
+        raw[32 - r.len()..32].copy_from_slice(&r);
+        raw[64 - s.len()..64].copy_from_slice(&s);
+        raw
+    })
+}
+
+fn ed25519_keypair() -> (PKey<Private>, PKey<Public>) {
+    let private = PKey::generate_ed25519().unwrap();
+    let public = PKey::public_key_from_raw_bytes(&private.raw_public_key().unwrap(), Id::ED25519).unwrap();
+    (private, public)
+}
+
+/// Mint an EdDSA (Ed25519) token via the one-shot signer.
+fn mint_eddsa(claims: &Value, key: &PKey<Private>) -> String {
+    jwt(&json!({ "alg": "EdDSA", "typ": "JWT" }), claims, |input| {
+        let mut signer = Signer::new_without_digest(key).unwrap();
+        signer.sign_oneshot_to_vec(input).unwrap()
+    })
+}
+
+// --- harness -------------------------------------------------------------------------------------
+
+fn server(registry: Roles, provider: StaticKey) -> JsonRpcProtocol<AuthSession> {
     let config = OauthConfig::new("https://idp.example", "truenas-client");
     let stack = AuthStack::builder()
         .roles(registry)
-        .oauth(config, StaticJwks)
+        .oauth(config, provider)
         .user_resolver(|name| (name == "alice").then_some(1000))
         .role_source(|uid, mech| {
             if uid == 1000 && mech == "OAUTH" {
@@ -106,6 +194,11 @@ fn server(registry: Roles) -> JsonRpcProtocol<AuthSession> {
         })
         .build();
     install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build()
+}
+
+/// An RS256 server keyed on the embedded public PEM.
+fn rsa_server(registry: Roles) -> JsonRpcProtocol<AuthSession> {
+    server(registry, StaticKey::from_pem(PUB_PEM))
 }
 
 fn tls_session(proto: &JsonRpcProtocol<AuthSession>) -> Arc<Session<AuthSession>> {
@@ -133,7 +226,7 @@ fn rtype(v: &Value) -> &str {
 #[tokio::test]
 async fn a_valid_id_token_authenticates_and_resolves_roles() {
     let registry = Roles::new(["ops"]);
-    let proto = server(registry.clone());
+    let proto = rsa_server(registry.clone());
     let s = tls_session(&proto);
 
     let r = setup(&proto, &s, &mint(&valid_claims())).await;
@@ -153,8 +246,28 @@ async fn a_valid_id_token_authenticates_and_resolves_roles() {
 }
 
 #[tokio::test]
+async fn a_valid_es256_token_authenticates() {
+    let (private, public) = es256_keypair();
+    let proto = server(Roles::new(["ops"]), StaticKey::from_pkey(&public));
+    let s = tls_session(&proto);
+    let r = setup(&proto, &s, &mint_es256(&valid_claims(), &private)).await;
+    assert_eq!(rtype(&r), "SUCCESS", "{r}");
+    assert_eq!(s.lifecycle(), SessionLifecycle::Established);
+}
+
+#[tokio::test]
+async fn a_valid_eddsa_token_authenticates() {
+    let (private, public) = ed25519_keypair();
+    let proto = server(Roles::new(["ops"]), StaticKey::from_pkey(&public));
+    let s = tls_session(&proto);
+    let r = setup(&proto, &s, &mint_eddsa(&valid_claims(), &private)).await;
+    assert_eq!(rtype(&r), "SUCCESS", "{r}");
+    assert_eq!(s.lifecycle(), SessionLifecycle::Established);
+}
+
+#[tokio::test]
 async fn a_token_for_a_different_audience_is_rejected() {
-    let proto = server(Roles::new(["ops"]));
+    let proto = rsa_server(Roles::new(["ops"]));
     let s = tls_session(&proto);
     let mut claims = valid_claims();
     claims["aud"] = json!("some-other-app"); // minted for a different relying party
@@ -165,7 +278,7 @@ async fn a_token_for_a_different_audience_is_rejected() {
 
 #[tokio::test]
 async fn a_token_from_a_different_issuer_is_rejected() {
-    let proto = server(Roles::new(["ops"]));
+    let proto = rsa_server(Roles::new(["ops"]));
     let s = tls_session(&proto);
     let mut claims = valid_claims();
     claims["iss"] = json!("https://evil.example");
@@ -175,17 +288,17 @@ async fn a_token_from_a_different_issuer_is_rejected() {
 
 #[tokio::test]
 async fn an_expired_token_is_rejected() {
-    let proto = server(Roles::new(["ops"]));
+    let proto = rsa_server(Roles::new(["ops"]));
     let s = tls_session(&proto);
     let mut claims = valid_claims();
-    claims["exp"] = json!(now() - 3600); // expired an hour ago (beyond the default 60s leeway)
+    claims["exp"] = json!(now() - 3600); // expired an hour ago (beyond the 60s leeway)
     let r = setup(&proto, &s, &mint(&claims)).await;
     assert_eq!(rtype(&r), "AUTH_ERR");
 }
 
 #[tokio::test]
 async fn a_tampered_signature_is_rejected() {
-    let proto = server(Roles::new(["ops"]));
+    let proto = rsa_server(Roles::new(["ops"]));
     let s = tls_session(&proto);
     let mut token = mint(&valid_claims());
     // Flip the last base64url char of the signature → the signature no longer verifies.
@@ -197,23 +310,23 @@ async fn a_tampered_signature_is_rejected() {
 
 #[tokio::test]
 async fn a_disallowed_algorithm_is_rejected() {
-    // An HS256 token (symmetric) — our config pins asymmetric algs, so it's refused before any
-    // verification (defeating the public-key-as-HMAC-secret confusion attack).
-    let proto = server(Roles::new(["ops"]));
+    // An HS256 token (symmetric) — our config pins asymmetric algs, so the `alg` is refused before
+    // any verification (defeating the public-key-as-HMAC-secret confusion attack).
+    let proto = rsa_server(Roles::new(["ops"]));
     let s = tls_session(&proto);
-    let token = encode(
-        &Header::new(Algorithm::HS256),
-        &valid_claims(),
-        &EncodingKey::from_secret(b"a-shared-secret"),
-    )
-    .unwrap();
+    let mac = PKey::hmac(b"a-shared-secret").unwrap();
+    let token = jwt(&json!({ "alg": "HS256", "typ": "JWT" }), &valid_claims(), |input| {
+        let mut signer = Signer::new(MessageDigest::sha256(), &mac).unwrap();
+        signer.update(input).unwrap();
+        signer.sign_to_vec().unwrap()
+    });
     let r = setup(&proto, &s, &token).await;
     assert_eq!(rtype(&r), "AUTH_ERR");
 }
 
 #[tokio::test]
 async fn a_token_with_no_account_claim_is_rejected() {
-    let proto = server(Roles::new(["ops"]));
+    let proto = rsa_server(Roles::new(["ops"]));
     let s = tls_session(&proto);
     let mut claims = valid_claims();
     claims.as_object_mut().unwrap().remove("preferred_username");

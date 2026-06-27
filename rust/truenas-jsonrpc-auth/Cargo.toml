@@ -23,10 +23,10 @@ truenas-jsonrpc = { path = "../truenas-jsonrpc" }
 truenas-jsonrpc-server = { path = "../truenas-jsonrpc-server" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-# SCRAM crypto (the `scram` feature) goes through the *same* system OpenSSL the C truenas_scram
-# uses — including its base64 (`EVP_EncodeBlock`/`EVP_DecodeBlock`, via `openssl::base64`) — so the
-# verifiers and wire encodings are byte-identical, with no separate base64 crate. Off by default;
-# peercred/mTLS pull no openssl.
+# System OpenSSL is the crate's one crypto/codec dependency, shared by every mechanism that needs it:
+# SCRAM (the same OpenSSL the C truenas_scram uses, incl. its `EVP_EncodeBlock`/`DecodeBlock` base64,
+# so verifiers/encodings are byte-identical), OAuth (offline JWT signature verification — no `ring`),
+# and GSSAPI (token base64). Off by default; peercred/mTLS pull no openssl.
 openssl = { version = "0.10", optional = true }
 # The keyring-backed `CredentialSource` (the `keyring` feature): looks SCRAM verifiers up in the
 # kernel keyring written by `truenas-keyring` / Python `truenas_keyring`. Optional — an embedder
@@ -36,17 +36,11 @@ truenas-keyring = { path = "../truenas-keyring", optional = true }
 # The passwd lookup (the `nss` feature): resolve a SCRAM username → uid so authorization can key off
 # the uid. Optional — an embedder may supply its own username→uid resolver instead.
 truenas-nss = { path = "../truenas-nss", optional = true }
-# OIDC ID-token verification (the `oauth` feature): offline JWT signature + claim validation. The
-# IdP's JWKS is supplied by a `JwksProvider` (no HTTP client in this crate). The 9.x line is the
-# rust-1.75-compatible release (10.x requires a newer toolchain).
-jsonwebtoken = { version = "9.3", optional = true }
-# Native GSSAPI/Kerberos acceptor (the `gssapi` feature): links the system MIT krb5 GSSAPI for the
-# in-process multi-round token exchange (native/CLI clients). Its context types are `Send + Sync`,
-# so the half-built context rides in `AuthProgress` without this crate writing any `unsafe`.
-libgssapi = { version = "0.11", optional = true }
-# Base64 for the GSSAPI token wire encoding (the `gssapi` feature). Standard, padded — matches the
-# msgspec `bytes` encoding the Python reference uses.
-base64 = { version = "0.22", optional = true }
+# Native GSSAPI/Kerberos acceptor (the `gssapi` feature): our own minimal FFI to the system MIT krb5
+# GSSAPI (no `libgssapi`/`bindgen`/`clang-sys`). The half-built `ServerCtx` is `Send` not `Sync`, so
+# `gssapi.rs` rides it across rounds inside a `Mutex` — no `unsafe` in this crate. Token base64 reuses
+# `openssl::base64` (GSSAPI tokens are standard padded base64), so the `gssapi` feature pulls openssl.
+truenas-gssapi = { path = "../truenas-gssapi", optional = true }
 
 [features]
 # SCRAM-SHA-512(-PLUS) challenge-response. Off by default.
@@ -55,11 +49,12 @@ scram = ["dep:openssl"]
 keyring = ["scram", "dep:truenas-keyring"]
 # A built-in passwd-backed username→uid resolver (`getpwnam`) for keying authorization off the uid.
 nss = ["dep:truenas-nss"]
-# OIDC/OAuth ID-token verification: offline JWT signature + claim validation against IdP JWKS keys
-# the embedder supplies (no HTTP client here). Off by default.
-oauth = ["dep:jsonwebtoken"]
-# Native GSSAPI/Kerberos: in-process multi-round acceptor (links the system MIT krb5). Off by default.
-gssapi = ["dep:libgssapi", "dep:base64"]
+# OIDC/OAuth ID-token verification: offline JWT signature + claim validation (over OpenSSL) against
+# IdP JWKS keys the embedder supplies (no HTTP client here). Off by default.
+oauth = ["dep:openssl"]
+# Native GSSAPI/Kerberos: in-process multi-round acceptor over our `truenas-gssapi` FFI (links the
+# system MIT krb5). Pulls openssl for the token base64. Off by default.
+gssapi = ["dep:truenas-gssapi", "dep:openssl"]
 # Passthrough auth: hand the client fd to a local AF_UNIX broker (+ the broker-server mode). Pulls
 # the server crate's SCM_RIGHTS primitives (no new external dep). Off by default.
 passthrough = ["truenas-jsonrpc-server/passthrough"]
