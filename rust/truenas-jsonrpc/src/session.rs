@@ -1,6 +1,6 @@
-//! Per-connection [`Session`] state, the [`Outbound`] back-channel sink, and the
-//! injectable [`IdGen`] / [`Clock`] seams (default UUIDv4 / system time) that make
-//! dispatch deterministic for unit tests and the A/B harness.
+//! Per-connection [`Session`] state — the **Control-plane** concern's session state machine — plus
+//! the [`Outbound`] back-channel sink and the injectable [`IdGen`] / [`Clock`] seams (default
+//! UUIDv4 / system time) that make dispatch deterministic for unit tests and the A/B harness.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock, PoisonError, RwLock};
@@ -28,7 +28,7 @@ pub struct SessionOrigin {
 }
 
 /// A standardized summary of the credential a session authenticated with, for the `$/sessions`
-/// listing. The **auth layer** sets this at `$/sessionSetup` (via [`Session::set_credential`]):
+/// listing. The **auth stack** sets this at `$/sessionSetup` (via [`Session::set_credential`]):
 /// `description` names the mechanism + principal (e.g. `"UNIX_SOCKET uid=0"`, `"SCRAM user=alice"`),
 /// `uid` is the resolved account uid if any.
 #[derive(Clone, Debug)]
@@ -139,7 +139,7 @@ pub struct Session<S> {
     // lock-free on every gated call (`granted_roles`).
     roles: AtomicU64,
     // Connection origin (set once by the server at connect) + the authenticated credential summary
-    // (set by the auth layer at setup). Both are surfaced by the `$/sessions` default listing.
+    // (set by the auth stack at setup). Both are surfaced by the `$/sessions` default listing.
     origin: OnceLock<SessionOrigin>,
     credential: RwLock<Option<Credential>>,
     out: Arc<dyn Outbound>,
@@ -242,13 +242,13 @@ impl<S> Session<S> {
         self.origin.get()
     }
 
-    /// Set the authenticated [`Credential`] summary. The auth layer calls this at `$/sessionSetup`
+    /// Set the authenticated [`Credential`] summary. The auth stack calls this at `$/sessionSetup`
     /// (re-settable across multi-round auth).
     pub fn set_credential(&self, credential: Credential) {
         *self.credential.write().unwrap_or_else(PoisonError::into_inner) = Some(credential);
     }
 
-    /// Read the [`Credential`] summary (set by the auth layer); the closure runs under a brief read
+    /// Read the [`Credential`] summary (set by the auth stack); the closure runs under a brief read
     /// lock — do not `.await` inside it.
     pub fn with_credential<R>(&self, f: impl FnOnce(Option<&Credential>) -> R) -> R {
         f(self.credential.read().unwrap_or_else(PoisonError::into_inner).as_ref())

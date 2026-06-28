@@ -1,5 +1,6 @@
-//! [`JsonRpcServer`] — binds one or more transports, selects a named protocol per connection
-//! with `$/negotiate`, and serves the dispatch loop. Port of `server.py` (the notification
+//! [`JsonRpcServer`] — the **Transport** layer (layer 1) entry point: binds one or more transports,
+//! selects a named protocol per connection with `$/negotiate`, and serves the dispatch loop. Port
+//! of `server.py` (the notification
 //! routing is push-based via each session's [`Outbound`](truenas_jsonrpc::Outbound), so the
 //! per-protocol drain threads Python needs don't exist here).
 

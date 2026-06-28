@@ -40,7 +40,7 @@ fn session(proto: &JsonRpcProtocol<AuthSession>, peer: &Peer) -> Arc<Session<Aut
     proto.new_session(AuthSession::from_peer(peer), Arc::new(NullOutbound))
 }
 
-/// The credential summary the auth layer committed on this session (`$/sessions` surfaces it):
+/// The credential summary the auth stack committed on this session (`$/sessions` surfaces it):
 /// the human-readable description + the resolved account uid.
 fn credential(s: &Session<AuthSession>) -> (String, Option<u32>) {
     s.with_credential(|c| {

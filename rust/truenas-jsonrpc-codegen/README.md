@@ -82,7 +82,7 @@ record to the kernel audit subsystem (auditd → `/var/log/audit/audit.log`, que
       .build();
   ```
 
-  (The auth layer, `truenas-jsonrpc-auth`, can supply this extractor for its session type.)
+  (The auth crate, `truenas-jsonrpc-auth`, can supply this extractor for its session type.)
 
 ## Consumer layout
 
@@ -151,7 +151,7 @@ fn build() -> JsonRpcProtocol<MyState> {
     // Register the role taxonomy *before* the methods: `register` interns each method's declared
     // `roles` (json-idl) into this registry, so authorization is a native gate (`required ⊆
     // granted`). Omit `.roles(...)` if no method declares any. The session's granted mask is set
-    // per connection at `$/sessionSetup` by the auth layer (`truenas-jsonrpc-auth`).
+    // per connection at `$/sessionSetup` by the auth stack (`truenas-jsonrpc-auth`).
     let builder = JsonRpcProtocol::<MyState>::builder("myservice", "1.0.0")
         .roles(Roles::new(["READONLY", "SHARING_WRITE"]));
     register(builder, Arc::new(MyHandlers)).expect("register").build()

@@ -13,7 +13,7 @@ pub const SERVER_KEYS: &str = "server_keys";
 /// The always-present sub-keyring for **outbound** peer credentials (us → remote servers).
 pub const CLIENT_KEYS: &str = "client_keys";
 /// The always-present sub-keyring mapping a **uid → granted roles** ([`RoleRecord`], keyed by the
-/// uid). The auth layer resolves a principal to a uid (an AF_UNIX peer's `SO_PEERCRED`, or a SCRAM
+/// uid). The auth stack resolves a principal to a uid (an AF_UNIX peer's `SO_PEERCRED`, or a SCRAM
 /// username via `getpwnam`) and reads its roles here.
 pub const SERVER_ROLES: &str = "server_roles";
 

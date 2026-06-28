@@ -42,7 +42,7 @@ impl ScramRecord {
 }
 
 /// The roles granted to one **uid**. Stored as the JSON payload of a `user` key in `server_roles`,
-/// keyed by the uid (its decimal string). The auth layer reads it after resolving a principal to a
+/// keyed by the uid (its decimal string). The auth stack reads it after resolving a principal to a
 /// uid and interns `roles` into the session's [`RoleMask`](truenas_jsonrpc::RoleMask). `uid 0` is
 /// full admin regardless of whether a record exists.
 #[derive(Debug, Clone, Serialize, Deserialize)]

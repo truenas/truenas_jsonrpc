@@ -4,7 +4,7 @@
 //! already carries `session_id` / age / `created_at` / lifecycle / `origin` / `secure_transport` /
 //! `internal` / `credential` / `current`; the [`SessionInfo`] seam *augments* it, so this renderer
 //! returns only the auth-specific extras (`authenticated` + the full `identity`) for the core to
-//! merge on top. Sibling to the audit identity layer.
+//! merge on top. Sibling to the audit identity renderer.
 
 use serde_json::{json, Map, Value};
 use truenas_jsonrpc::Session;

@@ -40,7 +40,7 @@ pub struct Channel {
     /// The server's `tls-server-end-point` channel-binding value (RFC 5929) for this connection —
     /// required by SCRAM-SHA-512-PLUS. Populated in the transport phase; `None` off TLS.
     pub channel_binding: Option<Vec<u8>>,
-    /// The listener's declared [`TransportPosture`] (the trust the auth layer keys off). `None` = an
+    /// The listener's declared [`TransportPosture`] (the trust the auth stack keys off). `None` = an
     /// insecure transport (plain TCP / userspace-TLS) that may not authenticate.
     pub posture: Option<TransportPosture>,
 }

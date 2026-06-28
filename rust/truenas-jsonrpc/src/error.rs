@@ -112,7 +112,7 @@ pub enum Error {
 }
 
 /// Result alias for construction-time / builder operations (error type [`Error`]).
-/// Deliberately **not** named `Result`: handlers and the wire layer use the std
+/// Deliberately **not** named `Result`: handlers and the wire-encoding path use the std
 /// `Result<T, JsonRpcError>`, and a crate-level `Result` alias would shadow it
 /// (forcing fully-qualified `std::result::Result` at every handler signature).
 pub type BuildResult<T> = std::result::Result<T, Error>;

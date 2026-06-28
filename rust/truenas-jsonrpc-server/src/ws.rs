@@ -1,5 +1,6 @@
-//! WebSocket transport (the opt-in `websocket` feature) — JSON-RPC framed as WebSocket
-//! messages (`ws://`), via `tokio-tungstenite`. Mirrors Python's optional `websockets` extra.
+//! WebSocket transport (the **Transport** layer, layer 1; the opt-in `websocket` feature) — JSON-RPC
+//! framed as WebSocket messages (`ws://`), via `tokio-tungstenite`. Mirrors Python's optional
+//! `websockets` extra.
 //!
 //! Each inbound WebSocket message is one JSON-RPC frame; replies/notifications are sent as text
 //! messages. The negotiate + dispatch logic is shared with the byte-stream pump

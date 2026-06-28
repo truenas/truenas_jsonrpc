@@ -1,6 +1,6 @@
-//! The concrete [`FileTransfer`] over a connection's raw socket fd, plus the blocking I/O
-//! helpers a `transfer` callback uses. The dispatch core defines only the contract
-//! (`as_raw_fd`); the syscalls live here, where `unsafe` is allowed.
+//! The concrete [`FileTransfer`] (the **Transport** layer, layer 1) over a connection's raw socket
+//! fd, plus the blocking I/O helpers a `transfer` callback uses. The dispatch core defines only the
+//! contract (`as_raw_fd`); the syscalls live here, where `unsafe` is allowed.
 //!
 //! During a transfer the connection's fd is put in **blocking** mode (see
 //! `peer::set_blocking`) and the writer is gated, so these helpers have exclusive use of the

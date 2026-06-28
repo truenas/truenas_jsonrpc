@@ -1,4 +1,5 @@
-//! Authentication layer for `truenas-jsonrpc`.
+//! The **Authentication** cross-cutting concern for `truenas-jsonrpc` (attaches at the
+//! negotiate/setup handshake — not a per-message layer).
 //!
 //! A Rust port of the TrueNAS middleware auth mixin (`truenas_pyjsonrpc/mixins/auth/`), **without
 //! PAM** and with a greenfield wire schema. The shape:

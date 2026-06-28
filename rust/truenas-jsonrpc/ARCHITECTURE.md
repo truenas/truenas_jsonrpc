@@ -12,8 +12,9 @@ Rust API (`JsonRpcProtocol::dispatch`, the `Outbound` sink, handler closures, �
 > [python/truenas_pyjsonrpc/ARCHITECTURE.md](../../python/truenas_pyjsonrpc/ARCHITECTURE.md).
 > Read the root for the wire; read this for the Rust mapping.
 
-It is JSON-RPC 2.0 with the deliberate refinements in the root doc (§9): no batch,
-UUID-only ids, by-name params only, reserved `rpc.`/`$/` namespaces.
+It is JSON-RPC 2.0 with the deliberate refinements in the root doc (§9): UUID-only ids, by-name
+params only, reserved `rpc.`/`$/` namespaces, and JSON-RPC 2.0 batch on the JSON wire (an *empty*
+array → `INVALID_REQUEST`).
 
 **Status.** This crate is the transport-agnostic **dispatch core**. The required spine —
 `$/sessionSetup` authentication and the normal method-call pipeline — is implemented and
@@ -123,8 +124,9 @@ held across an `.await`); a setup handler writes it via `session.set_internal(s)
 `dispatch(wire, &session)` runs, per message (mirrors the root §3 and the Python flow,
 so the two produce identical wire results — verified in §12):
 
-1. **Parse** the envelope. Malformed JSON → `INVALID_JSON`; a valid non-object (incl. a
-   top-level array/batch) → `INVALID_REQUEST`.
+1. **Parse** the envelope. Malformed JSON → `INVALID_JSON`; a valid non-object → `INVALID_REQUEST`
+   (a top-level **array** is a JSON-RPC 2.0 batch — each element runs this flow; an *empty* array →
+   `INVALID_REQUEST`).
 2. **Resolve `id`.** Present → must be a canonical UUID string (8-4-4-4-12 hex,
    case-insensitive; validated allocation-free). Absent → a **notification** (no reply).
 3. **Structural checks:** `jsonrpc == "2.0"`; `method` a non-empty string. (Steps 1–3 are
@@ -171,8 +173,9 @@ audited** (secret fields redacted). Setup runs on the blocking pool (its crypto 
 `CancelTarget` exposing the target's `session_id`, so policy can enforce "cancel only your
 own"), then sets the request's cooperative cancel flag and runs the optional `Canceller`.
 
-> `$/negotiate` is a **transport-layer** message (the named-protocol front door); the core
-> never sees it. A directly-embedded core picks its protocol — no negotiation.
+> `$/negotiate` is a **server-side** message (the named-protocol front door, handled at the
+> Transport tier); the core never sees it. A directly-embedded core picks its protocol — no
+> negotiation.
 
 ## 6. The back-channel — progress + pub/sub
 
@@ -364,7 +367,7 @@ Tracked against the full-parity plan; the wire contract for each is in the root 
 | name | code | meaning |
 |---|---|---|
 | `InvalidJson` | -32700 | malformed JSON |
-| `InvalidRequest` | -32600 | bad envelope (non-UUID id, top-level array) |
+| `InvalidRequest` | -32600 | bad envelope (non-UUID id, empty top-level array) |
 | `MethodNotFound` | -32601 | unknown method |
 | `InvalidParams` | -32602 | params failed decode/validation |
 | `InternalError` | -32603 | unexpected handler/return fault |

@@ -42,12 +42,12 @@ strata, bottom → top:
 
 Two layer boundaries are deliberately **negotiable**, not clean cuts — name them when reasoning about a new wire:
 
-- **Framing ↔ codec (where addressing lives).** *Which* layer recovers the request's opcode + id is
+- **Framing ↔ Codec (where addressing lives).** *Which* layer recovers the request's opcode + id is
   protocol-dependent. Today the length prefix is framing but the TXDR `proc_id`/`rid` ride *inside* the body
   (recovered by codec/envelope); a header-carrying wire — SMB DSI's 16-byte header, ONC-RPC record marking —
   puts opcode + id in the *framing* header, so a pluggable `Framing` trait must surface `{opcode,
   request_id, body}`. See [FRAMING.md](FRAMING.md).
-- **Envelope ↔ dispatch (per-protocol vs reusable).** The dispatch op-table is wire-neutral and reusable;
+- **Envelope ↔ Dispatch (per-protocol vs reusable).** The dispatch op-table is wire-neutral and reusable;
   the envelope + control-plane are per-protocol. A new protocol reuses the op-table but brings its own
   envelope and control verbs — the `dyn ProtocolEngine` direction in
   [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md) (Gaps 3–4).
@@ -211,7 +211,7 @@ The `$/` and `rpc.` prefixes are reserved — user methods can't use them. An un
 
 | message | direction | id | lifecycle | authz | audited | purpose |
 |---|---|---|---|---|---|---|
-| `$/negotiate` | client → server | yes | pre-session | no | no | select one of the server's named protocols (server-layer; see below) |
+| `$/negotiate` | client → server | yes | pre-session | no | no | select one of the server's named protocols (server-side; see below) |
 | `$/progress` | server → client | — | n/a | — | — | progress for an in-flight request |
 | `$/serverInfo` | client → server | yes | any but `CLOSED` | no | no | unauthenticated server-identity probe (opt-in) |
 | `$/sessionSetup` | client → server | yes | `NONE` | no (is auth) | yes | first auth step (opt-in) |
@@ -223,7 +223,7 @@ The `$/` and `rpc.` prefixes are reserved — user methods can't use them. An un
 **`$/negotiate`** is the unauthenticated front door: a connection's first message is
 `$/negotiate {protocol}`; the server binds one of its named protocols and replies
 `{protocol, server, available}`, then creates the session. The full flow is `$/negotiate
-→ $/sessionSetup → API calls`. (It is a server-layer concern: a dispatch core embedded
+→ $/sessionSetup → API calls`. (It is a server-side concern: a dispatch core embedded
 directly, with a single protocol, needs no negotiation.)
 
 **`$/sessionSetup` / `$/sessionSetupContinue`** authenticate. The handler returns the
@@ -314,7 +314,7 @@ any method.
 
 ### The wire handshake — `$/transferReady` / `$/transferGo`
 
-These are server-layer control messages, correlated by the request id (like
+These are server-side control messages, correlated by the request id (like
 `$/progress`). The **invariant:** the *consumer* must pause its reader **before** the
 *producer* writes a stream byte, so every byte lands in the kernel buffer the fd-owning
 handler reads from (the framing layer's userspace buffer is bypassed).
@@ -453,7 +453,7 @@ omits them (or sends `"params": {}`) gets the full, unfiltered list.
 | name | code | meaning |
 |---|---|---|
 | `INVALID_JSON` | -32700 | malformed JSON ("Parse error") |
-| `INVALID_REQUEST` | -32600 | bad envelope (incl. non-UUID id, top-level array) |
+| `INVALID_REQUEST` | -32600 | bad envelope (incl. non-UUID id, empty top-level array) |
 | `METHOD_NOT_FOUND` | -32601 | unknown method |
 | `INVALID_PARAMS` | -32602 | params failed decode/validation (by-name only) |
 | `INTERNAL_ERROR` | -32603 | unexpected handler/return fault |

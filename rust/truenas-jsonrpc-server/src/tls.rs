@@ -1,5 +1,6 @@
-//! TLS transport over the **system** OpenSSL (the opt-in `tls` feature), in two configurable
-//! modes (see [`TlsMode`]) — a port of Python's `_ktls` plus the ordinary userspace-TLS path.
+//! TLS transport (the **Transport** layer, layer 1) over the **system** OpenSSL (the opt-in `tls`
+//! feature), in two configurable modes (see [`TlsMode`]) — a port of Python's `_ktls` plus the
+//! ordinary userspace-TLS path.
 //!
 //! - **Kernel TLS** ([`TlsMode::Kernel`]): only the *handshake* touches userspace OpenSSL
 //!   (over a socket BIO, so OpenSSL holds the fd and can install kTLS). We then confirm the
@@ -82,7 +83,7 @@ impl TlsConfig {
     /// (mTLS) against `client_ca_pem`. Verification is `PEER` (not fail-if-absent): a client that
     /// sends no certificate still completes the handshake (and may use another mechanism), while a
     /// presented certificate must chain to `client_ca_pem` or the handshake fails. The verified
-    /// client cert is surfaced on [`Peer::tls`](crate::Peer::tls) for the auth layer.
+    /// client cert is surfaced on [`Peer::tls`](crate::Peer::tls) for the auth stack.
     pub fn from_pem_with_client_ca(
         cert_pem: &[u8],
         key_pem: &[u8],
@@ -244,7 +245,7 @@ fn build_acceptor(
     Ok(builder.build())
 }
 
-/// The TLS facts a completed handshake surfaces to the auth layer: `(verified client cert DER,
+/// The TLS facts a completed handshake surfaces to the auth stack: `(verified client cert DER,
 /// tls-server-end-point channel binding)` — either may be `None`.
 type TlsFacts = (Option<Vec<u8>>, Option<Vec<u8>>);
 

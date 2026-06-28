@@ -49,7 +49,7 @@ erasure, and `ErasedTransfer` (`method.rs:56-101`, `method.rs:262-335`). The han
 `A: DeserializeOwned + Serialize, R: Serialize` (`method.rs:108-113`). Two consequences:
   - A third *serde-shaped* wire means adding a third method-pair (`afp_decode`/`afp_run`) to **every**
     erased trait — the N×M open-coding explosion — unless this is refactored into one `Codec` seam.
-  - A *non-serde* protocol can't satisfy the bound cleanly, and the authz/audit layer still wants a
+  - A *non-serde* protocol can't satisfy the bound cleanly, and the authz/audit seam still wants a
     `serde_json::Value` (the XDR path *reflects* its decoded params into one precisely so authz/audit
     keep working — `method.rs:133-136`). A protocol whose messages aren't serde-shaped can't produce
     that Value for free.
@@ -116,7 +116,7 @@ multi-month effort, and its payoff is **gated on the target protocol being serde
   attack surface — the most security-sensitive code in the stack.
 - **A second codegen backend + a richer IDL.** json-idl is a JSON-Schema subset; it cannot express
   AFP's bitmaps, offset back-patching, or fixed-record layouts. Supporting a non-serde wire means
-  either a new IDL dialect + emitter to maintain, or the author hand-writes the wire layer (which, for
+  either a new IDL dialect + emitter to maintain, or the author hand-writes the body codec (which, for
   AFP, they will — see below).
 
 ## Performance costs
@@ -239,8 +239,9 @@ SMB exercises only the transport/authz half** — the same half AFP would, with 
 - `truenas-jsonrpc-codegen/src/{lib.rs,model.rs,emit_server.rs}` — three serde-struct emitters, no
   backend trait; XDR as a per-struct derive toggle (`emit_server.rs:96,124`). **A non-serde wire needs
   a new backend + IDL here.**
-- `truenas-xdr/src/frame.rs` — the magic-prefixed framing TXDR uses; the existence proof for Tier 1,
-  and the natural template for a fixed-record showcase protocol.
+- `truenas-xdr/src/frame.rs` — the magic-prefixed in-body TXDR frame/envelope (codec/envelope-side
+  addressing, not the Framing layer — see FRAMING.md); the existence proof for Tier 1, and the
+  natural template for a fixed-record showcase protocol.
 
 ## Tier 2 A/B performance comparison (measured)
 

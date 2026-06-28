@@ -1,7 +1,8 @@
 # truenas-xdr
 
-A serde-based XDR (RFC 4506) codec plus the TXDR binary frame, for the TrueNAS JSON-RPC
-binary wire. Byte-exact against the cross-language golden vectors.
+A serde-based XDR (RFC 4506) codec plus the TXDR binary frame — the **Codec** layer (layer 3) of the
+[layer stack](../../ARCHITECTURE.md#layers) — for the TrueNAS JSON-RPC binary wire. Byte-exact against
+the cross-language golden vectors.
 
 ## Public API
 
@@ -10,8 +11,8 @@ binary wire. Byte-exact against the cross-language golden vectors.
 - `XdrError`, `Strictness` (`Lenient` default / `Strict`).
 - Opaque wrappers: `VarOpaque` (length-prefixed) and `FixedOpaque<N>` (fixed, no prefix) —
   needed because stock serde would encode `[u8; N]` / `Vec<u8>` as 4-byte ints.
-- `frame` module: the TXDR request/reply framing (`MAGIC`, `VERSION`, `RESERVED_PROC_MAX`,
-  `build_request`, `parse_reply`, …).
+- `frame` module: the TXDR request/reply **frame** — the in-body XDR envelope (`MAGIC`, `VERSION`,
+  `RESERVED_PROC_MAX`, `build_request`, `parse_reply`, …).
 - With the `derive` feature (default): `#[derive(XdrEnum)]` / `#[derive(XdrUnion)]` (re-exported
   from `truenas-xdr-derive`).
 

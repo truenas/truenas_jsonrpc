@@ -1,4 +1,4 @@
-//! Name-service (NSS) lookups for the auth layer.
+//! Name-service (NSS) lookups for the auth stack.
 //!
 //! Scoped to what authorization needs today — the **passwd** database (the [`passwd`] module):
 //! [`getpwnam`] resolves a SCRAM username to its account so roles can be keyed off the **uid**, and

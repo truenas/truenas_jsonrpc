@@ -33,10 +33,11 @@ There are four envelope shapes:
 {"jsonrpc": "2.0", "method": "pool.events", "params": {"name": "tank", "state": "ONLINE"}}
 ```
 
-Deliberate refinements of JSON-RPC 2.0: **no batch** (a top-level array is `INVALID_REQUEST`),
-**UUID-only ids** (a present `id` must be a canonical UUID string), **by-name params only**
-(`params` must be an object — no positional arrays), and the **reserved `$/` and `rpc.`
-prefixes** (only the control messages below may use `$/`).
+Deliberate refinements of JSON-RPC 2.0: **UUID-only ids** (a present `id` must be a canonical UUID
+string), **by-name params only** (`params` must be an object — no positional arrays), and the
+**reserved `$/` and `rpc.` prefixes** (only the control messages below may use `$/`). JSON-RPC 2.0
+**batch** (a top-level array) is supported on the JSON wire — an *empty* array is `INVALID_REQUEST`
+per spec.
 
 **Control messages** (`$/` namespace, handled by the server/runtime — not application
 methods):
@@ -95,7 +96,7 @@ distinct:
 | code | meaning |
 |------|---------|
 | `-32700` | parse error — malformed JSON |
-| `-32600` | invalid request — bad envelope (non-object, non-UUID id, batch) |
+| `-32600` | invalid request — bad envelope (non-object, non-UUID id, empty array) |
 | `-32601` | method not found |
 | `-32602` | invalid params — failed by-name decode/validation |
 | `-32603` | internal error — unexpected fault |

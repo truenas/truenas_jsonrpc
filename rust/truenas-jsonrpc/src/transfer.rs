@@ -1,6 +1,7 @@
-//! Raw-fd transfer methods — lend a handler exclusive access to the connection's socket
-//! file descriptor for a **self-delimiting** bulk stream (e.g. libzfs
-//! `lzc_send`/`lzc_receive` for `zfs send`/`recv`), then resume normal JSON-RPC.
+//! Raw-fd transfer methods (a **Dispatch**-layer method kind; the handshake is a **Control-plane**
+//! concern) — lend a handler exclusive access to the connection's socket file descriptor for a
+//! **self-delimiting** bulk stream (e.g. libzfs `lzc_send`/`lzc_receive` for `zfs send`/`recv`),
+//! then resume normal JSON-RPC.
 //!
 //! A transfer method runs in two steps (mirroring Python's `JSONRPCFdTransferMethod`): a
 //! `negotiate` callback validates the request and returns an interim "ready" result, and —

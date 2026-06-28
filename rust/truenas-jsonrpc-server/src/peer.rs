@@ -1,4 +1,5 @@
-//! The connected peer's identity — handed to the server's state-from-peer builder so the
+//! The connected peer's identity — the **Transport** layer (layer 1): the [`Transport`] kind,
+//! [`Peer`], and [`TransportPosture`]. Handed to the server's state-from-peer builder so the
 //! per-connection session state (the protocol's `S`) can carry the caller's credentials /
 //! address. Mirrors how Python's server sets `server_state` to the peer.
 
@@ -16,7 +17,7 @@ pub enum Transport {
     Tcp,
 }
 
-/// The trust/encryption posture a listener declares for its connections — what the auth layer may
+/// The trust/encryption posture a listener declares for its connections — what the auth stack may
 /// rely on. A property of the underlying socket + TLS termination, **independent of framing** (raw
 /// JSON-RPC and WebSocket over the same socket share a posture). A connection with no posture
 /// (`Peer::posture == None`) — plain TCP or userspace-TLS — is not trusted and may not authenticate.
@@ -119,7 +120,7 @@ pub struct Peer {
     /// TLS context — `Some` iff the connection is TLS / `wss` (so its presence marks the channel
     /// encrypted). Carries the verified client certificate (mTLS) and the channel-binding value.
     pub tls: Option<TlsPeer>,
-    /// The listener's declared [`TransportPosture`] — the trust the auth layer may rely on. `None` =
+    /// The listener's declared [`TransportPosture`] — the trust the auth stack may rely on. `None` =
     /// an insecure / undeclared transport (plain TCP, userspace-TLS) that may not authenticate.
     pub posture: Option<TransportPosture>,
     /// The real client behind a reverse proxy, if a `forwarded_extractor` recovered it on a
@@ -127,7 +128,7 @@ pub struct Peer {
     pub forwarded: Option<ForwardedOrigin>,
 }
 
-/// TLS facts about a connection, surfaced to the authentication layer.
+/// TLS facts about a connection, surfaced to the auth stack.
 #[derive(Clone, Debug, Default)]
 pub struct TlsPeer {
     /// The verified client certificate (DER), if the peer presented one (mTLS). `None` if the

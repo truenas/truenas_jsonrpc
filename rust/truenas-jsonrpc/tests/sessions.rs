@@ -93,7 +93,7 @@ async fn sessions_gate_listing_and_audit() {
 async fn default_entry_surfaces_origin_credential_and_current() {
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0").build();
 
-    // A privileged local (AF_UNIX root) session with a credential set by the auth layer.
+    // A privileged local (AF_UNIX root) session with a credential set by the auth stack.
     let root = proto.new_session(Some(()), Arc::new(NullOutbound));
     root.set_origin(SessionOrigin { transport: "unix", remote: None, uid: Some(0), secure: true });
     root.set_credential(Credential { description: "UNIX_SOCKET uid=0".into(), uid: Some(0) });

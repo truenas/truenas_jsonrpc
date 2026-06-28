@@ -1,7 +1,7 @@
-//! `SCM_RIGHTS` control-frame primitives for the passthrough broker (the `passthrough` feature):
-//! send / receive a small header together with a single passed file descriptor over an AF_UNIX
-//! socket. The auth layer above uses these to hand a client connection's fd to a local
-//! authentication broker (and, on the broker side, to receive it).
+//! `SCM_RIGHTS` control-frame primitives (the **Transport** layer, layer 1) for the passthrough
+//! broker (the `passthrough` feature): send / receive a small header together with a single passed
+//! file descriptor over an AF_UNIX socket. The auth crate above uses these to hand a client
+//! connection's fd to a local authentication broker (and, on the broker side, to receive it).
 //!
 //! Like [`transfer`](crate::FileTransferExt), the `unsafe` is confined here: the `nix`
 //! `sendmsg` / `recvmsg` wrappers are safe; only `CMSG_SPACE` (a size calc) and adopting a

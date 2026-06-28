@@ -9,7 +9,7 @@
 
 use serde::{Deserialize, Serialize};
 
-/// The control-method name. Server-layer; reserved like the protocol's `$/` names.
+/// The control-method name. Server-side; reserved like the protocol's `$/` names.
 pub(crate) const NEGOTIATE_METHOD: &str = "$/negotiate";
 
 /// `$/negotiate` request params.

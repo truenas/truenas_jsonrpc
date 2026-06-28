@@ -28,7 +28,7 @@ reply bytes (or a directive); it owns no socket. For a runnable transport see
   walking every protocol's session registry, so the list is **server-wide** across protocols). Each
   entry's core base carries `session_id`, the monotonic `age_seconds` + derived wall-clock
   `created_at`, `lifecycle`, `protocol`, `current` (the calling session), and — when the server/auth
-  layers attach them — the connection `origin` / `secure_transport` / `internal` and a standardized
+  set them — the connection `origin` / `secure_transport` / `internal` and a standardized
   `credential` (`{ description, uid }`).
 - Authorization is a native role gate, not a callback: `Roles` interns role *names* to a
   `RoleMask` — a `u64` bitset, so **at most 64 roles**. A method's `roles` become its required

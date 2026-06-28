@@ -1,6 +1,6 @@
-//! Session-setup outcomes that can **take over the connection** — the seam for passthrough
-//! authentication, where the handshake is completed out-of-band by handing the connection's fd to
-//! a broker (see `truenas-jsonrpc-auth`'s passthrough mechanism).
+//! Session-setup outcomes that can **take over the connection** — the **Control-plane** session-setup
+//! seam for passthrough **Authentication**, where the handshake is completed out-of-band by handing
+//! the connection's fd to a broker (see `truenas-jsonrpc-auth`'s passthrough mechanism).
 //!
 //! A normal `$/sessionSetup` handler finishes synchronously: it returns
 //! [`SetupOutcome::Commit`] and the core commits the lifecycle + reply. A passthrough handler

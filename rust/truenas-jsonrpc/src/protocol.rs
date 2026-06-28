@@ -543,7 +543,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     }
 
     /// Register a python-backed method (`python:true`): no Rust handler — the body runs via
-    /// the configured [`PyDispatcher`]. The spine still routes/gates/authorizes/audits it;
+    /// the configured [`PyDispatcher`]. The core still routes/gates/authorizes/audits it;
     /// only the body crosses into Python. Set the dispatcher with
     /// [`python_dispatcher`](Self::python_dispatcher).
     pub fn python_method(mut self, def: MethodDef) -> BuildResult<Self> {
@@ -2007,7 +2007,7 @@ fn build_session_view<S>(session: &Session<S>) -> Vec<u8> {
 /// The core base `$/sessions` entry, as a JSON object **map** (so [`render_session`] folds in
 /// `current` + any [`SessionInfo`] extras without an unreachable non-object branch): `session_id`,
 /// the monotonic `age_seconds` plus the derived wall-clock `created_at`, `lifecycle`, `protocol`,
-/// and — when the server / auth layers attached them — the connection `origin` / `secure_transport`
+/// and — when the server / auth set them — the connection `origin` / `secure_transport`
 /// / `internal` and the authenticated `credential`. An embedder's renderer augments this with the
 /// per-connection identity it reads from `S` (which the generic protocol can't see).
 fn default_session_entry<S>(session: &Session<S>, now_unix: f64) -> serde_json::Map<String, Value> {
@@ -2027,7 +2027,7 @@ fn default_session_entry<S>(session: &Session<S>, now_unix: f64) -> serde_json::
         entry.insert("secure_transport".to_string(), Value::Bool(o.secure));
         entry.insert("internal".to_string(), Value::Bool(o.transport == "unix" && o.uid == Some(0)));
     }
-    // Authenticated credential summary (set by the auth layer at `$/sessionSetup`).
+    // Authenticated credential summary (set by the auth stack at `$/sessionSetup`).
     session.with_credential(|c| {
         if let Some(c) = c {
             entry.insert(

@@ -1,5 +1,5 @@
 //! Method definitions + the type-erased registry entry. Home of the **Codec** seam (layer 3:
-//! `Codec`/`WireParams`/`WireReply`) and the **Dispatch**-layer method erasure (`Method`/`MethodImpl`).
+//! `Codec`/`WireParams`/`WireReply`) and the **Dispatch** (layer 5) method erasure (`Method`/`MethodImpl`).
 //!
 //! A consumer registers a [`JsonRpcMethod`] (sync handler — the common case) or an
 //! [`AsyncJsonRpcMethod`] (async handler). The handler is any closure / `fn`
@@ -700,10 +700,10 @@ pub(crate) enum MethodImpl<S> {
     /// finalize logic lives inside the erased `run`); a distinct variant only so a future
     /// `describe()`/codegen can recover its filterable-ness and `entry` type.
     Filterable(Box<dyn ErasedSync<S>>),
-    /// A `python:true` method: no Rust handler. The spine routes/gates/authorizes/audits it,
+    /// A `python:true` method: no Rust handler. The core routes/gates/authorizes/audits it,
     /// then runs the body via the `PyDispatcher` seam. `S`-independent (like `Subscription`).
     Python,
-    /// A raw-fd transfer method. The spine routes/gates/authorizes it, runs `negotiate`, and
+    /// A raw-fd transfer method. The core routes/gates/authorizes it, runs `negotiate`, and
     /// returns a [`crate::Transfer`] directive for the server to drive the fd handoff. The
     /// erased callbacks are held in an `Arc` so the directive's deferred `complete` closure
     /// can run `transfer` after the handshake. `direction`/`af_unix` drive that handshake.

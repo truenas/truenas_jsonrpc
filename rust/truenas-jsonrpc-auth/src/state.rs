@@ -1,11 +1,11 @@
-//! [`AuthSession`] — the per-connection server-internal state (`S`) the auth layer owns.
+//! [`AuthSession`] — the per-connection server-internal state (`S`) the auth stack owns.
 
 use truenas_jsonrpc_server::Peer;
 
 use crate::channel::Channel;
 use crate::outcome::{AuthProgress, Identity};
 
-/// The protocol/server's per-connection state when the auth layer is installed. It carries the
+/// The protocol/server's per-connection state when the auth stack is installed. It carries the
 /// immutable [`Channel`] (what the transport offers) and the evolving auth [`AuthSessionState`].
 ///
 /// Seed it on the server with `.state_from_peer(AuthSession::from_peer)`; the setup handlers

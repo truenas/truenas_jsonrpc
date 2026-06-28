@@ -25,7 +25,7 @@ impl<'de> XdrDeserializer<'de> {
         Self { input, pos: 0, mode, fixed_pending: false }
     }
 
-    /// The bytes not yet consumed (used by the frame layer to slice params/results).
+    /// The bytes not yet consumed (used by the `frame` module to slice params/results).
     pub fn remaining(&self) -> &'de [u8] {
         &self.input[self.pos..]
     }

@@ -1,4 +1,4 @@
-//! Role-based authorization primitives.
+//! Role-based authorization primitives — the **Authorization** cross-cutting concern.
 //!
 //! Authorization is a **native gate**, not a closure: a method declares the roles it requires (a
 //! [`RoleMask`]), the session carries the roles its identity was granted (set once at
@@ -68,7 +68,7 @@ impl RoleMask {
 
 /// Interns role **names** to bits so a method's declared roles and a session's granted roles share
 /// one numbering. Build it once from the canonical role list and share it (clone the handle) between
-/// the protocol builder (which interns each method's `required` mask at build) and the auth layer
+/// the protocol builder (which interns each method's `required` mask at build) and the auth stack
 /// (which interns a session's `granted` mask at `sessionSetup`).
 #[derive(Clone, Debug, Default)]
 pub struct Roles {
