@@ -161,6 +161,14 @@ pub(crate) trait ErasedSync<S>: Send + Sync {
         decoded: Box<dyn Any + Send>,
         cx: &RequestCtx<S>,
     ) -> Result<WireReply, JsonRpcError>;
+    /// Run the handler on already-decoded params and return the **typed** result boxed, with **no
+    /// wire encode** — the in-process path used by [`RequestCtx::call_op`]. A method that is not a
+    /// plain request/response (e.g. filterable) returns an "not internally callable" error.
+    fn run_value(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: &RequestCtx<S>,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError>;
 }
 
 #[async_trait]
@@ -179,6 +187,12 @@ pub(crate) trait ErasedAsync<S>: Send + Sync {
         decoded: Box<dyn Any + Send>,
         cx: RequestCtx<S>,
     ) -> Result<WireReply, JsonRpcError>;
+    /// See [`ErasedSync::run_value`] — the async in-process path (no wire encode).
+    async fn run_value(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: RequestCtx<S>,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError>;
 }
 
 struct ClosureSync<A, R, F> {
@@ -190,7 +204,7 @@ impl<S, A, R, F> ErasedSync<S> for ClosureSync<A, R, F>
 where
     S: Send + Sync + 'static,
     A: DeserializeOwned + Serialize + Send + 'static,
-    R: Serialize,
+    R: Serialize + Send + 'static,
     F: Fn(A, &RequestCtx<S>) -> Result<R, JsonRpcError> + Send + Sync,
 {
     fn decode(
@@ -212,6 +226,16 @@ where
         let result = (self.f)(accepts, cx)?;
         codec.encode_result(&result)
     }
+    fn run_value(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: &RequestCtx<S>,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        let accepts = *decoded
+            .downcast::<A>()
+            .expect("decoded params type matches the method");
+        Ok(Box::new((self.f)(accepts, cx)?))
+    }
 }
 
 struct ClosureAsync<A, R, Fut, F> {
@@ -225,7 +249,7 @@ impl<S, A, R, Fut, F> ErasedAsync<S> for ClosureAsync<A, R, Fut, F>
 where
     S: Send + Sync + 'static,
     A: DeserializeOwned + Serialize + Send + 'static,
-    R: Serialize + Send,
+    R: Serialize + Send + 'static,
     Fut: Future<Output = Result<R, JsonRpcError>> + Send,
     F: Fn(A, RequestCtx<S>) -> Fut + Send + Sync,
 {
@@ -247,6 +271,16 @@ where
             .expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx).await?;
         codec.encode_result(&result)
+    }
+    async fn run_value(
+        &self,
+        decoded: Box<dyn Any + Send>,
+        cx: RequestCtx<S>,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        let accepts = *decoded
+            .downcast::<A>()
+            .expect("decoded params type matches the method");
+        Ok(Box::new((self.f)(accepts, cx).await?))
     }
 }
 
@@ -388,6 +422,13 @@ where
                 finalize_xdr(out).map(WireReply::Xdr)
             }
         }
+    }
+    fn run_value(
+        &self,
+        _decoded: Box<dyn Any + Send>,
+        _cx: &RequestCtx<S>,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        Err(JsonRpcError::internal("filterable methods are not internally callable"))
     }
 }
 
@@ -703,7 +744,7 @@ impl<F> JsonRpcMethod<F> {
     where
         S: Send + Sync + 'static,
         A: DeserializeOwned + Serialize + Send + 'static,
-        R: Serialize + 'static,
+        R: Serialize + Send + 'static,
         F: Fn(A, &RequestCtx<S>) -> Result<R, JsonRpcError> + Send + Sync + 'static,
     {
         Method {

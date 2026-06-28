@@ -7,12 +7,14 @@
 //! runs its whole pipeline (decode → authorize → handler → audit) on a `spawn_blocking`
 //! worker (Python's `ThreadPoolExecutor`); an [`AsyncJsonRpcMethod`] is awaited.
 
+use std::any::Any;
 use std::collections::HashMap;
 use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
+use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::value::{to_raw_value, RawValue};
@@ -26,7 +28,7 @@ use crate::method::{
     MethodMeta, SubscriptionDef, SubscriptionImpl, WireParams, WireReply,
 };
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
-use crate::request::RequestCtx;
+use crate::request::{InternalCaller, RequestCtx};
 use crate::role::{RoleMask, Roles};
 use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SessionOrigin, SystemClock, UuidGen};
 use crate::setup::{SetupHandoff, SetupOutcome, SetupTakeover};
@@ -313,6 +315,8 @@ pub struct JsonRpcProtocolBuilder<S> {
     methods: HashMap<Arc<str>, Arc<Method<S>>>,
     /// XDR-enabled methods, keyed by proc-id (a subset of `methods`, sharing the `Arc`).
     xdr_methods: HashMap<u32, Arc<Method<S>>>,
+    /// Opt-in: emit one audit record per **elevated** in-process call. Off by default.
+    audit_elevated: bool,
     /// The role registry: interns each method's declared role names → a `required` mask at build.
     role_registry: Option<Roles>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
@@ -335,6 +339,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             version: version.into(),
             methods: HashMap::new(),
             xdr_methods: HashMap::new(),
+            audit_elevated: false,
             role_registry: None,
             audit_sink: None,
             canceller: None,
@@ -347,6 +352,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             id_gen: Arc::new(UuidGen),
             clock: Arc::new(SystemClock),
         }
+    }
+
+    /// Emit one audit record per **elevated** in-process call ([`RequestCtx::call_op_elevated`]).
+    /// Off by default — internal calls are otherwise unaudited, so routine privileged housekeeping
+    /// creates no audit churn; enable only where every privilege elevation must be logged.
+    pub fn audit_internal_elevated(mut self, on: bool) -> Self {
+        self.audit_elevated = on;
+        self
     }
 
     fn insert(&mut self, mut method: Method<S>) -> BuildResult<()> {
@@ -399,7 +412,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     where
         F: Fn(A, &RequestCtx<S>) -> Result<R, JsonRpcError> + Send + Sync + 'static,
         A: DeserializeOwned + Serialize + Send + 'static,
-        R: Serialize + 'static,
+        R: Serialize + Send + 'static,
     {
         self.insert(method.erase::<S, A, R>())?;
         Ok(self)
@@ -617,11 +630,17 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     /// Freeze into a [`JsonRpcProtocol`].
     pub fn build(self) -> JsonRpcProtocol<S> {
         let has_session_setup = self.setup.is_some();
+        let registry = Arc::new(Registry { methods: self.methods, xdr_methods: self.xdr_methods });
+        let caller: Arc<dyn InternalCaller<S>> = Arc::new(Caller {
+            registry: registry.clone(),
+            audit_sink: self.audit_sink.clone(),
+            audit_elevated: self.audit_elevated,
+        });
         JsonRpcProtocol {
             name: self.name,
             version: self.version,
-            methods: self.methods,
-            xdr_methods: self.xdr_methods,
+            registry,
+            caller,
             audit_sink: self.audit_sink,
             canceller: self.canceller,
             server_info: self.server_info,
@@ -648,8 +667,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
 pub struct JsonRpcProtocol<S> {
     name: Arc<str>,
     version: Arc<str>,
-    methods: HashMap<Arc<str>, Arc<Method<S>>>,
-    xdr_methods: HashMap<u32, Arc<Method<S>>>,
+    registry: Arc<Registry<S>>,
+    /// The in-process call seam threaded into each request's [`RequestCtx`]: looks up + runs a
+    /// registered method from within a handler. Built once over `registry` at [`build`].
+    caller: Arc<dyn InternalCaller<S>>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     canceller: Option<Arc<dyn Canceller<S>>>,
     server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
@@ -765,7 +786,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         topic: &str,
         payload: &P,
     ) -> Result<(), JsonRpcError> {
-        let sub_impl = match self.methods.get(topic).map(|m| &m.imp) {
+        let sub_impl = match self.registry.methods.get(topic).map(|m| &m.imp) {
             Some(MethodImpl::Subscription(s)) => s,
             _ => {
                 return Err(JsonRpcError::internal(format!(
@@ -829,7 +850,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             return finish(note, self.xdr_error(rid, &JsonRpcError::session_not_established("Session is closed")));
         }
         // Method lookup by proc-id.
-        let method = match self.xdr_methods.get(&request.proc_id) {
+        let method = match self.registry.xdr_methods.get(&request.proc_id) {
             Some(m) => m.clone(),
             None => {
                 return finish(note, self.xdr_error(rid, &JsonRpcError::method_not_found("Method not found")))
@@ -869,7 +890,13 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // An async method runs inline (it yields, so it can't stall the reactor — parity with the
         // JSON async path); a sync/filterable method runs on the blocking pool.
         let is_async = matches!(method.imp, MethodImpl::Async(_));
-        let cx = RequestCtx::new_xdr(rid, session.clone(), self.never_cancel.clone(), method.meta.audit);
+        let cx = RequestCtx::new_xdr(
+            rid,
+            session.clone(),
+            self.never_cancel.clone(),
+            method.meta.audit,
+            Some(self.caller.clone()),
+        );
         let pipeline = Pipeline {
             method,
             session: session.clone(),
@@ -937,7 +964,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             _ => {}
         }
 
-        let method = match self.methods.get(parsed.method.as_str()) {
+        let method = match self.registry.methods.get(parsed.method.as_str()) {
             Some(m) => m.clone(),
             None => {
                 return finish(
@@ -1015,7 +1042,13 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         } else {
             self.never_cancel.clone()
         };
-        let cx = RequestCtx::new(rid.clone(), session.clone(), cancel, method.meta.audit);
+        let cx = RequestCtx::new(
+            rid.clone(),
+            session.clone(),
+            cancel,
+            method.meta.audit,
+            Some(self.caller.clone()),
+        );
         // The authz/audit snapshot (a full re-parse of params into a `Value`) is only
         // needed when an authorizer or an audited method will actually read it.
         let need_snapshot = method.meta.audit;
@@ -1183,7 +1216,13 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
 
         // Negotiate → the interim "ready" result (a refusal is audited like a handler error).
-        let cx = RequestCtx::new(Some(rid.clone()), session.clone(), self.never_cancel.clone(), method.meta.audit);
+        let cx = RequestCtx::new(
+            Some(rid.clone()),
+            session.clone(),
+            self.never_cancel.clone(),
+            method.meta.audit,
+            Some(self.caller.clone()),
+        );
         let interim = match erased.negotiate(decoded.as_ref(), &cx) {
             Ok(raw) => raw,
             Err(e) => {
@@ -1657,6 +1696,109 @@ fn role_gate<S>(required: RoleMask, session: &Session<S>) -> Result<(), JsonRpcE
     }
 }
 
+/// The op registry — the two keyed tables (`methods` by name, `xdr_methods` by proc-id) sharing one
+/// `Arc<Method>` per method. Shared between the protocol's wire dispatch and the in-process call
+/// seam ([`Caller`]).
+pub(crate) struct Registry<S> {
+    pub methods: HashMap<Arc<str>, Arc<Method<S>>>,
+    pub xdr_methods: HashMap<u32, Arc<Method<S>>>,
+}
+
+/// The [`InternalCaller`] impl: look a method up in the [`Registry`], gate it (unless `elevated`),
+/// run it in-process, and — only under the opt-in `audit_elevated` policy — record one audit entry.
+struct Caller<S> {
+    registry: Arc<Registry<S>>,
+    audit_sink: Option<Arc<dyn AuditSink<S>>>,
+    audit_elevated: bool,
+}
+
+impl<S: Send + Sync + 'static> Caller<S> {
+    async fn run(
+        &self,
+        method: Arc<Method<S>>,
+        args: Box<dyn Any + Send>,
+        cx: RequestCtx<S>,
+        elevated: bool,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        // Caller-privileged by default: the same role gate the wire path applies. `elevated` skips
+        // it (full admin) — for a handler that needs privileged internal state.
+        if !elevated {
+            role_gate(method.meta.required, cx.session())?;
+        }
+        // Capture what the opt-in elevated-audit record needs before `cx`/`method` are consumed.
+        let audit =
+            (elevated && self.audit_elevated).then(|| (method.meta.clone(), cx.session().clone()));
+        let outcome = run_method_value(method, args, cx).await;
+        if let (Some((meta, session)), Some(sink)) = (audit, &self.audit_sink) {
+            let req = JsonRpcRequest {
+                method: meta.name.to_string(),
+                id: None,
+                params: Value::Null,
+                roles: meta.roles.to_vec(),
+            };
+            audit_call(sink.as_ref(), &meta, &req, audit_outcome(&outcome), None, &session);
+        }
+        outcome
+    }
+}
+
+#[async_trait]
+impl<S: Send + Sync + 'static> InternalCaller<S> for Caller<S> {
+    async fn call_op(
+        &self,
+        op_id: u32,
+        args: Box<dyn Any + Send>,
+        cx: RequestCtx<S>,
+        elevated: bool,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        let method = self
+            .registry
+            .xdr_methods
+            .get(&op_id)
+            .cloned()
+            .ok_or_else(|| JsonRpcError::method_not_found("operation not found"))?;
+        self.run(method, args, cx, elevated).await
+    }
+    async fn call_named(
+        &self,
+        name: String,
+        args: Box<dyn Any + Send>,
+        cx: RequestCtx<S>,
+        elevated: bool,
+    ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+        let method = self
+            .registry
+            .methods
+            .get(name.as_str())
+            .cloned()
+            .ok_or_else(|| JsonRpcError::method_not_found("method not found"))?;
+        self.run(method, args, cx, elevated).await
+    }
+}
+
+/// Run a registered method on already-decoded `args`, returning its boxed typed result with **no
+/// wire encode**. A **sync** (or filterable) target runs on `spawn_blocking` — so a blocking handler
+/// can't stall the runtime, and concurrent internal calls run in parallel on the blocking pool; an
+/// **async** target runs inline. Other method kinds aren't internally callable.
+async fn run_method_value<S: Send + Sync + 'static>(
+    method: Arc<Method<S>>,
+    args: Box<dyn Any + Send>,
+    cx: RequestCtx<S>,
+) -> Result<Box<dyn Any + Send>, JsonRpcError> {
+    // Async runs inline. Everything else goes to the blocking pool — a sync/filterable handler may
+    // block, and concurrent internal calls then run in parallel on that pool; the blocking closure
+    // also returns the "not internally callable" error for the remaining kinds (no unreachable arm).
+    if let MethodImpl::Async(erased) = &method.imp {
+        return erased.run_value(args, cx).await;
+    }
+    tokio::task::spawn_blocking(move || match &method.imp {
+        MethodImpl::Sync(e) | MethodImpl::Filterable(e) => e.run_value(args, &cx),
+        _ => Err(JsonRpcError::internal("method is not internally callable")),
+    })
+    .await
+    .map_err(|_| JsonRpcError::internal("internal call handler panicked"))?
+}
+
 fn response_bytes(
     rid: Option<&str>,
     outcome: &Result<Box<RawValue>, JsonRpcError>,
@@ -1995,7 +2137,7 @@ mod tests {
         Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)))
     }
     fn dummy_cx(session: &Arc<Session<()>>) -> RequestCtx<()> {
-        RequestCtx::new(None, session.clone(), Arc::new(AtomicBool::new(false)), false)
+        RequestCtx::new(None, session.clone(), Arc::new(AtomicBool::new(false)), false, None)
     }
     fn pipeline(method: Method<()>) -> Pipeline<()> {
         Pipeline {
