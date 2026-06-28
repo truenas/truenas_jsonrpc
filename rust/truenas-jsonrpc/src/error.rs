@@ -9,7 +9,7 @@
 pub enum ErrorCode {
     /// Malformed JSON ("Parse error").
     InvalidJson = -32700,
-    /// Bad envelope (non-object, non-UUID id, top-level array/batch).
+    /// Bad envelope (non-object, non-UUID id, or an empty JSON-RPC 2.0 batch array).
     InvalidRequest = -32600,
     /// Unknown method.
     MethodNotFound = -32601,

@@ -26,7 +26,7 @@ strata, bottom → top:
 | 1 | **Transport** | Owns the file descriptor: accept loop, read/write event loop, TLS/kTLS, peer-cred identity, raw-fd (`sendfile`/`SCM_RIGHTS`) transfer, WebSocket. Moves opaque bytes. | `truenas-jsonrpc-server`: `connection.rs`, `server.rs`, `tls.rs`, `peer.rs` (`Transport`, `Peer`), `scm.rs`, `transfer.rs`, `ws.rs` |
 | 2 | **Framing** | Delimits one message in the byte stream (today: a 4-byte big-endian length prefix; one WebSocket message = one frame). Yields an opaque body. | `truenas-jsonrpc-server`: `framing.rs` (`frame_into`, `FrameError`), `connection.rs::take_frame` |
 | 3 | **Codec** | Bytes ↔ typed params/result for a wire. Both current wires are serde-driven (JSON via `serde_json`; the TXDR binary wire via `truenas-xdr`), but the layer is *not defined as* serde — a hand-written body parser is equally a codec. | `truenas-jsonrpc`: `method.rs` (`Codec` / `WireParams` / `WireReply`); the `truenas-xdr` crate |
-| 4 | **Envelope** | The per-message header: request id, method name / opcode, error taxonomy, request↔reply correlation. | `truenas-jsonrpc`: `envelope.rs` |
+| 4 | **Envelope** | The per-message header: request id, method name / opcode, error taxonomy, request↔reply correlation. On the JSON wire a top-level array is a JSON-RPC 2.0 batch — several requests in one frame (§3, §9). | `truenas-jsonrpc`: `envelope.rs` |
 | 5 | **Dispatch** | Routes a decoded, authorized request to its handler through an O(1) keyed table — JSON by method name (`HashMap<Arc<str>>`), XDR by proc-id (`HashMap<u32>`), both sharing one `Arc<Method>`. Wire-neutral. | `truenas-jsonrpc`: `protocol.rs` (`dispatch` / `dispatch_xdr`, the registries, `Dispatched`), `method.rs` (`Method` / `MethodImpl`) |
 | — | → **Handler** | The consumer's `Fn(Accepts, &RequestCtx) -> Result<Returns>`. | consumer code |
 
@@ -118,10 +118,13 @@ setup configured the gate is off and all methods are reachable from `NONE` (mirr
 
 ## 3. Per-request dispatch flow
 
-`dispatch(message, session)` runs, per message:
+`dispatch(message, session)` first selects the wire (the **wire-selection seam**, `protocol.rs`): a
+4-byte TXDR magic → the binary wire; a top-level JSON **array** → a JSON-RPC 2.0 **batch** (each
+element runs the per-request flow below and the responses are concatenated into one array; an
+*empty* array → `INVALID_REQUEST`; a batch of only notifications → no reply); otherwise the
+single-request JSON path. Per (single) message:
 
-1. **Parse** the envelope. Malformed JSON → `INVALID_JSON`; a valid non-object (incl. a
-   top-level array / batch) → `INVALID_REQUEST`.
+1. **Parse** the envelope. Malformed JSON → `INVALID_JSON`; a valid non-object → `INVALID_REQUEST`.
 2. **Resolve `id`.** Present → must be a canonical UUID string (else `INVALID_REQUEST`).
    Absent → a **notification** (no reply).
 3. **Structural checks:** `jsonrpc == "2.0"`, `method` is a non-empty string.
@@ -461,7 +464,14 @@ omits them (or sends `"params": {}`) gets the full, unfiltered list.
 
 ## 9. Deliberate divergences from JSON-RPC 2.0
 
-- **No batch** — top-level arrays are `INVALID_REQUEST`.
+- **Batch is a per-wire Envelope concern, on by default for JSON.** A top-level array is a JSON-RPC
+  2.0 batch on the JSON wire (always-on — it is part of the protocol, not a toggle); an *empty*
+  array stays `INVALID_REQUEST` per spec, and a batch of only notifications draws no reply. This
+  **diverges from the Python reference** (which rejects all arrays) toward the standard — additive
+  and interop-safe (existing Python clients never send batches). Batching is not mandated by the
+  dispatch core: a binary wire compounds differently, and the **wire-selection seam** (`is_xdr`
+  today; a `dyn ProtocolEngine` in [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md),
+  Gaps 3–4) keeps a future non-JSON framing unaffected.
 - **UUID-only ids** — a present `id` must be a canonical UUID string.
 - **By-name params only** — `params` must be a JSON object (no positional arrays).
 - **Reserved namespaces** — `rpc.` and `$/` can't be registered.

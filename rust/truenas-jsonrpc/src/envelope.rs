@@ -2,8 +2,11 @@
 //!
 //! Mirrors Python's `JSONRPCEnvelope` (every field decoded permissively, then validated
 //! in code) and `protocol.py::_dispatch_one` steps 1–3: malformed JSON → `INVALID_JSON`;
-//! a valid non-object (incl. a top-level array/batch) → `INVALID_REQUEST`; a present `id`
-//! must be a canonical UUID string; `jsonrpc == "2.0"`; `method` a non-empty string.
+//! a valid non-object → `INVALID_REQUEST`; a present `id` must be a canonical UUID string;
+//! `jsonrpc == "2.0"`; `method` a non-empty string. `parse` validates a single request object —
+//! used both for a lone request and for each element of a batch. A top-level **array** is a
+//! JSON-RPC 2.0 batch, intercepted upstream in `protocol::dispatch` (an *empty* array →
+//! `INVALID_REQUEST`), so it never reaches `parse` whole.
 
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;

@@ -810,17 +810,103 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     /// Dispatch one framed JSON-RPC message. Total — never returns an error; every
     /// protocol/handler fault becomes a wire error object inside [`Dispatched::Reply`].
     pub async fn dispatch(&self, wire: &[u8], session: &Arc<Session<S>>) -> Dispatched {
-        // A leading 4-byte TXDR magic selects the binary wire; a JSON envelope always
-        // begins with `{` (0x7B), so the discriminator is unambiguous.
+        // Wire-selection seam. A leading 4-byte TXDR magic selects the binary wire; otherwise
+        // this is the JSON wire, where a frame begins with `{` (a single request object) or `[`
+        // (a JSON-RPC 2.0 batch). The discriminator is unambiguous — `[` is never the TXDR magic.
         if truenas_xdr::frame::is_xdr(wire) {
             return self.dispatch_xdr(wire, session).await;
         }
+        // A top-level array is a JSON-RPC 2.0 batch — always-on for the JSON wire (it is part of
+        // the protocol, not a toggle). Anything else takes the single-request path.
+        if first_non_ws(wire) == Some(b'[') {
+            return self.dispatch_batch(wire, session).await;
+        }
+        self.dispatch_json_one(wire, session).await
+    }
+
+    /// The single-request JSON path: permissive envelope parse → dispatch. Reused per element by
+    /// [`dispatch_batch`](Self::dispatch_batch).
+    async fn dispatch_json_one(&self, wire: &[u8], session: &Arc<Session<S>>) -> Dispatched {
         let parsed = match envelope::parse(wire) {
             Ok(p) => p,
             // Parse / id / structural errors are always replied to (never suppressed).
             Err(pe) => return Dispatched::Reply(envelope::error_from_parse(&pe)),
         };
         self.dispatch_parsed(parsed, session).await
+    }
+
+    /// Dispatch a JSON-RPC 2.0 **batch**: a top-level array of request objects → an array of
+    /// response objects, in one frame (<https://www.jsonrpc.org/specification#batch>). A property
+    /// of the JSON wire's Envelope layer — framing, codec, the dispatch op-table, and the binary
+    /// wire are all untouched. Each element runs the same single-request path
+    /// ([`dispatch_json_one`](Self::dispatch_json_one)); notification elements yield no response,
+    /// and the surviving response objects are concatenated into one array.
+    ///
+    /// Sequential (v1): response order follows request order (concurrent dispatch is spec-legal —
+    /// the client matches by id — and a possible follow-on). Per spec, an empty array is itself an
+    /// `INVALID_REQUEST`, and a batch of only notifications produces no reply at all.
+    async fn dispatch_batch(&self, wire: &[u8], session: &Arc<Session<S>>) -> Dispatched {
+        // Parse the array into raw, still-unvalidated elements (each is validated structurally on
+        // its own single-request path). A leading `[` that is not a well-formed JSON array is a
+        // parse error for the whole batch — one reply, id null (mirrors the single path).
+        let elements: Vec<&RawValue> = match serde_json::from_slice(wire) {
+            Ok(v) => v,
+            Err(e) => {
+                return Dispatched::Reply(envelope::error(
+                    None,
+                    ErrorCode::InvalidJson.code(),
+                    "Parse error",
+                    Some(&json!(e.to_string())),
+                ))
+            }
+        };
+        // An empty batch is itself an invalid request (per spec) — a single error object, id null.
+        // Keeps the existing `[]` → INVALID_REQUEST contract; only non-empty arrays now batch.
+        if elements.is_empty() {
+            return Dispatched::Reply(envelope::error(
+                None,
+                ErrorCode::InvalidRequest.code(),
+                "Invalid request",
+                Some(&json!("a batch must contain at least one request")),
+            ));
+        }
+        // Run each element through the single-request path, collecting only the elements that
+        // produce a response object (a notification yields `Nothing` and is omitted, per spec).
+        let mut objects: Vec<Vec<u8>> = Vec::with_capacity(elements.len());
+        for element in elements {
+            match self.dispatch_json_one(element.get().as_bytes(), session).await {
+                Dispatched::Reply(b) => objects.push(b),
+                Dispatched::Nothing => {}
+                // Connection-level directives (raw-fd transfer, setup passthrough, the
+                // server-assembled `$/sessions` listing) carry no inline reply and have no meaning
+                // inside a batch — surface one INVALID_REQUEST per offending element.
+                Dispatched::Transfer(_)
+                | Dispatched::Passthrough(_)
+                | Dispatched::Sessions { .. } => objects.push(envelope::error(
+                    None,
+                    ErrorCode::InvalidRequest.code(),
+                    "Invalid request",
+                    Some(&json!("this method cannot be used inside a batch")),
+                )),
+            }
+        }
+        // No surviving responses (a batch of only notifications) → no reply at all: per spec the
+        // server MUST NOT return an empty array.
+        if objects.is_empty() {
+            return Dispatched::Nothing;
+        }
+        // Concatenate the response objects into one array. Each is already a complete JSON object,
+        // so this is a byte join — no re-serialization.
+        let mut out = Vec::with_capacity(2 + objects.iter().map(|b| b.len() + 1).sum::<usize>());
+        out.push(b'[');
+        for (i, obj) in objects.iter().enumerate() {
+            if i > 0 {
+                out.push(b',');
+            }
+            out.extend_from_slice(obj);
+        }
+        out.push(b']');
+        Dispatched::Reply(out)
     }
 
     /// Dispatch an XDR binary-wire frame (the [`is_xdr`](truenas_xdr::frame::is_xdr) magic was
@@ -1645,6 +1731,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 }
 
 // --- shared pipeline helpers -------------------------------------------------
+
+/// The first non-whitespace byte of a frame (JSON insignificant whitespace is space, tab, LF, CR),
+/// or `None` for an empty/all-whitespace frame. [`JsonRpcProtocol::dispatch`] peeks it to pick the
+/// wire shape (`[` → batch) without parsing — the same leading-whitespace tolerance `serde_json`
+/// and [`envelope::parse`] already apply to a `{` object.
+fn first_non_ws(wire: &[u8]) -> Option<u8> {
+    wire.iter().copied().find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+}
 
 fn finish(note: bool, bytes: Vec<u8>) -> Dispatched {
     if note {

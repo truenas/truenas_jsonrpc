@@ -124,7 +124,7 @@ async fn parse_and_structural_errors() {
     let resp = call(&proto, &s, b"{not json").await.unwrap();
     assert_eq!(resp["error"]["code"], -32700);
 
-    // top-level array (batch) -> INVALID_REQUEST
+    // empty top-level array -> INVALID_REQUEST (a non-empty array is a JSON-RPC 2.0 batch)
     let resp = call(&proto, &s, b"[]").await.unwrap();
     assert_eq!(resp["error"]["code"], -32600);
 
