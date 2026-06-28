@@ -6,7 +6,9 @@
 //! multiplexed connections; the language-agnostic wire contract lives in the
 //! repo-root `ARCHITECTURE.md`. This crate owns envelope parsing/validation, the
 //! session state machine + gate, the per-request dispatch pipeline, the `$/`
-//! control messages, and message construction. It is **transport-free**: a server
+//! control messages, and message construction — the **dispatch core** of the `ARCHITECTURE.md`
+//! layer stack (the **Codec**, **Envelope**, and **Dispatch** layers plus the **Authorization**
+//! gate and **Control-plane**). It is **transport-free**: a server
 //! drives [`JsonRpcProtocol::dispatch`] with framed bytes and a per-connection
 //! [`Session`], and routes the bytes it returns.
 //!

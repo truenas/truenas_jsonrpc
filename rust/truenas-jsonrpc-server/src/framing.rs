@@ -1,4 +1,4 @@
-//! Length-prefixed JSON framing over a byte stream — a port of Python's
+//! The **Framing** layer (layer 2) — length-prefixed framing over a byte stream, a port of Python's
 //! `truenas_pyjsonrpc_server.framing`.
 //!
 //! Each message is a **4-byte big-endian unsigned length** followed by exactly that many

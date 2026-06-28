@@ -1,6 +1,7 @@
 //! [`JsonRpcProtocol`] — the dispatch core (Python's `JSONRPCProtocol`), its
 //! [`JsonRpcProtocolBuilder`], the async [`JsonRpcProtocol::dispatch`] seam, and the `$/`
-//! control messages.
+//! control messages — the **Envelope** (4), **Dispatch** (5), **Authorization** gate, and
+//! **Control-plane** of the `ARCHITECTURE.md` layer stack.
 //!
 //! `dispatch` is `async` and **branches on the method kind**: a sync [`JsonRpcMethod`]
 //! runs its whole pipeline (decode → authorize → handler → audit) on a `spawn_blocking`

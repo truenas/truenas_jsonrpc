@@ -1,4 +1,5 @@
-//! Method definitions + the type-erased registry entry.
+//! Method definitions + the type-erased registry entry. Home of the **Codec** seam (layer 3:
+//! `Codec`/`WireParams`/`WireReply`) and the **Dispatch**-layer method erasure (`Method`/`MethodImpl`).
 //!
 //! A consumer registers a [`JsonRpcMethod`] (sync handler — the common case) or an
 //! [`AsyncJsonRpcMethod`] (async handler). The handler is any closure / `fn`

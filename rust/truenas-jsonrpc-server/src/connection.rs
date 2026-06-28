@@ -1,4 +1,5 @@
-//! Per-connection handling: the `$/negotiate` → bound-dispatch state machine, the async I/O
+//! Per-connection handling — the **Transport** + **Framing** layers (1–2): the `$/negotiate` →
+//! bound-dispatch state machine, the async I/O
 //! pump, and the raw-fd transfer takeover (port of `connection.py`).
 //!
 //! Inbound bytes accumulate in a buffer fed by the cancel-safe [`AsyncReadExt::read_buf`];

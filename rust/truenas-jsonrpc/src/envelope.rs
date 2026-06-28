@@ -1,4 +1,4 @@
-//! Permissive inbound envelope parsing + response construction.
+//! The **Envelope** layer (layer 4) — permissive inbound envelope parsing + response construction.
 //!
 //! Mirrors Python's `JSONRPCEnvelope` (every field decoded permissively, then validated
 //! in code) and `protocol.py::_dispatch_one` steps 1–3: malformed JSON → `INVALID_JSON`;

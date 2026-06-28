@@ -2,7 +2,8 @@
 //! peer of Python's `truenas_pyjsonrpc_server`.
 //!
 //! The dispatch core is deliberately transport-free (you hand it bytes, it hands you bytes).
-//! This crate wraps it in a runnable server: it accepts connections, frames messages, selects
+//! This crate is the **Transport** (layer 1) and **Framing** (layer 2) of the `ARCHITECTURE.md`
+//! layer stack: it accepts connections, frames messages, selects
 //! a protocol per connection with `$/negotiate`, and pumps the dispatch loop — pipelining so a
 //! `$/cancelRequest` is read while a long handler runs, and pushing pub/sub notifications out
 //! through each session's [`Outbound`](truenas_jsonrpc::Outbound).

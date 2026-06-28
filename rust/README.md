@@ -8,8 +8,8 @@ in [`../ARCHITECTURE.md`](../ARCHITECTURE.md) and the project overview in
 ## Crates
 
 This is a workspace of focused crates, but **a consumer depends on only one of them at
-runtime.** The split is internal layering (and, for two of them, a hard requirement — see
-below), not a per-crate dependency you take on. What actually goes in your `Cargo.toml`:
+runtime.** The split mirrors the [layer stack](../ARCHITECTURE.md#layers) (and, for two of them, is
+a hard requirement — see below), not a per-crate dependency you take on. What actually goes in your `Cargo.toml`:
 
 - **`truenas-jsonrpc`** — *your only runtime dependency.* The transport-agnostic **dispatch
   core** (Python's `JSONRPCProtocol`): envelope parse/validation, the session lifecycle +

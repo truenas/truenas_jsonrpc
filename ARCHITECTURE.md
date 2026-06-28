@@ -15,10 +15,56 @@ refinements (§9), and borrows its control-message namespace, progress, cancella
 extended error ranges from the LSP base protocol
 ([spec](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/)).
 
+## Layers
+
+This stack is a conventional RPC decomposition — raw bytes at the bottom, a typed handler call at the
+top. The **same names are used throughout the code and the rest of these docs**. Five per-message
+strata, bottom → top:
+
+| # | Layer | Responsibility | Modules / types |
+|---|---|---|---|
+| 1 | **Transport** | Owns the file descriptor: accept loop, read/write event loop, TLS/kTLS, peer-cred identity, raw-fd (`sendfile`/`SCM_RIGHTS`) transfer, WebSocket. Moves opaque bytes. | `truenas-jsonrpc-server`: `connection.rs`, `server.rs`, `tls.rs`, `peer.rs` (`Transport`, `Peer`), `scm.rs`, `transfer.rs`, `ws.rs` |
+| 2 | **Framing** | Delimits one message in the byte stream (today: a 4-byte big-endian length prefix; one WebSocket message = one frame). Yields an opaque body. | `truenas-jsonrpc-server`: `framing.rs` (`frame_into`, `FrameError`), `connection.rs::take_frame` |
+| 3 | **Codec** | Bytes ↔ typed params/result for a wire. Both current wires are serde-driven (JSON via `serde_json`; the TXDR binary wire via `truenas-xdr`), but the layer is *not defined as* serde — a hand-written body parser is equally a codec. | `truenas-jsonrpc`: `method.rs` (`Codec` / `WireParams` / `WireReply`); the `truenas-xdr` crate |
+| 4 | **Envelope** | The per-message header: request id, method name / opcode, error taxonomy, request↔reply correlation. | `truenas-jsonrpc`: `envelope.rs` |
+| 5 | **Dispatch** | Routes a decoded, authorized request to its handler through an O(1) keyed table — JSON by method name (`HashMap<Arc<str>>`), XDR by proc-id (`HashMap<u32>`), both sharing one `Arc<Method>`. Wire-neutral. | `truenas-jsonrpc`: `protocol.rs` (`dispatch` / `dispatch_xdr`, the registries, `Dispatched`), `method.rs` (`Method` / `MethodImpl`) |
+| — | → **Handler** | The consumer's `Fn(Accepts, &RequestCtx) -> Result<Returns>`. | consumer code |
+
+**Cross-cutting concerns** — named separately because they attach at a point, they are *not* strata:
+
+- **Authentication** — establishes the peer credential (SASL/SCRAM, GSSAPI, OAuth, mTLS, peer-cred) during
+  the negotiate/setup handshake. `truenas-jsonrpc-auth` (`Channel`, `Capability`, the mechanisms); the
+  handshake in `setup.rs` + the server's `negotiate.rs`.
+- **Authorization** — gates each call by a role-mask subset test, run *between* codec-decode and handler so
+  `INVALID_PARAMS` precedes `NOT_AUTHORIZED`. The gate in `protocol.rs` + `role.rs` (`RoleMask`).
+- **Control-plane** — the `$/` verbs (`$/negotiate`, `$/sessions`, `$/cancelRequest`), the session state
+  machine, and server→client push. `session.rs`, `setup.rs`, the `$/` handling in `protocol.rs`.
+
+Two layer boundaries are deliberately **negotiable**, not clean cuts — name them when reasoning about a new wire:
+
+- **Framing ↔ codec (where addressing lives).** *Which* layer recovers the request's opcode + id is
+  protocol-dependent. Today the length prefix is framing but the TXDR `proc_id`/`rid` ride *inside* the body
+  (recovered by codec/envelope); a header-carrying wire — SMB DSI's 16-byte header, ONC-RPC record marking —
+  puts opcode + id in the *framing* header, so a pluggable `Framing` trait must surface `{opcode,
+  request_id, body}`. See [FRAMING.md](FRAMING.md).
+- **Envelope ↔ dispatch (per-protocol vs reusable).** The dispatch op-table is wire-neutral and reusable;
+  the envelope + control-plane are per-protocol. A new protocol reuses the op-table but brings its own
+  envelope and control verbs — the `dyn ProtocolEngine` direction in
+  [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md) (Gaps 3–4).
+
+Two deliberate choices: **Framing is its own layer** (not folded into transport) so it can be made pluggable
+per protocol — see [FRAMING.md](FRAMING.md); and the **Control-plane** is what makes this more than bare
+request/response RPC — long-lived, authenticated, multiplexed connections.
+
+The **load-bearing seam** is between layers **1–2** (transport + framing — the `truenas-jsonrpc-server`
+crate) and layers **3–5** (the transport-free **dispatch core** — the `truenas-jsonrpc` crate): one call,
+`dispatch(message, session)` (framed bytes in, bytes out). The next section details exactly that boundary.
+
 ## 1. Dispatch core vs transport — the boundary
 
-The stack separates a **dispatch core** from a **transport layer**. The core is a pure
-function over messages; the transport owns everything with a file descriptor.
+The load-bearing seam in the layer stack above is between the **dispatch core** (layers 3–5) and the
+**transport layer** (layers 1–2). The core is a pure function over messages; the transport owns
+everything with a file descriptor.
 
 | Dispatch core (protocol logic) | Transport layer (server / runtime) |
 |---|---|

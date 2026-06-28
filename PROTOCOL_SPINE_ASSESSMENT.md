@@ -17,7 +17,9 @@ bypasses the serde + json-idl machinery that is the pitch's headline feature.
 ## What already exists — the spine is real
 
 Grounded in the code, three layers are **already protocol-neutral** and reused verbatim by the TXDR
-binary wire (zero XDR references leak into the server crate):
+binary wire (zero XDR references leak into the server crate) — in the
+[layer-stack](ARCHITECTURE.md#layers) vocabulary, the **Transport**+**Framing** layers, the
+**Authorization** gate, and the **Dispatch** op-table:
 
 - **Transport half.** Accept loops, TLS/kTLS, peer-cred (`SO_PEERCRED`), `SCM_RIGHTS`,
   `Peer`/`Channel`/`Capability`/`TransportPosture`, `Outbound`, the session registry — all JSON-free.

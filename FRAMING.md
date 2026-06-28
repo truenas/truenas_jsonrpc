@@ -1,11 +1,14 @@
 # Framing seam — future work
 
-Design notes for a pluggable **framing** layer, so header-carrying binary protocols (SMB DSI,
+Design notes for a pluggable **framing** layer — **layer 2** of the stack in
+[ARCHITECTURE.md](ARCHITECTURE.md#layers) — so header-carrying binary protocols (SMB DSI,
 NFS/ONC-RPC record marking) could replace the hardcoded 4-byte length prefix. This is the Tier-3
 "Gap 2" of [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md) — captured here, **not built**.
 It is design-only; no code is committed for it.
 
 ## Where the layers sit today
+
+(The full stack is [ARCHITECTURE.md → Layers](ARCHITECTURE.md#layers); this is the framing-layer view.)
 
 ```
 socket bytes ──[framing]──> opaque body ──[codec sniff]──> typed params ──[dispatch]──> handler
