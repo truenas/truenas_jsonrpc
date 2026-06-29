@@ -14,7 +14,7 @@ use http::HeaderMap;
 use tokio::net::{TcpListener, ToSocketAddrs, UnixListener};
 use truenas_jsonrpc::JsonRpcProtocol;
 
-use crate::connection;
+use crate::engine::{JsonRpcEngine, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
 use crate::peer::{self, Peer, UnixTrust};
 #[cfg(feature = "websocket")]
@@ -72,6 +72,10 @@ pub(crate) struct ServerShared<S> {
     pub(crate) state_fn: StateFn<S>,
     pub(crate) limit: usize,
     pub(crate) allow_unauthenticated: bool,
+    /// The wire-protocol engine bound to this server's listeners (default [`JsonRpcEngine`]).
+    /// Resolved once; each connection's loop runs inside it. The boundary is per-connection, never
+    /// per-request, so the per-request hot path stays monomorphized.
+    pub(crate) engine: Arc<dyn ProtocolEngine<S>>,
     /// User-supplied forwarded-origin parser; only meaningful on the WebSocket accept path, so it
     /// exists only with the `websocket` feature.
     #[cfg(feature = "websocket")]
@@ -165,6 +169,7 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
                 state_fn: self.state_fn.unwrap_or_else(|| Box::new(|_| None)),
                 limit: self.limit,
                 allow_unauthenticated: self.allow_unauthenticated,
+                engine: Arc::new(JsonRpcEngine),
                 #[cfg(feature = "websocket")]
                 forwarded_extractor: self.forwarded_extractor,
             }),
@@ -259,7 +264,11 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             let (stream, _addr) = listener.accept().await?;
             let fd = stream.as_raw_fd();
             let peer = Peer::unix(peer::peer_cred(fd)).with_posture(trust.into());
-            tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
+            let engine = self.shared.engine.clone();
+            let shared = self.shared.clone();
+            tokio::spawn(async move {
+                engine.serve(Box::new(stream), Some(fd), peer, shared).await;
+            });
         }
     }
 
@@ -297,7 +306,11 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             let _ = stream.set_nodelay(true);
             let fd = stream.as_raw_fd();
             let peer = Peer::tcp(peer_addr);
-            tokio::spawn(connection::serve(stream, Some(fd), peer, self.shared.clone()));
+            let engine = self.shared.engine.clone();
+            let shared = self.shared.clone();
+            tokio::spawn(async move {
+                engine.serve(Box::new(stream), Some(fd), peer, shared).await;
+            });
         }
     }
 }

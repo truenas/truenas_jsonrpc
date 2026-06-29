@@ -29,7 +29,6 @@ use openssl::x509::{X509Ref, X509};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_openssl::SslStream;
 
-use crate::connection;
 use crate::peer::{Peer, TlsPeer, TransportPosture};
 use crate::server::JsonRpcServer;
 
@@ -140,13 +139,15 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                         let fd = kfd.as_raw_fd();
                         let Ok(stream) = TcpStream::from_std(kfd) else { return };
                         // kTLS: the fd is plaintext to us / kernel-encrypted → transfer works.
-                        connection::serve(stream, Some(fd), tls_peer(addr, cert, binding, Some(TransportPosture::KernelTls)), shared).await;
+                        let engine = shared.engine.clone();
+                        engine.serve(Box::new(stream), Some(fd), tls_peer(addr, cert, binding, Some(TransportPosture::KernelTls)), shared).await;
                     }
                     TlsMode::Userspace => {
                         let Some(stream) = userspace_accept(&acceptor, tcp).await else { return };
                         let (cert, binding) = tls_facts(stream.ssl());
                         // Userspace TLS: ciphertext on the fd → no raw-fd transfer (None).
-                        connection::serve(stream, None, tls_peer(addr, cert, binding, None), shared).await;
+                        let engine = shared.engine.clone();
+                        engine.serve(Box::new(stream), None, tls_peer(addr, cert, binding, None), shared).await;
                     }
                 }
             });

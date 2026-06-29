@@ -17,6 +17,7 @@
 
 pub mod framing;
 mod connection;
+mod engine;
 mod negotiate;
 mod peer;
 #[cfg(feature = "passthrough")]
