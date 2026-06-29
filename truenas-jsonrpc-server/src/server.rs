@@ -307,13 +307,26 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     }
 
     /// Accept ONC RPC connections (RFC 5531, record-marking framed) on a bound AF_UNIX `listener`,
-    /// serving the reference *second* protocol engine. The wire protocol is bound
-    /// to the listener — chosen per listener, never per request — which is what lets one server
-    /// speak JSON-RPC on one socket and this binary wire on another. The demo program authenticates
-    /// with `AUTH_NONE`, so it is offered only over AF_UNIX (local peer-credential trust), never a
-    /// network transport. Runs forever on the happy path.
-    pub async fn serve_oncrpc_unix_listener(&self, listener: UnixListener) -> std::io::Result<()> {
-        self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(OncRpcEngine)).await
+    /// serving the methods of the registered protocol named `protocol` over the binary wire — each
+    /// method's XDR proc-id is its ONC RPC procedure number. So a method registered once is reachable
+    /// over *both* the JSON-RPC transports and this one (one service, two wires), chosen per listener.
+    /// The demo program authenticates with `AUTH_NONE`/`AUTH_SYS`, so it is offered only over AF_UNIX
+    /// (local peer-credential trust), never a network transport. Errors before serving if no protocol
+    /// of that name is registered. Runs forever on the happy path.
+    pub async fn serve_oncrpc_unix_listener(
+        &self,
+        listener: UnixListener,
+        protocol: impl Into<String>,
+    ) -> std::io::Result<()> {
+        let name = protocol.into();
+        let proto = self.shared.protocols.get(&name).cloned().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("serve_oncrpc_unix_listener: no protocol named '{name}' is registered"),
+            )
+        })?;
+        self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(OncRpcEngine::new(proto)))
+            .await
     }
 
     /// Bind and serve a TCP `addr` (length-prefixed JSON framing). Refuses (before binding) if a

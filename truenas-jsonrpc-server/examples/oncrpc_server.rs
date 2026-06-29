@@ -1,136 +1,139 @@
-//! Example: a faithful **ONC RPC** (Sun RPC, RFC 5531) server — the reference *second* engine —
-//! with an in-process client that speaks the real wire, so the example runs to completion.
+//! Example: **one service, two wires.** A single registered method (`math.add`) is served over
+//! *both* the default JSON-RPC engine and the ONC RPC engine (RFC 5531), on two Unix sockets of one
+//! server. A client calls it over each wire and gets the same answer — the wires differ only in
+//! framing and envelope; the handler is registered once.
 //!
-//! ONC RPC is the canonical XDR record-marking RPC. This demo's wire is validated against FreeBSD's
-//! in-tree implementation: the message layout is `include/rpc/rpc_msg.h`, the auth flavors are
-//! `include/rpc/auth.h`, and the record marking is `lib/libc/xdr/xdr_rec.c`. The demo program —
-//! number `0x2000_0001`, in RFC 5531's user-defined range `0x2000_0000..=0x3fff_ffff` — exposes:
-//!   - procedure 0: `NULL`, the conventional no-op probe (`void -> void`)
-//!   - procedure 1: `add(int32, int32) -> int64`
-//!
-//! The wire, bottom to top:
-//!   - **Transport (1):** an AF_UNIX stream.
-//!   - **Framing (2):** RFC 5531 §11 *record marking* — a 4-byte big-endian fragment header whose
-//!     high bit marks the last fragment and whose low 31 bits hold the fragment length, then that
-//!     many bytes. (FreeBSD `xdr_rec.c`: `LAST_FRAG = 1u << 31`.)
-//!   - **Codec (3):** XDR (RFC 4506) — big-endian, 4-byte aligned (`truenas-xdr`).
-//!   - **Envelope (4):** the ONC RPC `rpc_msg` CALL/REPLY union:
-//!     ```text
-//!     CALL  = xid, mtype=0(CALL), rpcvers=2, prog, vers, proc, cred:opaque_auth, verf:opaque_auth, args
-//!     REPLY = xid, mtype=1(REPLY), reply_stat,
-//!               MSG_ACCEPTED(0) -> verf:opaque_auth, accept_stat, [results | versions | void]
-//!               MSG_DENIED(1)   -> ...
-//!     opaque_auth = (flavor:u32, body:opaque<400>);  AUTH_NONE = (0, empty)
-//!     ```
+//!   - **JSON-RPC:** 4-byte length-prefixed JSON; `$/negotiate` then the method call.
+//!   - **ONC RPC:** RFC 5531 record marking + `rpc_msg` (AUTH_NONE); the method's XDR proc-id (1001)
+//!     *is* the ONC RPC procedure number. The wire is validated against FreeBSD's in-tree ONC RPC
+//!     (`include/rpc/rpc_msg.h`, `lib/libc/xdr/xdr_rec.c`).
 //!
 //! Run: `cargo run -p truenas-jsonrpc-server --example oncrpc_server`
 
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use truenas_jsonrpc_server::{JsonRpcServer, UnixConfig};
+use truenas_jsonrpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_jsonrpc_server::{framing, JsonRpcServer, UnixConfig, UnixTrust};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
-// The demo program (must match the built-in engine).
+// The ONC RPC demo program (matches the engine).
 const PROG: u32 = 0x2000_0001;
 const VERS: u32 = 1;
-const PROC_NULL: u32 = 0;
-const PROC_ADD: u32 = 1;
-
-// ONC RPC message constants (FreeBSD include/rpc/rpc_msg.h, include/rpc/auth.h).
-const MSG_CALL: u32 = 0;
-const RPC_VERSION: u32 = 2;
-const AUTH_NONE: u32 = 0;
-const MSG_ACCEPTED: u32 = 0;
-const ACCEPT_SUCCESS: u32 = 0;
-
-// Record marking (FreeBSD lib/libc/xdr/xdr_rec.c): the last-fragment bit.
+const ADD_PROC: u32 = 1001; // math.add's XDR proc-id == its ONC RPC procedure number.
 const RM_LAST: u32 = 0x8000_0000;
 
-/// Wrap `payload` as a single last-fragment record: `[4-byte header][payload]`, where
-/// `header = LAST_FRAG | length`.
+#[derive(Deserialize, Serialize)]
+struct AddArgs {
+    a: i64,
+    b: i64,
+}
+#[derive(Deserialize, Serialize)]
+struct AddResult {
+    sum: i64,
+}
+
+/// The one service: `math.add`, registered once with an XDR proc-id so it is reachable over both
+/// wires.
+fn demo() -> JsonRpcProtocol<()> {
+    JsonRpcProtocol::<()>::builder("demo", "1")
+        .method(JsonRpcMethod::new(
+            MethodDef::new("math.add").xdr(ADD_PROC),
+            |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
+        ))
+        .unwrap()
+        .build()
+}
+
+// --- JSON-RPC client -------------------------------------------------------
+
+async fn json_call(stream: &mut UnixStream, req: Value) -> Value {
+    let bytes = serde_json::to_vec(&req).unwrap();
+    stream.write_all(&framing::frame(&bytes)).await.unwrap();
+    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT).await.unwrap().unwrap();
+    serde_json::from_slice(&reply).unwrap()
+}
+
+async fn add_over_json_rpc(path: &std::path::Path) -> i64 {
+    let mut s = UnixStream::connect(path).await.unwrap();
+    json_call(&mut s, json!({"jsonrpc":"2.0","id":"neg","method":"$/negotiate","params":{"protocol":"demo"}})).await;
+    let add = json_call(
+        &mut s,
+        json!({"jsonrpc":"2.0","id":"00000000-0000-0000-0000-000000000001","method":"math.add","params":{"a":20,"b":22}}),
+    )
+    .await;
+    add["result"]["sum"].as_i64().unwrap()
+}
+
+// --- ONC RPC client --------------------------------------------------------
+
 fn rm_frame(payload: &[u8]) -> Vec<u8> {
     let mut out = (RM_LAST | payload.len() as u32).to_be_bytes().to_vec();
     out.extend_from_slice(payload);
     out
 }
 
-/// Build a record-marked `rpc_msg` CALL for the demo program with `AUTH_NONE` credentials.
-fn call(xid: u32, procedure: u32, args: &[u8]) -> Vec<u8> {
-    // The CALL prefix, field-for-field as it lies on the wire; `cred` and `verf` are both
-    // AUTH_NONE = (flavor 0, empty body). The procedure arguments follow.
+/// A record-marked ONC RPC CALL (AUTH_NONE) for `procedure` with XDR-encoded `args`.
+fn onc_call(xid: u32, procedure: u32, args: &[u8]) -> Vec<u8> {
     let prefix = (
-        xid,
-        MSG_CALL,
-        RPC_VERSION,
-        PROG,
-        VERS,
-        procedure,
-        AUTH_NONE,
-        VarOpaque(Vec::new()), // cred
-        AUTH_NONE,
-        VarOpaque(Vec::new()), // verf
+        xid, 0u32, 2u32, PROG, VERS, procedure, 0u32, VarOpaque(Vec::new()), 0u32,
+        VarOpaque(Vec::new()),
     );
     let mut msg = to_bytes(&prefix).unwrap();
     msg.extend_from_slice(args);
     rm_frame(&msg)
 }
 
-/// Read one record-marked reply and return the accepted-reply result bytes. Asserts the reply is
-/// accepted + successful (this demo only issues calls that succeed).
-async fn read_result(stream: &mut UnixStream) -> Vec<u8> {
-    // The server emits single-fragment replies, so one 4-byte header precedes the message.
+async fn add_over_oncrpc(path: &std::path::Path) -> i64 {
+    let mut s = UnixStream::connect(path).await.unwrap();
+    let args = to_bytes(&AddArgs { a: 20, b: 22 }).unwrap();
+    s.write_all(&onc_call(1, ADD_PROC, &args)).await.unwrap();
+    // Read the record-marked reply: skip the rm header, then the accepted-reply prefix → results.
     let mut header = [0u8; 4];
-    stream.read_exact(&mut header).await.unwrap();
+    s.read_exact(&mut header).await.unwrap();
     let len = (u32::from_be_bytes(header) & !RM_LAST) as usize;
     let mut msg = vec![0u8; len];
-    stream.read_exact(&mut msg).await.unwrap();
-    // REPLY: xid, mtype, reply_stat, then accepted_reply = verf(flavor, body), accept_stat, results.
-    let ((_xid, _mtype, reply_stat, _verf_flavor, _verf_body, accept_stat), results) =
+    s.read_exact(&mut msg).await.unwrap();
+    let ((_xid, _mtype, _reply_stat, _vf, _vb, accept_stat), results) =
         from_bytes_with::<(u32, u32, u32, u32, VarOpaque, u32)>(&msg, Strictness::Lenient).unwrap();
-    assert_eq!(
-        (reply_stat, accept_stat),
-        (MSG_ACCEPTED, ACCEPT_SUCCESS),
-        "expected an accepted, successful reply"
-    );
-    results.to_vec()
-}
-
-/// Render bytes as space-separated hex — to show the binary wire concretely.
-fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    assert_eq!(accept_stat, 0, "ONC RPC call should be accepted + successful");
+    from_bytes::<AddResult>(results).unwrap().sum
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> std::io::Result<()> {
-    let path = std::env::temp_dir().join(format!("oncrpc-example-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&path); // bind fails if the path already exists
+    let json_path = std::env::temp_dir().join(format!("dualwire-{}-json.sock", std::process::id()));
+    let onc_path = std::env::temp_dir().join(format!("dualwire-{}-oncrpc.sock", std::process::id()));
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&onc_path);
 
-    // 1. Build a server and serve the built-in ONC RPC engine on a Unix socket in the background.
-    //    The wire protocol is bound to the listener (per-listener engine selection); this server
-    //    registers no JSON-RPC protocols — the ONC RPC engine routes on its own program table.
-    let server = JsonRpcServer::<()>::builder("oncrpc-example").build();
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path))?;
-    let server_task =
-        tokio::spawn(async move { server.serve_oncrpc_unix_listener(listener).await });
+    // One server, one registered protocol — served on two listeners with two engines.
+    let server = JsonRpcServer::<()>::builder("dual-wire").protocol("demo", demo()).build();
+    let json_listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&json_path))?;
+    let onc_listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&onc_path))?;
 
-    // 2. A client that speaks the real ONC RPC wire.
-    let mut client = UnixStream::connect(&path).await?;
+    let json_srv = server.clone();
+    let json_task =
+        tokio::spawn(async move { json_srv.serve_unix_listener(json_listener, UnixTrust::Local).await });
+    let onc_srv = server.clone();
+    let onc_task =
+        tokio::spawn(async move { onc_srv.serve_oncrpc_unix_listener(onc_listener, "demo").await });
 
-    // Procedure 0: the NULL probe — void args, void result (the standard "are you there?" call).
-    // Print its raw bytes so the record marking + rpc_msg envelope are visible on the wire.
-    let null_call = call(1, PROC_NULL, &[]);
-    println!("NULL call wire bytes  -> {}", hex(&null_call));
-    client.write_all(&null_call).await?;
-    let null_result = read_result(&mut client).await;
-    println!("NULL probe (proc 0)   -> accepted, success, {}-byte result", null_result.len());
+    // Call the same method over each wire.
+    let json_sum = add_over_json_rpc(&json_path).await;
+    let onc_sum = add_over_oncrpc(&onc_path).await;
 
-    // Procedure 1: add(20, 22). The args are two XDR int32; the result is one XDR int64.
-    let args = to_bytes(&(20i32, 22i32)).unwrap();
-    client.write_all(&call(2, PROC_ADD, &args)).await?;
-    let sum: i64 = from_bytes(&read_result(&mut client).await).unwrap();
-    println!("add(20, 22) (proc 1)  -> {sum}");
+    println!("math.add(20, 22) over JSON-RPC -> {json_sum}");
+    println!("math.add(20, 22) over ONC RPC  -> {onc_sum}");
+    println!(
+        "one registered method, two wires: {}",
+        if json_sum == onc_sum { "consistent" } else { "MISMATCH" }
+    );
 
-    server_task.abort();
-    let _ = std::fs::remove_file(&path);
+    json_task.abort();
+    onc_task.abort();
+    let _ = std::fs::remove_file(&json_path);
+    let _ = std::fs::remove_file(&onc_path);
     Ok(())
 }

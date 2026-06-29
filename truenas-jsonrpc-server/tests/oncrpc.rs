@@ -1,19 +1,40 @@
-//! End-to-end ONC RPC (RFC 5531) over a real AF_UNIX socket, through the public
-//! [`serve_oncrpc_unix_listener`](truenas_jsonrpc_server::JsonRpcServer::serve_oncrpc_unix_listener)
-//! — proving the per-connection `ProtocolEngine` seam carries a peer **binary** wire (record-marking
-//! framed, XDR-encoded) alongside JSON-RPC, selected per listener. A hand-rolled client speaks the
-//! wire directly: the `NULL` probe (procedure 0) and the demo `add` (procedure 1).
+//! End-to-end: a registered `math.add` served over **ONC RPC** (RFC 5531) through
+//! [`serve_oncrpc_unix_listener`](truenas_jsonrpc_server::JsonRpcServer::serve_oncrpc_unix_listener).
+//! The same method is reachable over the JSON-RPC transports too — one service, two wires — but here
+//! a hand-rolled ONC RPC client (record marking + `rpc_msg`, AUTH_NONE) drives the binary wire: the
+//! `NULL` probe (procedure 0) and `math.add` via its XDR proc-id (1001).
 
+use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use truenas_jsonrpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
 use truenas_jsonrpc_server::{JsonRpcServer, UnixConfig};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
 const PROG: u32 = 0x2000_0001;
 const VERS: u32 = 1;
-const PROC_NULL: u32 = 0;
-const PROC_ADD: u32 = 1;
 const RM_LAST: u32 = 0x8000_0000;
+
+#[derive(Deserialize, Serialize)]
+struct AddArgs {
+    a: i64,
+    b: i64,
+}
+#[derive(Deserialize, Serialize)]
+struct AddResult {
+    sum: i64,
+}
+
+/// The protocol whose `math.add` (XDR proc-id 1001) the server serves over both wires.
+fn proto() -> JsonRpcProtocol<()> {
+    JsonRpcProtocol::<()>::builder("demo", "1")
+        .method(JsonRpcMethod::new(
+            MethodDef::new("math.add").xdr(1001),
+            |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
+        ))
+        .unwrap()
+        .build()
+}
 
 /// Record-mark a single-fragment payload (RFC 5531 §11).
 fn rm_frame(payload: &[u8]) -> Vec<u8> {
@@ -22,7 +43,7 @@ fn rm_frame(payload: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Build a record-marked ONC RPC CALL (AUTH_NONE cred + verf) for the demo program.
+/// Build a record-marked ONC RPC CALL (AUTH_NONE) for `procedure` with XDR-encoded `args`.
 fn call(xid: u32, procedure: u32, args: &[u8]) -> Vec<u8> {
     // xid, mtype=CALL(0), rpcvers=2, prog, vers, proc, cred(AUTH_NONE, empty), verf(AUTH_NONE, empty)
     let prefix = (
@@ -48,29 +69,27 @@ async fn read_reply(stream: &mut UnixStream) -> (u32, Vec<u8>) {
 }
 
 #[tokio::test]
-async fn oncrpc_null_and_add_over_unix() {
+async fn registered_method_served_over_oncrpc() {
     let path = std::env::temp_dir().join(format!("tnrpc-{}-oncrpc.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    // The ONC RPC engine routes on its own program table, so the server needs no registered
-    // JSON-RPC protocol — this proves the engine is a peer wire, not a JSON-RPC reframing.
-    let srv = JsonRpcServer::<()>::builder("oncrpc-demo").build();
+    let srv = JsonRpcServer::<()>::builder("dual-wire").protocol("demo", proto()).build();
     let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
-    let task = tokio::spawn(async move { srv.serve_oncrpc_unix_listener(listener).await });
+    let task = tokio::spawn(async move { srv.serve_oncrpc_unix_listener(listener, "demo").await });
 
     let mut client = UnixStream::connect(&path).await.unwrap();
 
-    // NULL probe → SUCCESS with an empty result.
-    client.write_all(&call(1, PROC_NULL, &[])).await.unwrap();
+    // NULL probe (procedure 0) → accepted, success, empty result.
+    client.write_all(&call(1, 0, &[])).await.unwrap();
     let (accept_stat, body) = read_reply(&mut client).await;
     assert_eq!(accept_stat, 0); // ACCEPT_SUCCESS
     assert!(body.is_empty());
 
-    // add(20, 22) → SUCCESS with the i64 sum.
-    let args = to_bytes(&(20i32, 22i32)).unwrap();
-    client.write_all(&call(2, PROC_ADD, &args)).await.unwrap();
+    // The *registered* math.add(20, 22), reached by its XDR proc-id 1001 → 42.
+    let args = to_bytes(&AddArgs { a: 20, b: 22 }).unwrap();
+    client.write_all(&call(2, 1001, &args)).await.unwrap();
     let (accept_stat, body) = read_reply(&mut client).await;
     assert_eq!(accept_stat, 0);
-    assert_eq!(from_bytes::<i64>(&body).unwrap(), 42);
+    assert_eq!(from_bytes::<AddResult>(&body).unwrap().sum, 42);
 
     task.abort();
     let _ = std::fs::remove_file(&path);

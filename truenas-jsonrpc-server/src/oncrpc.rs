@@ -5,32 +5,36 @@
 //! reframing of JSON-RPC. The wire format is validated against FreeBSD's in-tree ONC RPC
 //! (`include/rpc/rpc_msg.h`, `include/rpc/auth.h`, `lib/libc/xdr/xdr_rec.c`, `lib/libc/rpc`).
 //!
-//! It shares exactly two things with the rest of the crate: the **Codec** (layer 3, `truenas-xdr`)
-//! and the per-connection seam. Everything else is its own stack:
+//! It shares two things with the rest of the crate: the **Codec** (layer 3, `truenas-xdr`) and the
+//! per-connection seam — plus, now, the **op-table**. Everything else is its own stack:
 //!   * **Framing (layer 2):** RFC 5531 §11 *record marking* — a message is one record of one or
 //!     more fragments, each a 4-byte header (high bit = last-fragment, low 31 bits = fragment
 //!     length) over that many bytes. (The JSON-RPC engine frames with a plain 4-byte length prefix;
 //!     this is a deliberately *different* framing, so the seam can't be silently coupled to one.)
 //!   * **Envelope (layer 4):** the ONC RPC `rpc_msg` call/reply union; the server accepts the
 //!     `AUTH_NONE` and `AUTH_SYS` credential flavors and rejects others with `AUTH_REJECTEDCRED`.
-//!   * **Dispatch (layer 5):** its own tiny program — a `NULL` probe plus one demo procedure —
-//!     routed on `(program, version, procedure)`, independent of the JSON-RPC method registry.
+//!   * **Dispatch (layer 5):** routed on `(program, version, procedure)` — a `NULL` probe
+//!     (procedure 0), and every other procedure number dispatched to the **registered** method whose
+//!     XDR proc-id equals it, via [`JsonRpcProtocol::run_xdr_proc`]. So a method registered once
+//!     (with `.xdr(proc_id)`) is served over *both* the JSON-RPC wire and this one — one service,
+//!     two wires — differing only in framing and envelope.
 //!
-//! The engine consumes almost nothing from its [`ConnContext`](crate::engine::ConnContext): only the
-//! inbound size limit (it ignores the peer and the raw-fd transfer channel). That narrowness is why
-//! the seam hands every engine a small protocol-neutral context rather than the JSON-RPC server
-//! substrate. Routing a binary wire to the *registered* handlers would need a procedure-level
-//! dispatch entry the core does not yet expose; that is left for later rather than built
-//! speculatively here.
-
-use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
-
-use crate::engine::{ConnContext, ProtocolEngine};
+//! The engine takes only the byte stream + size limit from its [`ConnContext`](crate::engine::ConnContext)
+//! (auth is the ONC RPC credential flavor, not the connection peer); the op-table it serves is the
+//! bound [`JsonRpcProtocol`] it captures at construction. ONC RPC has no `$/sessionSetup` handshake
+//! and this engine adds no server-push, so it serves a session with no server state and a no-op
+//! outbound — methods gated behind session setup are not reachable over this wire.
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
+
+use bytes::{Bytes, BytesMut};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use truenas_jsonrpc::{ErrorCode, JsonRpcError, JsonRpcProtocol, NullOutbound};
+use truenas_xdr::{from_bytes_with, to_bytes, Strictness, VarOpaque};
+
+use crate::engine::{ConnContext, ProtocolEngine};
 
 // --- ONC RPC message constants (RFC 5531 §9) --------------------------------
 
@@ -51,6 +55,7 @@ const ACCEPT_PROG_UNAVAIL: u32 = 1;
 const ACCEPT_PROG_MISMATCH: u32 = 2;
 const ACCEPT_PROC_UNAVAIL: u32 = 3;
 const ACCEPT_GARBAGE_ARGS: u32 = 4;
+const ACCEPT_SYSTEM_ERR: u32 = 5;
 /// `auth_flavor`: this demo accepts `AUTH_NONE` and `AUTH_SYS` (whose uid/gid it does not use) and
 /// rejects other flavors — mirroring FreeBSD's `_authenticate` (`lib/libc/rpc/svc_auth.c`). Replies
 /// always carry an `AUTH_NONE` verifier (as a real server does for these flavors).
@@ -61,14 +66,14 @@ const AUTH_REJECTEDCRED: u32 = 2;
 
 // --- The demo program -------------------------------------------------------
 
-/// The demo program number, in RFC 5531's user-defined range (`0x2000_0000..=0x3FFF_FFFF`).
+/// The demo program number, in RFC 5531's user-defined range (`0x2000_0000..=0x3FFF_FFFF`). Fixed
+/// for this reference engine; a deployment that needed a specific assigned number would make it
+/// configurable.
 const PROG: u32 = 0x2000_0001;
 /// The demo program version.
 const VERS: u32 = 1;
 /// Procedure 0 is, by ONC RPC convention, the no-op `NULL` probe (empty args, empty result).
 const PROC_NULL: u32 = 0;
-/// The demo procedure: two `i32` arguments, an `i64` sum result.
-const PROC_ADD: u32 = 1;
 
 // --- Record marking (RFC 5531 §11) ------------------------------------------
 
@@ -209,110 +214,171 @@ fn reply_auth_error(xid: u32, why: u32) -> Vec<u8> {
     to_bytes(&env).expect("auth-error reply encodes")
 }
 
-/// Route a well-formed call to the demo program and build its reply.
-fn route(xid: u32, prog: u32, vers: u32, procedure: u32, args: &[u8]) -> Vec<u8> {
-    if prog != PROG {
-        return reply_accepted(xid, ACCEPT_PROG_UNAVAIL, &[]);
-    }
-    if vers != VERS {
-        return reply_prog_mismatch(xid, VERS, VERS);
-    }
-    match procedure {
-        PROC_NULL => reply_accepted(xid, ACCEPT_SUCCESS, &[]),
-        PROC_ADD => match from_bytes::<(i32, i32)>(args) {
-            Ok((a, b)) => {
-                let sum = i64::from(a) + i64::from(b);
-                reply_accepted(xid, ACCEPT_SUCCESS, &to_bytes(&sum).expect("i64 result encodes"))
-            }
-            Err(_) => reply_accepted(xid, ACCEPT_GARBAGE_ARGS, &[]),
-        },
-        _ => reply_accepted(xid, ACCEPT_PROC_UNAVAIL, &[]),
-    }
+// --- Dispatch ---------------------------------------------------------------
+
+/// What an inbound record resolves to *before* any registered-method dispatch — computed purely,
+/// with no protocol or session.
+enum Action<'a> {
+    /// Close the connection: an undecodable prefix, or a non-CALL message a server must not answer.
+    Close,
+    /// A complete reply (an error, or the `NULL` probe) — write it as-is.
+    Reply(Vec<u8>),
+    /// Route `procedure` (a registered method's XDR proc-id) with `args` to the bound protocol.
+    Dispatch { xid: u32, procedure: u32, args: &'a [u8] },
 }
 
-/// Turn one inbound record into its reply bytes (pre-framing). `None` when there is no valid call
-/// to answer — an undecodable prefix, or a non-CALL message a server should never receive — which
-/// closes the connection.
-fn handle_record(wire: &[u8]) -> Option<Vec<u8>> {
-    let call = parse_call(wire)?;
+/// Validate an inbound record and decide what to do with it. Mirrors FreeBSD's order
+/// (`svc_getreq_common`): parse → reject a non-CALL → check `rpcvers` → authenticate → match
+/// program/version → the `NULL` probe; any other procedure becomes a [`Action::Dispatch`].
+fn precheck(wire: &[u8]) -> Action<'_> {
+    let Some(call) = parse_call(wire) else { return Action::Close };
     if call.mtype != MSG_CALL {
-        return None;
+        return Action::Close;
     }
     if call.rpcvers != RPC_VERSION {
-        return Some(reply_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION));
+        return Action::Reply(reply_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION));
     }
-    // Authentication precedes program/version matching (cf. FreeBSD svc_getreq_common): accept the
-    // AUTH_NONE / AUTH_SYS flavors, reject others with AUTH_REJECTEDCRED.
+    // Authentication precedes program/version matching: accept AUTH_NONE / AUTH_SYS, reject others.
     if call.cred_flavor != AUTH_NONE && call.cred_flavor != AUTH_SYS {
-        return Some(reply_auth_error(call.xid, AUTH_REJECTEDCRED));
+        return Action::Reply(reply_auth_error(call.xid, AUTH_REJECTEDCRED));
     }
-    Some(route(call.xid, call.prog, call.vers, call.procedure, call.args))
+    if call.prog != PROG {
+        return Action::Reply(reply_accepted(call.xid, ACCEPT_PROG_UNAVAIL, &[]));
+    }
+    if call.vers != VERS {
+        return Action::Reply(reply_prog_mismatch(call.xid, VERS, VERS));
+    }
+    if call.procedure == PROC_NULL {
+        return Action::Reply(reply_accepted(call.xid, ACCEPT_SUCCESS, &[]));
+    }
+    Action::Dispatch { xid: call.xid, procedure: call.procedure, args: call.args }
 }
 
-/// The per-connection loop: read a record, answer it, write the reply, repeat until the peer
-/// closes or sends something unanswerable. Sequential by design — this reference engine adds no
-/// pipelining or server-initiated push (those are the JSON-RPC engine's concern, not the seam's).
-async fn serve_oncrpc<IO: AsyncRead + AsyncWrite + Unpin + Send>(mut stream: IO, limit: usize) {
+/// Map a dispatch error onto the closest ONC RPC `accept_stat`. The accepted-reply status set is
+/// coarse (a program normally encodes richer errors in its own result union), so the JSON-RPC error
+/// detail is necessarily flattened.
+fn accept_stat_for(e: &JsonRpcError) -> u32 {
+    match e.code {
+        c if c == ErrorCode::MethodNotFound.code() => ACCEPT_PROC_UNAVAIL,
+        c if c == ErrorCode::InvalidParams.code() => ACCEPT_GARBAGE_ARGS,
+        _ => ACCEPT_SYSTEM_ERR,
+    }
+}
+
+/// The per-connection loop: read a record, answer it, write the reply, repeat until the peer closes
+/// or sends something unanswerable. Each non-`NULL` procedure is dispatched to the bound protocol's
+/// method whose XDR proc-id equals it. Sequential by design — this reference engine adds no
+/// pipelining or server-initiated push.
+async fn serve_oncrpc<S, IO>(mut stream: IO, limit: usize, proto: Arc<JsonRpcProtocol<S>>)
+where
+    S: Send + Sync + 'static,
+    IO: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    // One session per connection: no server state, no outbound (this wire has no session setup and
+    // no server-push). Closed at end of connection.
+    let session = proto.new_session(None, Arc::new(NullOutbound));
     let mut acc = BytesMut::with_capacity(8 * 1024);
     while let Some(record) = read_record(&mut stream, &mut acc, limit).await {
-        let Some(reply) = handle_record(&record) else { break };
+        let reply = match precheck(&record) {
+            Action::Close => break,
+            Action::Reply(bytes) => bytes,
+            // The ONC RPC procedure number IS the registered method's XDR proc-id; on success the
+            // result bytes are the method's XDR-encoded result, wrapped in the accepted reply.
+            Action::Dispatch { xid, procedure, args } => {
+                match proto.run_xdr_proc(procedure, None, args, &session).await {
+                    Ok(result) => reply_accepted(xid, ACCEPT_SUCCESS, &result),
+                    Err(e) => reply_accepted(xid, accept_stat_for(&e), &[]),
+                }
+            }
+        };
         if write_record(&mut stream, &reply).await.is_err() {
             break;
         }
     }
+    proto.close_session(&session);
 }
 
-/// The ONC RPC engine. Stateless: every connection runs the same demo program.
-pub(crate) struct OncRpcEngine;
+/// The ONC RPC engine, bound to one registered protocol. Each connection serves the demo program:
+/// the `NULL` probe plus the protocol's methods, keyed by their XDR proc-ids.
+pub(crate) struct OncRpcEngine<S> {
+    proto: Arc<JsonRpcProtocol<S>>,
+}
 
-impl ProtocolEngine for OncRpcEngine {
+impl<S> OncRpcEngine<S> {
+    /// Bind the engine to the protocol whose methods it serves over the ONC RPC wire.
+    pub(crate) fn new(proto: Arc<JsonRpcProtocol<S>>) -> Self {
+        OncRpcEngine { proto }
+    }
+}
+
+impl<S: Send + Sync + 'static> ProtocolEngine for OncRpcEngine<S> {
     fn serve<'a>(&'a self, ctx: ConnContext) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        // This engine routes on its own program table and authenticates with AUTH_NONE, so the peer
-        // identity and the raw-fd transfer channel go unused; only the inbound size limit is drawn
-        // from the connection context.
-        Box::pin(serve_oncrpc(ctx.stream, ctx.limit))
+        Box::pin(serve_oncrpc(ctx.stream, ctx.limit, self.proto.clone()))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Deserialize, Serialize};
+    use truenas_jsonrpc::{JsonRpcMethod, MethodDef, RequestCtx};
+    use truenas_xdr::from_bytes;
 
-    /// Build a record-marked `rpc_msg` CALL for the demo program with `AUTH_NONE` creds.
-    fn call(xid: u32, prog: u32, vers: u32, procedure: u32, args: &[u8]) -> Vec<u8> {
+    #[derive(Deserialize, Serialize)]
+    struct AddArgs {
+        a: i64,
+        b: i64,
+    }
+    #[derive(Deserialize, Serialize)]
+    struct AddResult {
+        sum: i64,
+    }
+
+    /// A protocol whose `math.add` is registered on XDR proc-id 1001.
+    fn add_proto() -> Arc<JsonRpcProtocol<()>> {
+        Arc::new(
+            JsonRpcProtocol::<()>::builder("demo", "1")
+                .method(JsonRpcMethod::new(
+                    MethodDef::new("math.add").xdr(1001),
+                    |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
+                ))
+                .unwrap()
+                .build(),
+        )
+    }
+
+    /// Build an `rpc_msg` CALL (no record marking) with the given fields.
+    fn msg(xid: u32, rpcvers: u32, prog: u32, vers: u32, procedure: u32, cred: u32, args: &[u8]) -> Vec<u8> {
         let prefix: CallPrefix = (
-            xid,
-            MSG_CALL,
-            RPC_VERSION,
-            prog,
-            vers,
-            procedure,
-            AUTH_NONE,
-            VarOpaque(Vec::new()),
-            AUTH_NONE,
+            xid, MSG_CALL, rpcvers, prog, vers, procedure, cred, VarOpaque(Vec::new()), AUTH_NONE,
             VarOpaque(Vec::new()),
         );
-        let mut msg = to_bytes(&prefix).unwrap();
-        msg.extend_from_slice(args);
-        rm_frame(&msg)
+        let mut m = to_bytes(&prefix).unwrap();
+        m.extend_from_slice(args);
+        m
     }
 
     /// Decode a reply record into `(reply_stat, status, body)` where `status` is the accept- or
     /// reject-stat and `body` is whatever trails it.
     fn parse_reply(record: &[u8]) -> (u32, u32, Vec<u8>) {
-        // xid, mtype(REPLY), reply_stat, then the stat-specific tail.
         let ((_xid, mtype, reply_stat), rest) =
             from_bytes_with::<(u32, u32, u32)>(record, Strictness::Lenient).unwrap();
         assert_eq!(mtype, MSG_REPLY);
         if reply_stat == MSG_ACCEPTED {
-            // verf(flavor, body) then accept_stat then the body.
             let ((_flavor, _verf, accept_stat), body) =
                 from_bytes_with::<(u32, VarOpaque, u32)>(rest, Strictness::Lenient).unwrap();
             (reply_stat, accept_stat, body.to_vec())
         } else {
-            let (reject_stat, body) =
-                from_bytes_with::<u32>(rest, Strictness::Lenient).unwrap();
+            let (reject_stat, body) = from_bytes_with::<u32>(rest, Strictness::Lenient).unwrap();
             (reply_stat, reject_stat, body.to_vec())
+        }
+    }
+
+    /// The reply bytes of an [`Action::Reply`] (panics otherwise).
+    fn reply_of(action: Action) -> Vec<u8> {
+        match action {
+            Action::Reply(b) => b,
+            _ => panic!("expected Action::Reply"),
         }
     }
 
@@ -354,84 +420,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn null_probe_succeeds() {
-        let reply = handle_record(&strip_rm(&call(7, PROG, VERS, PROC_NULL, &[]))).unwrap();
-        let (reply_stat, accept_stat, body) = parse_reply(&reply);
-        assert_eq!((reply_stat, accept_stat), (MSG_ACCEPTED, ACCEPT_SUCCESS));
-        assert!(body.is_empty());
-    }
-
-    #[tokio::test]
-    async fn add_returns_the_sum() {
-        let args = to_bytes(&(2i32, 40i32)).unwrap();
-        let reply = handle_record(&strip_rm(&call(9, PROG, VERS, PROC_ADD, &args))).unwrap();
-        let (_, accept_stat, body) = parse_reply(&reply);
-        assert_eq!(accept_stat, ACCEPT_SUCCESS);
-        assert_eq!(from_bytes::<i64>(&body).unwrap(), 42);
-    }
-
-    #[test]
-    fn unknown_procedure_program_and_version_are_reported() {
-        let strip = |v: Vec<u8>| strip_rm(&v);
-        // Unknown procedure → PROC_UNAVAIL.
-        let (_, stat, _) = parse_reply(&handle_record(&strip(call(1, PROG, VERS, 999, &[]))).unwrap());
-        assert_eq!(stat, ACCEPT_PROC_UNAVAIL);
-        // Unknown program → PROG_UNAVAIL.
-        let (_, stat, _) = parse_reply(&handle_record(&strip(call(1, 0xDEAD, VERS, PROC_NULL, &[]))).unwrap());
-        assert_eq!(stat, ACCEPT_PROG_UNAVAIL);
-        // Wrong version → PROG_MISMATCH with the supported range.
-        let (_, stat, body) =
-            parse_reply(&handle_record(&strip(call(1, PROG, 99, PROC_NULL, &[]))).unwrap());
-        assert_eq!(stat, ACCEPT_PROG_MISMATCH);
-        assert_eq!(from_bytes::<(u32, u32)>(&body).unwrap(), (VERS, VERS));
-    }
-
-    #[test]
-    fn malformed_add_args_are_garbage_args() {
-        // PROC_ADD wants two i32 (8 bytes); supply 4 → the typed decode underruns.
-        let (_, stat, _) =
-            parse_reply(&handle_record(&strip_rm(&call(1, PROG, VERS, PROC_ADD, &[0, 0, 0, 1]))).unwrap());
-        assert_eq!(stat, ACCEPT_GARBAGE_ARGS);
-    }
-
-    #[test]
-    fn wrong_rpc_version_is_denied() {
-        // Hand-build a CALL with rpcvers = 1.
-        let prefix: CallPrefix = (
-            5, MSG_CALL, 1, PROG, VERS, PROC_NULL, AUTH_NONE, VarOpaque(Vec::new()), AUTH_NONE,
-            VarOpaque(Vec::new()),
-        );
-        let (reply_stat, reject_stat, body) =
-            parse_reply(&handle_record(&to_bytes(&prefix).unwrap()).unwrap());
-        assert_eq!((reply_stat, reject_stat), (MSG_DENIED, REJECT_RPC_MISMATCH));
-        assert_eq!(from_bytes::<(u32, u32)>(&body).unwrap(), (RPC_VERSION, RPC_VERSION));
-    }
-
-    #[test]
-    fn unsupported_auth_flavor_is_denied() {
-        // AUTH_DH (3) credentials are rejected: MSG_DENIED / AUTH_ERROR / AUTH_REJECTEDCRED.
-        let prefix: CallPrefix = (
-            1, MSG_CALL, RPC_VERSION, PROG, VERS, PROC_NULL, 3, VarOpaque(Vec::new()), AUTH_NONE,
-            VarOpaque(Vec::new()),
-        );
-        let (reply_stat, reject_stat, body) =
-            parse_reply(&handle_record(&to_bytes(&prefix).unwrap()).unwrap());
-        assert_eq!((reply_stat, reject_stat), (MSG_DENIED, REJECT_AUTH_ERROR));
-        assert_eq!(from_bytes::<u32>(&body).unwrap(), AUTH_REJECTEDCRED);
-    }
-
-    #[test]
-    fn auth_sys_credentials_are_accepted() {
-        // AUTH_SYS (1) is accepted (its uid/gid is unused) — the NULL probe still succeeds.
-        let prefix: CallPrefix = (
-            1, MSG_CALL, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_SYS, VarOpaque(vec![0, 0, 0, 0]),
-            AUTH_NONE, VarOpaque(Vec::new()),
-        );
-        let (_, accept_stat, _) = parse_reply(&handle_record(&to_bytes(&prefix).unwrap()).unwrap());
-        assert_eq!(accept_stat, ACCEPT_SUCCESS);
-    }
-
-    #[tokio::test]
     async fn zero_fragment_header_is_rejected() {
         // header == 0 (length 0, not last-fragment) is malformed → the record read closes.
         let mut r: &[u8] = &[0, 0, 0, 0];
@@ -440,41 +428,100 @@ mod tests {
     }
 
     #[test]
-    fn a_reply_message_is_not_answered() {
-        // mtype = REPLY: a server must not answer it (closes the connection → None).
+    fn null_probe_succeeds() {
+        let (rs, stat, body) = parse_reply(&reply_of(precheck(&msg(7, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_NONE, &[]))));
+        assert_eq!((rs, stat), (MSG_ACCEPTED, ACCEPT_SUCCESS));
+        assert!(body.is_empty());
+    }
+
+    #[test]
+    fn wrong_program_and_version_are_reported() {
+        // Unknown program → PROG_UNAVAIL.
+        let (_, stat, _) = parse_reply(&reply_of(precheck(&msg(1, RPC_VERSION, 0xDEAD, VERS, PROC_NULL, AUTH_NONE, &[]))));
+        assert_eq!(stat, ACCEPT_PROG_UNAVAIL);
+        // Wrong version → PROG_MISMATCH with the supported range.
+        let (_, stat, body) = parse_reply(&reply_of(precheck(&msg(1, RPC_VERSION, PROG, 99, PROC_NULL, AUTH_NONE, &[]))));
+        assert_eq!(stat, ACCEPT_PROG_MISMATCH);
+        assert_eq!(from_bytes::<(u32, u32)>(&body).unwrap(), (VERS, VERS));
+    }
+
+    #[test]
+    fn wrong_rpc_version_is_denied() {
+        let (rs, reject, body) = parse_reply(&reply_of(precheck(&msg(5, 1, PROG, VERS, PROC_NULL, AUTH_NONE, &[]))));
+        assert_eq!((rs, reject), (MSG_DENIED, REJECT_RPC_MISMATCH));
+        assert_eq!(from_bytes::<(u32, u32)>(&body).unwrap(), (RPC_VERSION, RPC_VERSION));
+    }
+
+    #[test]
+    fn unsupported_auth_flavor_is_denied() {
+        // AUTH_DH (3) credentials → MSG_DENIED / AUTH_ERROR / AUTH_REJECTEDCRED.
+        let (rs, reject, body) = parse_reply(&reply_of(precheck(&msg(1, RPC_VERSION, PROG, VERS, PROC_NULL, 3, &[]))));
+        assert_eq!((rs, reject), (MSG_DENIED, REJECT_AUTH_ERROR));
+        assert_eq!(from_bytes::<u32>(&body).unwrap(), AUTH_REJECTEDCRED);
+    }
+
+    #[test]
+    fn auth_sys_credentials_are_accepted() {
+        // AUTH_SYS (1) is accepted — the NULL probe still succeeds.
+        let (_, stat, _) = parse_reply(&reply_of(precheck(&msg(1, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_SYS, &[]))));
+        assert_eq!(stat, ACCEPT_SUCCESS);
+    }
+
+    #[test]
+    fn non_call_and_truncated_close_the_connection() {
+        // A REPLY message: a server must not answer it.
         let prefix: CallPrefix = (
             1, MSG_REPLY, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_NONE, VarOpaque(Vec::new()),
             AUTH_NONE, VarOpaque(Vec::new()),
         );
-        assert!(handle_record(&to_bytes(&prefix).unwrap()).is_none());
+        assert!(matches!(precheck(&to_bytes(&prefix).unwrap()), Action::Close));
         // A truncated prefix has no xid to reply to → also closes.
-        assert!(handle_record(&[0, 0, 0, 1]).is_none());
+        assert!(matches!(precheck(&[0, 0, 0, 1]), Action::Close));
+    }
+
+    #[test]
+    fn registered_procedure_becomes_a_dispatch() {
+        // A non-NULL procedure resolves to a dispatch carrying the proc-id + raw args.
+        match precheck(&msg(1, RPC_VERSION, PROG, VERS, 1001, AUTH_NONE, &[1, 2, 3, 4])) {
+            Action::Dispatch { xid, procedure, args } => {
+                assert_eq!((xid, procedure), (1, 1001));
+                assert_eq!(args, &[1, 2, 3, 4]);
+            }
+            _ => panic!("expected Action::Dispatch"),
+        }
+    }
+
+    #[test]
+    fn error_codes_map_to_accept_stats() {
+        assert_eq!(accept_stat_for(&JsonRpcError::method_not_found("x")), ACCEPT_PROC_UNAVAIL);
+        assert_eq!(accept_stat_for(&JsonRpcError::new(ErrorCode::InvalidParams, "x")), ACCEPT_GARBAGE_ARGS);
+        assert_eq!(accept_stat_for(&JsonRpcError::request_failed("x")), ACCEPT_SYSTEM_ERR);
     }
 
     #[tokio::test]
-    async fn serve_loop_answers_over_a_duplex_stream() {
+    async fn serve_loop_dispatches_a_registered_method() {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(serve_oncrpc(server, 4 * 1024 * 1024));
-
-        // NULL probe, then ADD, then close — replies come back framed and in order.
-        client.write_all(&call(1, PROG, VERS, PROC_NULL, &[])).await.unwrap();
+        let task = tokio::spawn(serve_oncrpc(server, 4 * 1024 * 1024, add_proto()));
         let mut acc = BytesMut::new();
-        let (_, accept_stat, _) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
-        assert_eq!(accept_stat, ACCEPT_SUCCESS);
 
-        let args = to_bytes(&(20i32, 22i32)).unwrap();
-        client.write_all(&call(2, PROG, VERS, PROC_ADD, &args)).await.unwrap();
-        let (_, accept_stat, body) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
-        assert_eq!(accept_stat, ACCEPT_SUCCESS);
-        assert_eq!(from_bytes::<i64>(&body).unwrap(), 42);
+        // NULL probe (self-contained) → SUCCESS, empty.
+        client.write_all(&rm_frame(&msg(1, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_NONE, &[]))).await.unwrap();
+        let (_, stat, body) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
+        assert_eq!((stat, body.len()), (ACCEPT_SUCCESS, 0));
 
-        drop(client); // EOF → the serve loop exits cleanly.
+        // procedure 1001 → the registered math.add(20, 22) → 42.
+        let args = to_bytes(&AddArgs { a: 20, b: 22 }).unwrap();
+        client.write_all(&rm_frame(&msg(2, RPC_VERSION, PROG, VERS, 1001, AUTH_NONE, &args))).await.unwrap();
+        let (_, stat, body) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
+        assert_eq!(stat, ACCEPT_SUCCESS);
+        assert_eq!(from_bytes::<AddResult>(&body).unwrap().sum, 42);
+
+        // An unregistered procedure → PROC_UNAVAIL (the method-not-found maps through).
+        client.write_all(&rm_frame(&msg(3, RPC_VERSION, PROG, VERS, 9999, AUTH_NONE, &[]))).await.unwrap();
+        let (_, stat, _) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
+        assert_eq!(stat, ACCEPT_PROC_UNAVAIL);
+
+        drop(client);
         task.await.unwrap();
-    }
-
-    /// Strip the record marking from a single-fragment record, exposing the `rpc_msg` for the pure
-    /// `handle_record` path.
-    fn strip_rm(framed: &[u8]) -> Vec<u8> {
-        framed[RM_HEADER..].to_vec()
     }
 }
