@@ -909,6 +909,98 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         Dispatched::Reply(out)
     }
 
+    /// The synchronous prelude shared by the binary-wire dispatch paths
+    /// ([`dispatch_xdr`](Self::dispatch_xdr) and [`run_xdr_proc`](Self::run_xdr_proc)): reject a
+    /// closed session, look the method up by proc-id, apply the session-established gate, and build
+    /// the per-request pipeline + context. Returns the ready-to-run pieces (pipeline, request
+    /// context, `is_async`), or the [`JsonRpcError`] to reply with.
+    ///
+    /// **`#[inline(always)]` is load-bearing, not cosmetic.** This returns the ~100-byte pipeline by
+    /// value; with two callers a plain `#[inline]` is *declined* by LLVM, leaving a real call plus a
+    /// return-slot memcpy on the dispatch hot path — ~2% on the XDR cell, confirmed back-to-back.
+    /// Forcing the inline folds it into each caller, so the hot path keeps the exact shape it had
+    /// before this seam existed (see `PERF.md`).
+    #[inline(always)]
+    fn prepare_xdr(
+        &self,
+        proc_id: u32,
+        rid: Option<[u8; 16]>,
+        session: &Arc<Session<S>>,
+    ) -> Result<(Pipeline<S>, RequestCtx<S>, bool), JsonRpcError> {
+        if session.lifecycle() == SessionLifecycle::Closed {
+            return Err(JsonRpcError::session_not_established("Session is closed"));
+        }
+        let method = match self.registry.xdr_methods.get(&proc_id) {
+            Some(m) => m.clone(),
+            None => return Err(JsonRpcError::method_not_found("Method not found")),
+        };
+        if self.has_session_setup
+            && !method.meta.pre_auth
+            && session.lifecycle() != SessionLifecycle::Established
+        {
+            return Err(JsonRpcError::session_not_established("Session not established"));
+        }
+        let audit_id =
+            if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
+        let req = if method.meta.audit {
+            JsonRpcRequest {
+                method: method.meta.name.to_string(),
+                id: audit_id.clone(),
+                params: Value::Null,
+                roles: method.meta.roles.to_vec(),
+            }
+        } else {
+            JsonRpcRequest { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
+        };
+        let is_async = matches!(method.imp, MethodImpl::Async(_));
+        let cx = RequestCtx::new_xdr(
+            rid,
+            session.clone(),
+            self.never_cancel.clone(),
+            method.meta.audit,
+            Some(self.caller.clone()),
+        );
+        let pipeline = Pipeline {
+            method,
+            session: session.clone(),
+            req,
+            rid: audit_id,
+            audit_sink: self.audit_sink.clone(),
+            py_dispatcher: None,
+        };
+        Ok((pipeline, cx, is_async))
+    }
+
+    /// Run a registered method by its XDR proc-id over raw XDR-encoded `params`, returning the
+    /// XDR-encoded result bytes (or the [`JsonRpcError`]). The **engine-facing** entry point: a
+    /// binary transport that decodes its own envelope to `(proc_id, params)` calls this and wraps
+    /// the outcome in its own reply framing — so a method registered once (with `.xdr(proc_id)`) is
+    /// reachable over *any* binary wire, not only the built-in TXDR framing.
+    ///
+    /// `rid` is the optional 16-byte request id surfaced to the handler (read lazily as a UUID via
+    /// `cx.id()`) and to the audit record; pass `None` when the wire carries no UUID id. The
+    /// returned error's `code` lets a caller map a failure onto its own status (e.g. a
+    /// `METHOD_NOT_FOUND` onto an ONC RPC `PROC_UNAVAIL`). Mirrors [`dispatch`](Self::dispatch)'s
+    /// XDR path exactly — decode → authorize → run → audit — minus the TXDR framing.
+    pub async fn run_xdr_proc(
+        &self,
+        proc_id: u32,
+        rid: Option<[u8; 16]>,
+        params: &[u8],
+        session: &Arc<Session<S>>,
+    ) -> Result<Vec<u8>, JsonRpcError> {
+        let (pipeline, cx, is_async) = self.prepare_xdr(proc_id, rid, session)?;
+        if is_async {
+            pipeline.run_xdr_async(params, cx).await
+        } else {
+            let params = params.to_vec();
+            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
+                Ok(result) => result,
+                Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+            }
+        }
+    }
+
     /// Dispatch an XDR binary-wire frame (the [`is_xdr`](truenas_xdr::frame::is_xdr) magic was
     /// already matched). v1 scope: plain + filterable methods (subscription/python over XDR reply
     /// method-not-found). Routes through [`Pipeline::run_xdr`], which mirrors the JSON sync path
@@ -931,79 +1023,30 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let rid = request.rid;
         let note = rid.is_none();
 
-        // A CLOSED session accepts nothing further.
-        if session.lifecycle() == SessionLifecycle::Closed {
-            return finish(note, self.xdr_error(rid, &JsonRpcError::session_not_established("Session is closed")));
-        }
-        // Method lookup by proc-id.
-        let method = match self.registry.xdr_methods.get(&request.proc_id) {
-            Some(m) => m.clone(),
-            None => {
-                return finish(note, self.xdr_error(rid, &JsonRpcError::method_not_found("Method not found")))
+        // The prelude (closed-session check, proc lookup, gate, pipeline build) is shared with
+        // `run_xdr_proc` via the force-inlined `prepare_xdr`; its early-exits become a JsonRpcError
+        // that the wrap below reframes exactly as the inline version did. The async run stays inline
+        // here (the run tail, not the prelude, is the only thing not shared), so this hot path's
+        // future gains no extra layer. Decode → authorize → run → audit: async inline on the runtime
+        // (no `spawn_blocking` hop, no params copy); sync/filterable on the blocking pool (parity
+        // with the JSON `run_sync`) so a CPU-bound or blocking handler can't stall the runtime.
+        let outcome = match self.prepare_xdr(request.proc_id, rid, session) {
+            Ok((pipeline, cx, is_async)) => {
+                if is_async {
+                    pipeline.run_xdr_async(request.params, cx).await
+                } else {
+                    let params = request.params.to_vec();
+                    match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
+                        Ok(result) => result,
+                        // A handler panic unwinds the worker thread; reply INTERNAL_ERROR (the JSON
+                        // sync path does the same via `run_blocking`).
+                        Err(_panicked) => {
+                            Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error"))
+                        }
+                    }
+                }
             }
-        };
-        // Session-established gate (only when session setup is configured).
-        if self.has_session_setup
-            && !method.meta.pre_auth
-            && session.lifecycle() != SessionLifecycle::Established
-        {
-            return finish(
-                note,
-                self.xdr_error(rid, &JsonRpcError::session_not_established("Session not established")),
-            );
-        }
-
-        // The id is needed only by the audit record; authorization never reads it, and a handler
-        // reads it lazily through `cx` (which keeps the raw bytes and formats the UUID on demand).
-        // So materialize the canonical string into the authz/audit snapshot only when this method
-        // is audited — the wire reply frames the raw `rid` regardless.
-        let audit_id =
-            if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
-        // The audit snapshot (`req`) is read only when the method is audited (`do_audit`). A plain
-        // method never touches it, so skip its per-request allocations — notably the method-name
-        // `String` — and pass an empty placeholder; `run_xdr*` fills `params` lazily under the same
-        // condition. (Authorization no longer needs it: the gate is a native role-mask subset test.)
-        let req = if method.meta.audit {
-            JsonRpcRequest {
-                method: method.meta.name.to_string(),
-                id: audit_id.clone(),
-                params: Value::Null,
-                roles: method.meta.roles.to_vec(),
-            }
-        } else {
-            JsonRpcRequest { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
-        };
-        // An async method runs inline (it yields, so it can't stall the reactor — parity with the
-        // JSON async path); a sync/filterable method runs on the blocking pool.
-        let is_async = matches!(method.imp, MethodImpl::Async(_));
-        let cx = RequestCtx::new_xdr(
-            rid,
-            session.clone(),
-            self.never_cancel.clone(),
-            method.meta.audit,
-            Some(self.caller.clone()),
-        );
-        let pipeline = Pipeline {
-            method,
-            session: session.clone(),
-            req,
-            rid: audit_id,
-            audit_sink: self.audit_sink.clone(),
-            py_dispatcher: None,
-        };
-        // Decode → authorize → run → audit. Async: inline on the runtime (no `spawn_blocking` hop,
-        // no params copy). Sync/filterable: on the blocking pool — parity with the JSON sync path
-        // (`run_sync`) — so a CPU-bound or blocking handler can't stall the async runtime.
-        let outcome = if is_async {
-            pipeline.run_xdr_async(request.params, cx).await
-        } else {
-            let params = request.params.to_vec();
-            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
-                Ok(result) => result,
-                // A handler panic unwinds the worker thread; reply INTERNAL_ERROR (the JSON sync
-                // path does the same via `run_blocking`).
-                Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
-            }
+            Err(e) => Err(e),
         };
         let reply = match outcome {
             Ok(result_bytes) => {
