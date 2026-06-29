@@ -16,7 +16,7 @@ use truenas_jsonrpc::JsonRpcProtocol;
 
 use crate::engine::{ConnContext, JsonRpcEngine, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
-use crate::oncrpc::OncRpcEngine;
+use crate::oncrpc::{OncRpcEngine, DEFAULT_PROGRAM, DEFAULT_VERSION};
 use crate::peer::{self, Peer, UnixTrust};
 #[cfg(feature = "websocket")]
 use crate::peer::ForwardedOrigin;
@@ -53,6 +53,42 @@ impl UnixConfig {
     #[must_use]
     pub fn trust(mut self, trust: UnixTrust) -> Self {
         self.trust = trust;
+        self
+    }
+}
+
+/// How to serve a registered protocol over the ONC RPC wire (see
+/// [`serve_oncrpc_unix_listener`](JsonRpcServer::serve_oncrpc_unix_listener)): which protocol's
+/// methods to serve, and the ONC RPC program number + version they answer to. [`new`](Self::new)
+/// defaults the program/version to the reference engine's (`0x2000_0001` / `1`); override with
+/// [`program`](Self::program) / [`version`](Self::version).
+pub struct OncRpcConfig {
+    /// The registered protocol whose methods are served — each method's XDR proc-id is its procedure.
+    pub protocol: String,
+    /// The ONC RPC program number this listener answers to.
+    pub program: u32,
+    /// The ONC RPC program version.
+    pub version: u32,
+}
+
+impl OncRpcConfig {
+    /// Serve the registered protocol `protocol`, defaulting the ONC RPC program/version to the
+    /// reference engine's.
+    pub fn new(protocol: impl Into<String>) -> Self {
+        OncRpcConfig { protocol: protocol.into(), program: DEFAULT_PROGRAM, version: DEFAULT_VERSION }
+    }
+
+    /// Set the ONC RPC program number (e.g. in RFC 5531's user range `0x2000_0000..=0x3FFF_FFFF`).
+    #[must_use]
+    pub fn program(mut self, program: u32) -> Self {
+        self.program = program;
+        self
+    }
+
+    /// Set the ONC RPC program version.
+    #[must_use]
+    pub fn version(mut self, version: u32) -> Self {
+        self.version = version;
         self
     }
 }
@@ -307,26 +343,28 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     }
 
     /// Accept ONC RPC connections (RFC 5531, record-marking framed) on a bound AF_UNIX `listener`,
-    /// serving the methods of the registered protocol named `protocol` over the binary wire — each
-    /// method's XDR proc-id is its ONC RPC procedure number. So a method registered once is reachable
-    /// over *both* the JSON-RPC transports and this one (one service, two wires), chosen per listener.
-    /// The demo program authenticates with `AUTH_NONE`/`AUTH_SYS`, so it is offered only over AF_UNIX
-    /// (local peer-credential trust), never a network transport. Errors before serving if no protocol
-    /// of that name is registered. Runs forever on the happy path.
+    /// serving the methods of `config`'s registered protocol over the binary wire under its ONC RPC
+    /// program/version — each method's XDR proc-id is its procedure number. So a method registered
+    /// once is reachable over *both* the JSON-RPC transports and this one (one service, two wires),
+    /// chosen per listener. The demo authenticates with `AUTH_NONE`/`AUTH_SYS`, so it is offered only
+    /// over AF_UNIX (local peer-credential trust), never a network transport. Errors before serving if
+    /// the named protocol is not registered. Runs forever on the happy path.
     pub async fn serve_oncrpc_unix_listener(
         &self,
         listener: UnixListener,
-        protocol: impl Into<String>,
+        config: OncRpcConfig,
     ) -> std::io::Result<()> {
-        let name = protocol.into();
-        let proto = self.shared.protocols.get(&name).cloned().ok_or_else(|| {
+        let proto = self.shared.protocols.get(&config.protocol).cloned().ok_or_else(|| {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("serve_oncrpc_unix_listener: no protocol named '{name}' is registered"),
+                format!(
+                    "serve_oncrpc_unix_listener: no protocol named '{}' is registered",
+                    config.protocol
+                ),
             )
         })?;
-        self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(OncRpcEngine::new(proto)))
-            .await
+        let engine = OncRpcEngine::new(proto, config.program, config.version);
+        self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(engine)).await
     }
 
     /// Bind and serve a TCP `addr` (length-prefixed JSON framing). Refuses (before binding) if a

@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_jsonrpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_jsonrpc_server::{framing, JsonRpcServer, UnixConfig, UnixTrust};
+use truenas_jsonrpc_server::{framing, JsonRpcServer, OncRpcConfig, UnixConfig, UnixTrust};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
 // The ONC RPC demo program (matches the engine).
@@ -118,7 +118,9 @@ async fn main() -> std::io::Result<()> {
         tokio::spawn(async move { json_srv.serve_unix_listener(json_listener, UnixTrust::Local).await });
     let onc_srv = server.clone();
     let onc_task =
-        tokio::spawn(async move { onc_srv.serve_oncrpc_unix_listener(onc_listener, "demo").await });
+        tokio::spawn(
+            async move { onc_srv.serve_oncrpc_unix_listener(onc_listener, OncRpcConfig::new("demo")).await },
+        );
 
     // Call the same method over each wire.
     let json_sum = add_over_json_rpc(&json_path).await;

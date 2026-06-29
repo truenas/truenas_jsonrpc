@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_jsonrpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_jsonrpc_server::{JsonRpcServer, UnixConfig};
+use truenas_jsonrpc_server::{JsonRpcServer, OncRpcConfig, UnixConfig};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
 const PROG: u32 = 0x2000_0001;
@@ -74,7 +74,8 @@ async fn registered_method_served_over_oncrpc() {
     let _ = std::fs::remove_file(&path);
     let srv = JsonRpcServer::<()>::builder("dual-wire").protocol("demo", proto()).build();
     let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
-    let task = tokio::spawn(async move { srv.serve_oncrpc_unix_listener(listener, "demo").await });
+    let task =
+        tokio::spawn(async move { srv.serve_oncrpc_unix_listener(listener, OncRpcConfig::new("demo")).await });
 
     let mut client = UnixStream::connect(&path).await.unwrap();
 

@@ -32,7 +32,7 @@ mod ws;
 
 pub use engine::{AsyncStream, ConnContext, ProtocolEngine};
 pub use peer::{ForwardedOrigin, Peer, TlsPeer, Transport, TransportPosture, Ucred, UnixTrust};
-pub use server::{JsonRpcServer, JsonRpcServerBuilder, UnixConfig};
+pub use server::{JsonRpcServer, JsonRpcServerBuilder, OncRpcConfig, UnixConfig};
 pub use transfer::FileTransferExt;
 #[cfg(feature = "tls")]
 pub use tls::{TlsConfig, TlsMode};
