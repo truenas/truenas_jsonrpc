@@ -363,7 +363,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                 ),
             )
         })?;
-        let engine = OncRpcEngine::new(proto, config.program, config.version);
+        let engine = OncRpcEngine::new(proto.service().clone(), config.program, config.version);
         self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(engine)).await
     }
 

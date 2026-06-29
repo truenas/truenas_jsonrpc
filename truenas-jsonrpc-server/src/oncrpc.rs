@@ -15,13 +15,13 @@
 //!     `AUTH_NONE` and `AUTH_SYS` credential flavors and rejects others with `AUTH_REJECTEDCRED`.
 //!   * **Dispatch (layer 5):** routed on `(program, version, procedure)` — a `NULL` probe
 //!     (procedure 0), and every other procedure number dispatched to the **registered** method whose
-//!     XDR proc-id equals it, via [`JsonRpcProtocol::run_xdr_proc`]. So a method registered once
+//!     XDR proc-id equals it, via [`Service::run_proc`]. So a method registered once
 //!     (with `.xdr(proc_id)`) is served over *both* the JSON-RPC wire and this one — one service,
 //!     two wires — differing only in framing and envelope.
 //!
 //! The engine takes only the byte stream + size limit from its [`ConnContext`](crate::engine::ConnContext)
 //! (auth is the ONC RPC credential flavor, not the connection peer); the op-table it serves is the
-//! bound [`JsonRpcProtocol`] it captures at construction. ONC RPC has no `$/sessionSetup` handshake
+//! bound [`Service`] it captures at construction. ONC RPC has no `$/sessionSetup` handshake
 //! and this engine adds no server-push, so it serves a session with no server state and a no-op
 //! outbound — methods gated behind session setup are not reachable over this wire.
 
@@ -31,7 +31,7 @@ use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use truenas_jsonrpc::{ErrorCode, JsonRpcError, JsonRpcProtocol, NullOutbound};
+use truenas_jsonrpc::{ErrorCode, JsonRpcError, NullOutbound, Service};
 use truenas_xdr::{from_bytes_with, to_bytes, Strictness, VarOpaque};
 
 use crate::engine::{ConnContext, ProtocolEngine};
@@ -272,7 +272,7 @@ fn accept_stat_for(e: &JsonRpcError) -> u32 {
 async fn serve_oncrpc<S, IO>(
     mut stream: IO,
     limit: usize,
-    proto: Arc<JsonRpcProtocol<S>>,
+    service: Arc<Service<S>>,
     program: u32,
     version: u32,
 ) where
@@ -281,7 +281,7 @@ async fn serve_oncrpc<S, IO>(
 {
     // One session per connection: no server state, no outbound (this wire has no session setup and
     // no server-push). Closed at end of connection.
-    let session = proto.new_session(None, Arc::new(NullOutbound));
+    let session = service.new_session(None, Arc::new(NullOutbound));
     let mut acc = BytesMut::with_capacity(8 * 1024);
     while let Some(record) = read_record(&mut stream, &mut acc, limit).await {
         let reply = match precheck(&record, program, version) {
@@ -290,7 +290,7 @@ async fn serve_oncrpc<S, IO>(
             // The ONC RPC procedure number IS the registered method's XDR proc-id; on success the
             // result bytes are the method's XDR-encoded result, wrapped in the accepted reply.
             Action::Dispatch { xid, procedure, args } => {
-                match proto.run_xdr_proc(procedure, None, args, &session).await {
+                match service.run_proc(procedure, None, args, &session).await {
                     Ok(result) => reply_accepted(xid, ACCEPT_SUCCESS, &result),
                     Err(e) => reply_accepted(xid, accept_stat_for(&e), &[]),
                 }
@@ -300,28 +300,28 @@ async fn serve_oncrpc<S, IO>(
             break;
         }
     }
-    proto.close_session(&session);
+    service.close_session(&session);
 }
 
-/// The ONC RPC engine, bound to one registered protocol. Each connection serves the demo program:
-/// the `NULL` probe plus the protocol's methods, keyed by their XDR proc-ids.
+/// The ONC RPC engine, bound to one registered [`Service`] op-table. Each connection serves the demo
+/// program: the `NULL` probe plus the service's methods, keyed by their XDR proc-ids.
 pub(crate) struct OncRpcEngine<S> {
-    proto: Arc<JsonRpcProtocol<S>>,
+    service: Arc<Service<S>>,
     program: u32,
     version: u32,
 }
 
 impl<S> OncRpcEngine<S> {
-    /// Bind the engine to the protocol whose methods it serves, answering ONC RPC `program` /
+    /// Bind the engine to the op-table whose methods it serves, answering ONC RPC `program` /
     /// `version`.
-    pub(crate) fn new(proto: Arc<JsonRpcProtocol<S>>, program: u32, version: u32) -> Self {
-        OncRpcEngine { proto, program, version }
+    pub(crate) fn new(service: Arc<Service<S>>, program: u32, version: u32) -> Self {
+        OncRpcEngine { service, program, version }
     }
 }
 
 impl<S: Send + Sync + 'static> ProtocolEngine for OncRpcEngine<S> {
     fn serve<'a>(&'a self, ctx: ConnContext) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(serve_oncrpc(ctx.stream, ctx.limit, self.proto.clone(), self.program, self.version))
+        Box::pin(serve_oncrpc(ctx.stream, ctx.limit, self.service.clone(), self.program, self.version))
     }
 }
 
@@ -329,7 +329,7 @@ impl<S: Send + Sync + 'static> ProtocolEngine for OncRpcEngine<S> {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
-    use truenas_jsonrpc::{JsonRpcMethod, MethodDef, RequestCtx};
+    use truenas_jsonrpc::{JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
     use truenas_xdr::from_bytes;
 
     #[derive(Deserialize, Serialize)]
@@ -535,7 +535,8 @@ mod tests {
     #[tokio::test]
     async fn serve_loop_dispatches_a_registered_method() {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let task = tokio::spawn(serve_oncrpc(server, 4 * 1024 * 1024, add_proto(), PROG, VERS));
+        let task =
+            tokio::spawn(serve_oncrpc(server, 4 * 1024 * 1024, add_proto().service().clone(), PROG, VERS));
         let mut acc = BytesMut::new();
 
         // NULL probe (self-contained) → SUCCESS, empty.

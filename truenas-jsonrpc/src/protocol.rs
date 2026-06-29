@@ -844,6 +844,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         &self.version
     }
 
+    /// The wire-neutral [`Service`] op-table backing this protocol — the registered methods + run
+    /// core a binary engine (e.g. ONC RPC) consumes to serve the *same* methods over its own wire.
+    pub fn service(&self) -> &Arc<Service<S>> {
+        &self.service
+    }
+
     /// Whether `$/sessionSetup` authentication is configured (a network transport
     /// requires this).
     pub fn has_session_setup(&self) -> bool {
@@ -1028,19 +1034,6 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
         out.push(b']');
         Dispatched::Reply(out)
-    }
-
-    /// Run a registered method by its XDR proc-id — the **engine-facing** op-table entry. Delegates
-    /// to the wire-neutral [`Service::run_proc`]; kept here as a source-compatible shim for the ONC
-    /// RPC engine and the XDR-dispatch tests that still reach it through the JSON-RPC view.
-    pub async fn run_xdr_proc(
-        &self,
-        proc_id: u32,
-        rid: Option<[u8; 16]>,
-        params: &[u8],
-        session: &Arc<Session<S>>,
-    ) -> Result<Vec<u8>, JsonRpcError> {
-        self.service.run_proc(proc_id, rid, params, session).await
     }
 
     /// Dispatch an XDR binary-wire frame (the [`is_xdr`](truenas_xdr::frame::is_xdr) magic was

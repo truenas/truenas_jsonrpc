@@ -70,30 +70,30 @@ async fn add_dispatch_matches_golden() {
 }
 
 #[tokio::test]
-async fn run_xdr_proc_routes_to_registered_methods() {
-    // The engine-facing entry: a method registered with `.xdr(1001)` is reachable by proc-id + raw
-    // XDR params, returning the XDR-encoded result bytes (no TXDR frame envelope). This is what lets
-    // a non-TXDR binary engine serve the same registered methods. Both dispatch models (sync on the
-    // blocking pool, async inline) are exercised; the result is identical.
+async fn run_proc_routes_to_registered_methods() {
+    // The engine-facing op-table entry ([`Service::run_proc`]): a method registered with `.xdr(1001)`
+    // is reachable by proc-id + raw XDR params, returning the XDR-encoded result bytes (no TXDR frame
+    // envelope). This is what lets a non-TXDR binary engine serve the same registered methods. Both
+    // dispatch models (sync on the blocking pool, async inline) are exercised; the result is identical.
     let args = to_bytes(&AddArgs { a: 2, b: 40 }).unwrap();
     for proto in [add_proto(), add_proto_async()] {
         let session = proto.new_session(Some(()), Arc::new(NullOutbound));
-        let bytes = proto.run_xdr_proc(1001, None, &args, &session).await.unwrap();
+        let bytes = proto.service().run_proc(1001, None, &args, &session).await.unwrap();
         assert_eq!(truenas_xdr::from_bytes::<AddResult>(&bytes).unwrap().sum, 42);
     }
 }
 
 #[tokio::test]
-async fn run_xdr_proc_surfaces_errors() {
+async fn run_proc_surfaces_errors() {
     let args = to_bytes(&AddArgs { a: 0, b: 0 }).unwrap();
     let proto = add_proto();
     let session = proto.new_session(Some(()), Arc::new(NullOutbound));
 
     // Unknown proc-id → METHOD_NOT_FOUND, for the caller to map onto its own status.
-    let nf = proto.run_xdr_proc(9999, None, &args, &session).await.unwrap_err();
+    let nf = proto.service().run_proc(9999, None, &args, &session).await.unwrap_err();
     assert_eq!(nf.code, -32601);
 
-    // A panicking sync handler over `run_xdr_proc` surfaces INTERNAL_ERROR (the spawn_blocking
+    // A panicking sync handler over `run_proc` surfaces INTERNAL_ERROR (the spawn_blocking
     // worker unwinds) — parity with the framed XDR path.
     let boom = JsonRpcProtocol::<()>::builder("c", "1")
         .method(JsonRpcMethod::new(
@@ -103,7 +103,7 @@ async fn run_xdr_proc_surfaces_errors() {
         .unwrap()
         .build();
     let bsession = boom.new_session(Some(()), Arc::new(NullOutbound));
-    let panicked = boom.run_xdr_proc(2001, None, &args, &bsession).await.unwrap_err();
+    let panicked = boom.service().run_proc(2001, None, &args, &bsession).await.unwrap_err();
     assert_eq!(panicked.code, -32603);
 }
 
