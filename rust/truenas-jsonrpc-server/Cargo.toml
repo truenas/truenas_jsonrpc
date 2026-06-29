@@ -39,8 +39,8 @@ openssl-sys = { version = "0.9", optional = true } # socket-BIO FFI for the kTLS
 tokio-openssl = { version = "0.6", optional = true } # the userspace-TLS SslStream pump
 foreign-types = { version = "0.3", optional = true } # ForeignType::as_ptr for the raw SSL*
 # Header types (`http::HeaderMap`) for the forwarded-origin extractor — read on the WebSocket
-# upgrade request. Already in the lock (transitive via tokio-tungstenite), so no new crate.
-http = "1"
+# upgrade request. Gated on `websocket` (its only use), so a non-WS build pulls no http.
+http = { version = "1", optional = true }
 # WebSocket transport: JSON-RPC framed as WebSocket messages (the library owns the framing, so
 # no raw-fd transfer). Mirrors Python's optional `websockets` extra.
 tokio-tungstenite = { version = "0.24", optional = true }
@@ -52,8 +52,9 @@ futures-util = "0.3"
 # Encrypted TCP via system OpenSSL (kernel TLS or a userspace pump, per TlsMode). Off by
 # default: the default build pulls no openssl crates.
 tls = ["dep:openssl", "dep:openssl-sys", "dep:tokio-openssl", "dep:foreign-types"]
-# WebSocket transport (ws://). Off by default.
-websocket = ["dep:tokio-tungstenite"]
+# WebSocket transport (ws://). Off by default — pulls tokio-tungstenite + http (the upgrade-header
+# parser for the forwarded-origin extractor) and nothing else; a non-WS build carries none of it.
+websocket = ["dep:tokio-tungstenite", "dep:http"]
 # SCM_RIGHTS control-frame primitives (`scm`) for handing a connection fd to a local auth broker.
 # No new dependencies (nix is already in); off by default — the auth crate's `passthrough` enables it.
 passthrough = []

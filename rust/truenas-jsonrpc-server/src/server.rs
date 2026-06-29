@@ -10,13 +10,16 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[cfg(feature = "websocket")]
 use http::HeaderMap;
 use tokio::net::{TcpListener, ToSocketAddrs, UnixListener};
 use truenas_jsonrpc::JsonRpcProtocol;
 
 use crate::connection;
 use crate::framing::DEFAULT_LIMIT;
-use crate::peer::{self, ForwardedOrigin, Peer, UnixTrust};
+use crate::peer::{self, Peer, UnixTrust};
+#[cfg(feature = "websocket")]
+use crate::peer::ForwardedOrigin;
 
 /// Listen on an AF_UNIX socket. `mode` is applied to the socket file after bind (`None`
 /// leaves the umask default). The path must not already exist (the caller manages stale
@@ -58,7 +61,9 @@ impl UnixConfig {
 type StateFn<S> = Box<dyn Fn(&Peer) -> Option<S> + Send + Sync>;
 
 /// A user-supplied parser of a reverse proxy's forwarded request metadata (the WebSocket upgrade
-/// headers) into the real client [`ForwardedOrigin`]. Run only on a `Proxied` listener.
+/// headers) into the real client [`ForwardedOrigin`]. Run only on a `Proxied` listener. WebSocket-only
+/// (it takes the upgrade `HeaderMap`), so it's gated with the rest of the forwarded-extractor seam.
+#[cfg(feature = "websocket")]
 type ForwardedFn = Arc<dyn Fn(&Peer, &HeaderMap) -> Option<ForwardedOrigin> + Send + Sync>;
 
 /// Shared, immutable server state behind an `Arc`, read by every connection task.
@@ -68,8 +73,9 @@ pub(crate) struct ServerShared<S> {
     pub(crate) state_fn: StateFn<S>,
     pub(crate) limit: usize,
     pub(crate) allow_unauthenticated: bool,
-    /// User-supplied forwarded-origin parser; only read by the WebSocket accept path.
-    #[cfg_attr(not(feature = "websocket"), allow(dead_code))]
+    /// User-supplied forwarded-origin parser; only meaningful on the WebSocket accept path, so it
+    /// exists only with the `websocket` feature.
+    #[cfg(feature = "websocket")]
     pub(crate) forwarded_extractor: Option<ForwardedFn>,
 }
 
@@ -90,6 +96,7 @@ pub struct JsonRpcServerBuilder<S> {
     state_fn: Option<StateFn<S>>,
     limit: usize,
     allow_unauthenticated: bool,
+    #[cfg(feature = "websocket")]
     forwarded_extractor: Option<ForwardedFn>,
 }
 
@@ -139,7 +146,8 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
     /// immediate peer. [`ForwardedOrigin::from_real_remote_headers`] is the drop-in for the standard
     /// nginx setup. **Honored only on a `Proxied` listener** (trust is the listener's posture +
     /// socket permissions) — never on a trusted-local or direct connection, where a client could
-    /// forge the headers.
+    /// forge the headers. Requires the `websocket` feature (it parses the upgrade headers).
+    #[cfg(feature = "websocket")]
     #[must_use]
     pub fn forwarded_extractor(
         mut self,
@@ -159,6 +167,7 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
                 state_fn: self.state_fn.unwrap_or_else(|| Box::new(|_| None)),
                 limit: self.limit,
                 allow_unauthenticated: self.allow_unauthenticated,
+                #[cfg(feature = "websocket")]
                 forwarded_extractor: self.forwarded_extractor,
             }),
         }
@@ -186,6 +195,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
             state_fn: None,
             limit: DEFAULT_LIMIT,
             allow_unauthenticated: false,
+            #[cfg(feature = "websocket")]
             forwarded_extractor: None,
         }
     }

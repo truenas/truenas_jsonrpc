@@ -5,6 +5,7 @@
 
 use std::net::SocketAddr;
 
+#[cfg(feature = "websocket")]
 use http::HeaderMap;
 use serde::{Deserialize, Serialize};
 
@@ -81,7 +82,8 @@ impl ForwardedOrigin {
     /// `X-Real-Remote-Port`, and `X-Https` (`"on"` ⇒ the client→proxy leg was TLS). `None` if the
     /// address header is absent or empty. A drop-in
     /// [`forwarded_extractor`](crate::JsonRpcServerBuilder::forwarded_extractor) for the standard
-    /// nginx setup; pass your own closure to read different headers.
+    /// nginx setup; pass your own closure to read different headers. Requires the `websocket` feature.
+    #[cfg(feature = "websocket")]
     pub fn from_real_remote_headers(headers: &HeaderMap) -> Option<Self> {
         let addr = headers.get("x-real-remote-addr")?.to_str().ok()?.trim();
         if addr.is_empty() {
@@ -232,7 +234,7 @@ pub(crate) fn set_blocking(fd: std::os::fd::RawFd, blocking: bool) -> std::io::R
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "websocket"))]
 mod tests {
     use super::*;
 
