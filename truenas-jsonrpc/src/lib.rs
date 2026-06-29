@@ -39,7 +39,7 @@ pub use method::{
 };
 pub use protocol::{
     AuditOutcome, AuditSink, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
-    JsonRpcProtocolBuilder, ServerInfoHandler, SessionInfo,
+    JsonRpcProtocolBuilder, ServerInfoHandler, Service, SessionInfo,
 };
 pub use setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 pub use transfer::{FileTransfer, Transfer, TransferDirection};

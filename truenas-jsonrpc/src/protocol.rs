@@ -636,57 +636,53 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
             audit_sink: self.audit_sink.clone(),
             audit_elevated: self.audit_elevated,
         });
-        JsonRpcProtocol {
+        let service = Arc::new(Service {
             name: self.name,
-            version: self.version,
             registry,
             caller,
             audit_sink: self.audit_sink,
+            py_dispatcher: self.py_dispatcher,
+            has_session_setup,
+            id_gen: self.id_gen,
+            clock: self.clock,
+            sessions: Mutex::new(HashMap::new()),
+            never_cancel: Arc::new(AtomicBool::new(false)),
+        });
+        JsonRpcProtocol {
+            service,
+            version: self.version,
             canceller: self.canceller,
             server_info: self.server_info,
             session_info: self.session_info,
             setup: self.setup,
             setup_continue: self.setup_continue,
             describe: self.describe,
-            py_dispatcher: self.py_dispatcher,
-            has_session_setup,
-            id_gen: self.id_gen,
-            clock: self.clock,
             inflight: Mutex::new(HashMap::new()),
             subscriptions: Mutex::new(HashMap::new()),
-            sessions: Mutex::new(HashMap::new()),
-            never_cancel: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
 // --- protocol ----------------------------------------------------------------
 
-/// The dispatch core. Build once; drive
-/// [`dispatch`](Self::dispatch) with framed bytes + a per-connection [`Session`].
-pub struct JsonRpcProtocol<S> {
+/// The **wire-neutral op-table** — the registered methods, the decode→authorize→run→audit run core,
+/// and the session registry. Every wire-view shares one: the JSON-RPC and TXDR wires
+/// ([`JsonRpcProtocol`]) and a binary engine (e.g. ONC RPC, via [`run_proc`](Self::run_proc)) both
+/// consume it, so a method registered once is reachable over any wire. Built by
+/// [`JsonRpcProtocolBuilder::build`].
+pub struct Service<S> {
     name: Arc<str>,
-    version: Arc<str>,
     registry: Arc<Registry<S>>,
     /// The in-process call seam threaded into each request's [`RequestCtx`]: looks up + runs a
-    /// registered method from within a handler. Built once over `registry` at [`build`].
+    /// registered method from within a handler. Built once over `registry` at
+    /// [`build`](JsonRpcProtocolBuilder::build).
     caller: Arc<dyn InternalCaller<S>>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
-    canceller: Option<Arc<dyn Canceller<S>>>,
-    server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
-    session_info: Option<Arc<dyn SessionInfo<S>>>,
-    setup: Option<SetupSlot<S>>,
-    setup_continue: Option<SetupSlot<S>>,
-    describe: Option<Box<RawValue>>,
     py_dispatcher: Option<Arc<dyn PyDispatcher>>,
     has_session_setup: bool,
     id_gen: Arc<dyn IdGen>,
     #[allow(dead_code)] // used by audit timestamping once the audit record carries time
     clock: Arc<dyn Clock>,
-    inflight: Mutex<HashMap<String, Inflight>>,
-    /// SERVER_CLIENT subscriptions: topic -> {sub_id -> Subscription}. Runtime-mutable
-    /// (subscribe/unsubscribe during dispatch), like `inflight`.
-    subscriptions: Mutex<Subscriptions<S>>,
     /// Active sessions by id → a `Weak` handle. The connection task owns the `Arc`, so a dropped
     /// session's `Weak` simply fails to upgrade — this never leaks or keeps a connection alive.
     /// Inserted in [`new_session`](Self::new_session), pruned in [`close_session`](Self::close_session);
@@ -697,31 +693,7 @@ pub struct JsonRpcProtocol<S> {
     never_cancel: Arc<AtomicBool>,
 }
 
-impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
-    /// Start building a protocol.
-    pub fn builder(
-        name: impl Into<Arc<str>>,
-        version: impl Into<Arc<str>>,
-    ) -> JsonRpcProtocolBuilder<S> {
-        JsonRpcProtocolBuilder::new(name, version)
-    }
-
-    /// The protocol's `name` (the `$/negotiate` discriminator).
-    pub fn name(&self) -> &str {
-        &self.name
-    }
-
-    /// The protocol/API contract version.
-    pub fn version(&self) -> &str {
-        &self.version
-    }
-
-    /// Whether `$/sessionSetup` authentication is configured (a network transport
-    /// requires this).
-    pub fn has_session_setup(&self) -> bool {
-        self.has_session_setup
-    }
-
+impl<S: Send + Sync + 'static> Service<S> {
     /// Create a fresh [`Session`] for a connection (and track it in the session registry). `out`
     /// is the back-channel sink.
     pub fn new_session(&self, server_state: Option<S>, out: Arc<dyn Outbound>) -> Arc<Session<S>> {
@@ -735,12 +707,161 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         session
     }
 
-    /// Mark a session `CLOSED`, drop all of its subscriptions, and remove it from the session
-    /// registry. Call on socket drop.
+    /// Mark a session `CLOSED` and remove it from the session registry. (Subscription teardown is
+    /// the JSON-RPC wire's concern — see [`JsonRpcProtocol::close_session`].)
     pub fn close_session(&self, session: &Session<S>) {
         session.set_lifecycle(SessionLifecycle::Closed);
-        self.unsubscribe_all(session);
         self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&session.id());
+    }
+
+    /// Run a registered method by its XDR proc-id over raw XDR-encoded `params`, returning the
+    /// XDR-encoded result bytes (or the [`JsonRpcError`]). The **engine-facing** op-table entry: a
+    /// binary transport decodes its own envelope to `(proc_id, params)`, calls this, and wraps the
+    /// outcome in its own reply framing — so a method registered once (with `.xdr(proc_id)`) is
+    /// reachable over *any* binary wire, not only the built-in TXDR framing.
+    ///
+    /// `rid` is the optional 16-byte request id surfaced to the handler (read lazily as a UUID via
+    /// `cx.id()`) and to the audit record; pass `None` when the wire carries no UUID id. The
+    /// returned error's `code` lets a caller map a failure onto its own status (e.g. a
+    /// `METHOD_NOT_FOUND` onto an ONC RPC `PROC_UNAVAIL`). Decode → authorize → run → audit, minus
+    /// any wire framing.
+    pub async fn run_proc(
+        &self,
+        proc_id: u32,
+        rid: Option<[u8; 16]>,
+        params: &[u8],
+        session: &Arc<Session<S>>,
+    ) -> Result<Vec<u8>, JsonRpcError> {
+        let (pipeline, cx, is_async) = self.prepare_xdr(proc_id, rid, session)?;
+        if is_async {
+            pipeline.run_xdr_async(params, cx).await
+        } else {
+            let params = params.to_vec();
+            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
+                Ok(result) => result,
+                Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+            }
+        }
+    }
+
+    /// The synchronous prelude shared by the binary-wire dispatch paths
+    /// ([`JsonRpcProtocol::dispatch_xdr`] and [`run_proc`](Self::run_proc)): reject a closed session,
+    /// look the method up by proc-id, apply the session-established gate, and build the per-request
+    /// pipeline + context. Returns the ready-to-run pieces, or the [`JsonRpcError`] to reply with.
+    ///
+    /// **`#[inline(always)]` is load-bearing, not cosmetic.** This returns the ~100-byte pipeline by
+    /// value; with two callers a plain `#[inline]` is *declined* by LLVM, leaving a real call plus a
+    /// return-slot memcpy on the dispatch hot path — ~2% on the XDR cell, confirmed back-to-back.
+    /// Forcing the inline folds it into each caller, so the hot path keeps the exact shape it had
+    /// before this seam existed (see `PERF.md`).
+    #[inline(always)]
+    fn prepare_xdr(
+        &self,
+        proc_id: u32,
+        rid: Option<[u8; 16]>,
+        session: &Arc<Session<S>>,
+    ) -> Result<(Pipeline<S>, RequestCtx<S>, bool), JsonRpcError> {
+        if session.lifecycle() == SessionLifecycle::Closed {
+            return Err(JsonRpcError::session_not_established("Session is closed"));
+        }
+        let method = match self.registry.xdr_methods.get(&proc_id) {
+            Some(m) => m.clone(),
+            None => return Err(JsonRpcError::method_not_found("Method not found")),
+        };
+        if self.has_session_setup
+            && !method.meta.pre_auth
+            && session.lifecycle() != SessionLifecycle::Established
+        {
+            return Err(JsonRpcError::session_not_established("Session not established"));
+        }
+        let audit_id =
+            if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
+        let req = if method.meta.audit {
+            JsonRpcRequest {
+                method: method.meta.name.to_string(),
+                id: audit_id.clone(),
+                params: Value::Null,
+                roles: method.meta.roles.to_vec(),
+            }
+        } else {
+            JsonRpcRequest { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
+        };
+        let is_async = matches!(method.imp, MethodImpl::Async(_));
+        let cx = RequestCtx::new_xdr(
+            rid,
+            session.clone(),
+            self.never_cancel.clone(),
+            method.meta.audit,
+            Some(self.caller.clone()),
+        );
+        let pipeline = Pipeline {
+            method,
+            session: session.clone(),
+            req,
+            rid: audit_id,
+            audit_sink: self.audit_sink.clone(),
+            py_dispatcher: None,
+        };
+        Ok((pipeline, cx, is_async))
+    }
+}
+
+/// The dispatch core's **JSON-RPC wire-view**: the JSON envelope + the TXDR binary wire + the `$/`
+/// control plane over a shared [`Service`] op-table. Build once; drive
+/// [`dispatch`](Self::dispatch) with framed bytes + a per-connection [`Session`].
+pub struct JsonRpcProtocol<S> {
+    /// The wire-neutral op-table this JSON-RPC view serves (shared with any other wire).
+    service: Arc<Service<S>>,
+    version: Arc<str>,
+    canceller: Option<Arc<dyn Canceller<S>>>,
+    server_info: Option<Arc<dyn ServerInfoHandler<S>>>,
+    session_info: Option<Arc<dyn SessionInfo<S>>>,
+    setup: Option<SetupSlot<S>>,
+    setup_continue: Option<SetupSlot<S>>,
+    describe: Option<Box<RawValue>>,
+    inflight: Mutex<HashMap<String, Inflight>>,
+    /// SERVER_CLIENT subscriptions: topic -> {sub_id -> Subscription}. Runtime-mutable
+    /// (subscribe/unsubscribe during dispatch), like `inflight`.
+    subscriptions: Mutex<Subscriptions<S>>,
+}
+
+impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
+    /// Start building a protocol.
+    pub fn builder(
+        name: impl Into<Arc<str>>,
+        version: impl Into<Arc<str>>,
+    ) -> JsonRpcProtocolBuilder<S> {
+        JsonRpcProtocolBuilder::new(name, version)
+    }
+
+    /// The protocol's `name` (the `$/negotiate` discriminator).
+    pub fn name(&self) -> &str {
+        &self.service.name
+    }
+
+    /// The protocol/API contract version.
+    pub fn version(&self) -> &str {
+        &self.version
+    }
+
+    /// Whether `$/sessionSetup` authentication is configured (a network transport
+    /// requires this).
+    pub fn has_session_setup(&self) -> bool {
+        self.service.has_session_setup
+    }
+
+    /// Create a fresh [`Session`] for a connection — delegates to the op-table's session registry
+    /// ([`Service::new_session`]). `out` is the back-channel sink.
+    pub fn new_session(&self, server_state: Option<S>, out: Arc<dyn Outbound>) -> Arc<Session<S>> {
+        self.service.new_session(server_state, out)
+    }
+
+    /// Mark a session `CLOSED`, drop all of its subscriptions, and remove it from the session
+    /// registry. Call on socket drop. (Subscriptions are JSON-RPC-wire state; the registry half is
+    /// the op-table's [`Service::close_session`].)
+    pub fn close_session(&self, session: &Session<S>) {
+        self.unsubscribe_all(session);
+        self.service.close_session(session);
     }
 
     /// Drop a single subscription by id. Returns `true` if it existed.
@@ -786,7 +907,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         topic: &str,
         payload: &P,
     ) -> Result<(), JsonRpcError> {
-        let sub_impl = match self.registry.methods.get(topic).map(|m| &m.imp) {
+        let sub_impl = match self.service.registry.methods.get(topic).map(|m| &m.imp) {
             Some(MethodImpl::Subscription(s)) => s,
             _ => {
                 return Err(JsonRpcError::internal(format!(
@@ -909,79 +1030,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         Dispatched::Reply(out)
     }
 
-    /// The synchronous prelude shared by the binary-wire dispatch paths
-    /// ([`dispatch_xdr`](Self::dispatch_xdr) and [`run_xdr_proc`](Self::run_xdr_proc)): reject a
-    /// closed session, look the method up by proc-id, apply the session-established gate, and build
-    /// the per-request pipeline + context. Returns the ready-to-run pieces (pipeline, request
-    /// context, `is_async`), or the [`JsonRpcError`] to reply with.
-    ///
-    /// **`#[inline(always)]` is load-bearing, not cosmetic.** This returns the ~100-byte pipeline by
-    /// value; with two callers a plain `#[inline]` is *declined* by LLVM, leaving a real call plus a
-    /// return-slot memcpy on the dispatch hot path — ~2% on the XDR cell, confirmed back-to-back.
-    /// Forcing the inline folds it into each caller, so the hot path keeps the exact shape it had
-    /// before this seam existed (see `PERF.md`).
-    #[inline(always)]
-    fn prepare_xdr(
-        &self,
-        proc_id: u32,
-        rid: Option<[u8; 16]>,
-        session: &Arc<Session<S>>,
-    ) -> Result<(Pipeline<S>, RequestCtx<S>, bool), JsonRpcError> {
-        if session.lifecycle() == SessionLifecycle::Closed {
-            return Err(JsonRpcError::session_not_established("Session is closed"));
-        }
-        let method = match self.registry.xdr_methods.get(&proc_id) {
-            Some(m) => m.clone(),
-            None => return Err(JsonRpcError::method_not_found("Method not found")),
-        };
-        if self.has_session_setup
-            && !method.meta.pre_auth
-            && session.lifecycle() != SessionLifecycle::Established
-        {
-            return Err(JsonRpcError::session_not_established("Session not established"));
-        }
-        let audit_id =
-            if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
-        let req = if method.meta.audit {
-            JsonRpcRequest {
-                method: method.meta.name.to_string(),
-                id: audit_id.clone(),
-                params: Value::Null,
-                roles: method.meta.roles.to_vec(),
-            }
-        } else {
-            JsonRpcRequest { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
-        };
-        let is_async = matches!(method.imp, MethodImpl::Async(_));
-        let cx = RequestCtx::new_xdr(
-            rid,
-            session.clone(),
-            self.never_cancel.clone(),
-            method.meta.audit,
-            Some(self.caller.clone()),
-        );
-        let pipeline = Pipeline {
-            method,
-            session: session.clone(),
-            req,
-            rid: audit_id,
-            audit_sink: self.audit_sink.clone(),
-            py_dispatcher: None,
-        };
-        Ok((pipeline, cx, is_async))
-    }
-
-    /// Run a registered method by its XDR proc-id over raw XDR-encoded `params`, returning the
-    /// XDR-encoded result bytes (or the [`JsonRpcError`]). The **engine-facing** entry point: a
-    /// binary transport that decodes its own envelope to `(proc_id, params)` calls this and wraps
-    /// the outcome in its own reply framing — so a method registered once (with `.xdr(proc_id)`) is
-    /// reachable over *any* binary wire, not only the built-in TXDR framing.
-    ///
-    /// `rid` is the optional 16-byte request id surfaced to the handler (read lazily as a UUID via
-    /// `cx.id()`) and to the audit record; pass `None` when the wire carries no UUID id. The
-    /// returned error's `code` lets a caller map a failure onto its own status (e.g. a
-    /// `METHOD_NOT_FOUND` onto an ONC RPC `PROC_UNAVAIL`). Mirrors [`dispatch`](Self::dispatch)'s
-    /// XDR path exactly — decode → authorize → run → audit — minus the TXDR framing.
+    /// Run a registered method by its XDR proc-id — the **engine-facing** op-table entry. Delegates
+    /// to the wire-neutral [`Service::run_proc`]; kept here as a source-compatible shim for the ONC
+    /// RPC engine and the XDR-dispatch tests that still reach it through the JSON-RPC view.
     pub async fn run_xdr_proc(
         &self,
         proc_id: u32,
@@ -989,16 +1040,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         params: &[u8],
         session: &Arc<Session<S>>,
     ) -> Result<Vec<u8>, JsonRpcError> {
-        let (pipeline, cx, is_async) = self.prepare_xdr(proc_id, rid, session)?;
-        if is_async {
-            pipeline.run_xdr_async(params, cx).await
-        } else {
-            let params = params.to_vec();
-            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
-                Ok(result) => result,
-                Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
-            }
-        }
+        self.service.run_proc(proc_id, rid, params, session).await
     }
 
     /// Dispatch an XDR binary-wire frame (the [`is_xdr`](truenas_xdr::frame::is_xdr) magic was
@@ -1024,13 +1066,13 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let note = rid.is_none();
 
         // The prelude (closed-session check, proc lookup, gate, pipeline build) is shared with
-        // `run_xdr_proc` via the force-inlined `prepare_xdr`; its early-exits become a JsonRpcError
-        // that the wrap below reframes exactly as the inline version did. The async run stays inline
-        // here (the run tail, not the prelude, is the only thing not shared), so this hot path's
-        // future gains no extra layer. Decode → authorize → run → audit: async inline on the runtime
-        // (no `spawn_blocking` hop, no params copy); sync/filterable on the blocking pool (parity
-        // with the JSON `run_sync`) so a CPU-bound or blocking handler can't stall the runtime.
-        let outcome = match self.prepare_xdr(request.proc_id, rid, session) {
+        // `Service::run_proc` via the force-inlined `Service::prepare_xdr`; its early-exits become a
+        // JsonRpcError that the wrap below reframes exactly as the inline version did. The async run
+        // stays inline here (the run tail, not the prelude, is the only thing not shared), so this
+        // hot path's future gains no extra layer. Decode → authorize → run → audit: async inline on
+        // the runtime (no `spawn_blocking` hop, no params copy); sync/filterable on the blocking pool
+        // (parity with the JSON `run_sync`) so a CPU-bound or blocking handler can't stall the runtime.
+        let outcome = match self.service.prepare_xdr(request.proc_id, rid, session) {
             Ok((pipeline, cx, is_async)) => {
                 if is_async {
                     pipeline.run_xdr_async(request.params, cx).await
@@ -1093,7 +1135,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             _ => {}
         }
 
-        let method = match self.registry.methods.get(parsed.method.as_str()) {
+        let method = match self.service.registry.methods.get(parsed.method.as_str()) {
             Some(m) => m.clone(),
             None => {
                 return finish(
@@ -1119,7 +1161,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
 
         // Session-established gate (only when session setup is configured).
-        if self.has_session_setup
+        if self.service.has_session_setup
             && !method.meta.pre_auth
             && session.lifecycle() != SessionLifecycle::Established
         {
@@ -1169,14 +1211,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             }
             flag
         } else {
-            self.never_cancel.clone()
+            self.service.never_cancel.clone()
         };
         let cx = RequestCtx::new(
             rid.clone(),
             session.clone(),
             cancel,
             method.meta.audit,
-            Some(self.caller.clone()),
+            Some(self.service.caller.clone()),
         );
         // The authz/audit snapshot (a full re-parse of params into a `Value`) is only
         // needed when an authorizer or an audited method will actually read it.
@@ -1206,8 +1248,8 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             session,
             req,
             rid: rid.clone(),
-            audit_sink: self.audit_sink.clone(),
-            py_dispatcher: self.py_dispatcher.clone(),
+            audit_sink: self.service.audit_sink.clone(),
+            py_dispatcher: self.service.py_dispatcher.clone(),
         };
 
         let response = if is_blocking {
@@ -1270,7 +1312,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
 
         // 4. Register the subscription; ack with its id.
-        let sub_id = self.id_gen.new_id().to_string();
+        let sub_id = self.service.id_gen.new_id().to_string();
         self.subscriptions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -1283,7 +1325,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // 5. Audit (subscribe is audited iff the topic opted in; static message, no runtime detail).
         //    Reaching here means the subscribe was authorized and registered → success.
         if method.meta.audit {
-            if let Some(sink) = self.audit_sink.as_deref() {
+            if let Some(sink) = self.service.audit_sink.as_deref() {
                 audit_call(sink, &method.meta, &req, AuditOutcome::Success, None, session);
             }
         }
@@ -1335,7 +1377,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // Authorize; a denial is audited (like the normal path audits an authorized call).
         if let Err(denied) = role_gate(method.meta.required, session) {
             if method.meta.audit {
-                if let Some(sink) = self.audit_sink.as_deref() {
+                if let Some(sink) = self.service.audit_sink.as_deref() {
                     audit_call(sink, &method.meta, &req, AuditOutcome::Failure(&denied), None, session);
                 }
             }
@@ -1346,15 +1388,15 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let cx = RequestCtx::new(
             Some(rid.clone()),
             session.clone(),
-            self.never_cancel.clone(),
+            self.service.never_cancel.clone(),
             method.meta.audit,
-            Some(self.caller.clone()),
+            Some(self.service.caller.clone()),
         );
         let interim = match erased.negotiate(decoded.as_ref(), &cx) {
             Ok(raw) => raw,
             Err(e) => {
                 if method.meta.audit {
-                    if let Some(sink) = self.audit_sink.as_deref() {
+                    if let Some(sink) = self.service.audit_sink.as_deref() {
                         audit_call(sink, &method.meta, &req, AuditOutcome::Failure(&e), None, session);
                     }
                 }
@@ -1367,7 +1409,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // The deferred completion: after the server's handshake hands over the fd, run
         // `transfer`, build the final reply, and audit.
         let audit = method.meta.audit;
-        let audit_sink = self.audit_sink.clone();
+        let audit_sink = self.service.audit_sink.clone();
         let meta = method.meta.clone();
         let session = session.clone();
         let final_rid = rid.clone();
@@ -1461,7 +1503,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     pub fn render_sessions(&self, current: SessionId) -> Vec<Value> {
         // Upgrade live sessions under the lock; a dropped session won't upgrade.
         let mut live: Vec<Arc<Session<S>>> = self
-            .sessions
+            .service.sessions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
@@ -1583,7 +1625,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             // it has gated the connection and supplied the fd (the broker replies to the client).
             RawSetupOutcome::Takeover(handoff) => {
                 let session = session.clone();
-                let audit_sink = self.audit_sink.clone();
+                let audit_sink = self.service.audit_sink.clone();
                 let method = parsed.method.clone();
                 let rid2 = rid.clone();
                 let secret_fields = slot.meta.secret_fields.clone();
@@ -1627,7 +1669,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         outcome: AuditOutcome<'_>,
         session: &Session<S>,
     ) {
-        if let Some(sink) = &self.audit_sink {
+        if let Some(sink) = &self.service.audit_sink {
             audit_setup(
                 sink.as_ref(),
                 method.to_string(),
@@ -1644,7 +1686,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     /// Audit a control op (`$/sessionClose`, `$/cancelRequest`): no method metadata, so there are
     /// no `secret_fields` to redact (the params are ids, not credentials) and no static message.
     fn audit_control(&self, req: &JsonRpcRequest, outcome: AuditOutcome<'_>, session: &Session<S>) {
-        if let Some(sink) = self.audit_sink.as_deref() {
+        if let Some(sink) = self.service.audit_sink.as_deref() {
             sink.audit(req, outcome, session, None);
         }
     }
