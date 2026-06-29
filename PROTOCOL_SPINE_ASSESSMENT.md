@@ -25,18 +25,22 @@ binary wire (zero XDR references leak into the server crate) — in the
   `Peer`/`Channel`/`Capability`/`TransportPosture`, `Outbound`, the session registry — all JSON-free.
 - **Authz/authn core.** `authorize`/`commit`/`AuthSessionState`, the native role-mask subset gate, the
   audit seam. Authorization is a mask test; audit consumes a `serde_json::Value`.
-- **The op-table itself, and it is already key-type-agnostic.** One `Arc<Method>` lives in **two**
-  registries simultaneously — `methods: HashMap<Arc<str>, …>` (JSON, by name) and `xdr_methods:
-  HashMap<u32, …>` (XDR, by proc-id), sharing the same `Arc` (`protocol.rs:312,314` and the shared
-  insert at `protocol.rs:387-390`). This is the existence proof that the registry key is swappable —
-  an AFP opcode table (`HashMap<u16, Arc<Method>>`) is the same shape.
-- **Dispatch pipeline.** `decode → authorize → run → audit` is mirrored across the JSON path
-  (`dispatch_parsed`, `protocol.rs:910`) and the XDR path (`dispatch_xdr`, `protocol.rs:812`).
-- **The transport↔protocol seam is mostly neutral.** `Dispatched` (`protocol.rs:46`) hands the server
-  opaque bytes (`Reply(Vec<u8>)`) or `Nothing` — both protocol-agnostic.
+- **The op-table itself is now a standalone, wire-neutral type — `Service<S>`.** The Stage 1 extraction
+  lifted it off `JsonRpcProtocol`: `Service` owns the registry, the `decode → authorize → run → audit`
+  run core, and the session registry, and each wire is a *view* over one `Service` (`JsonRpcProtocol`,
+  `OncRpcProtocol`). It is key-type-agnostic — one `Arc<Method>` lives in **two** registries
+  simultaneously (`Registry`: `methods: HashMap<Arc<str>, …>` by name and `xdr_methods:
+  HashMap<u32, …>` by proc-id, sharing the same `Arc`). This is the existence proof that the registry
+  key is swappable — an AFP opcode table (`HashMap<u16, Arc<Method>>`) is the same shape.
+- **Dispatch pipeline.** `decode → authorize → run → audit` is the shared run core *inside* `Service`,
+  reached from the JSON path (`dispatch_parsed`), the XDR path (`dispatch_xdr`), and the engine-facing
+  `Service::run_proc`.
+- **The transport↔protocol seam is mostly neutral.** `Dispatched` hands the server opaque bytes
+  (`Reply(Vec<u8>)`) or `Nothing` — both protocol-agnostic.
 
-**Conclusion: "transport + authz + op-table" is not a thing to build — it exists and is shippable as a
-library today.** TXDR is the living proof a second wire reuses ~all of it.
+**Conclusion: "transport + authz + op-table" is not a thing to build — it exists, and as of Stage 1 it
+is *factored*: the op-table is the standalone `Service<S>`, with `JsonRpcProtocol` and `OncRpcProtocol`
+as wire-views over it.** TXDR and ONC RPC are the living proof a second (and third) wire reuses ~all of it.
 
 ## What is JSON/serde-bound — the gaps
 

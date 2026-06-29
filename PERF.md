@@ -59,6 +59,23 @@ The two single-thread **async** dispatch-overhead cells (±1%) are the most sens
 The concurrent async cells add an under-load check (noisier). The sync / realistic cells are handler-
 and syscall-dominated and least sensitive.
 
+## Landed change — the `Service` op-table extraction (Stage 1)
+
+Lifting the op-table off `JsonRpcProtocol` into a shared `Service<S>` — so the JSON-RPC and ONC RPC
+wires are both *views* over one op-table — puts the registry, run core, and session registry behind one
+`Arc<Service>` the protocol holds. The only per-request delta is a single `Arc<Service>` pointer-load at
+the top of the dispatch prelude, reused across the ~5 field reads it guards. **A/B (back-to-back,
+best-of-3, single-thread async): XDR ~919–920k vs a ~907–913k baseline; JSON unchanged within noise** —
+the indirection is free (the pointer is hot, and those reads were already chasing `self`).
+
+**`Service::prepare_xdr` is `#[inline(always)]`, and that is load-bearing — not cosmetic.** It returns
+the ~100-byte per-request pipeline by value and has two callers (`Service::run_proc` and
+`JsonRpcProtocol::dispatch_xdr`). With a plain `#[inline]`, LLVM *declined* to inline it across the
+`Service` boundary, leaving a real call plus a return-slot `memcpy` on the XDR hot path — a measured
+~2% on the single-thread async XDR cell, confirmed back-to-back. Forcing the inline folds the prelude
+into each caller, so the generated hot path is identical to before the seam existed. **Do not relax it
+without re-running the XDR cell.**
+
 ## The gate
 
 - **A/B every hot-path change**: capture the baseline, apply the change, re-measure, compare on the same

@@ -45,10 +45,10 @@ Two layer boundaries are deliberately **negotiable**, not clean cuts — name th
   (recovered by codec/envelope); a header-carrying wire — SMB DSI's 16-byte header, ONC-RPC record marking —
   puts opcode + id in the *framing* header, so a pluggable `Framing` trait must surface `{opcode,
   request_id, body}`. See [FRAMING.md](FRAMING.md).
-- **Envelope ↔ Dispatch (per-protocol vs reusable).** The dispatch op-table is wire-neutral and reusable;
-  the envelope + control-plane are per-protocol. A new protocol reuses the op-table but brings its own
-  envelope and control verbs — this is the **`ProtocolEngine`** extension point (§10), with the ONC RPC
-  engine as the worked example. (A per-engine control plane, Gap 4 in
+- **Envelope ↔ Dispatch (per-protocol vs reusable).** The dispatch op-table (`Service`) is wire-neutral
+  and reusable; the envelope + control-plane are per-protocol. A new protocol reuses the op-table but
+  brings its own envelope and control verbs — this is the **`ProtocolEngine`** extension point (§10),
+  with the ONC RPC engine as the worked example. (A per-engine control plane, Gap 4 in
   [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md), is still deferred.)
 
 Two deliberate choices: **Framing is its own layer** (not folded into transport) so it can be made pluggable
@@ -484,9 +484,10 @@ one connection's protocol end to end — framing, envelope, control verbs, and t
 serve time, so the engine boundary is crossed **once per connection** (at accept), never per request;
 the per-request hot path stays fully monomorphized (see [PERF.md](PERF.md)). The server hands each
 accepted connection to its engine as a narrow, protocol-neutral **`ConnContext`** — the byte stream,
-the raw-fd transfer channel, the peer, and the inbound size limit — *not* the JSON-RPC-specific
-substrate (op-tables, negotiate state, the session registry). An engine that needs that substrate
-captures it at construction, the way the default engine holds the server's `ServerShared`.
+the raw-fd transfer channel, the peer, and the inbound size limit — *not* the server's protocol
+substrate (`ServerShared`: the registered protocols, negotiate state). An engine captures whatever it
+needs at construction: the default engine holds the whole `ServerShared` (it negotiates among
+protocols); a single-protocol binary engine holds just the one **`Service`** op-table it serves.
 
 ```rust
 trait ProtocolEngine: Send + Sync {
@@ -496,27 +497,34 @@ trait ProtocolEngine: Send + Sync {
 
 | | default engine | a second engine |
 |---|---|---|
-| type | `JsonRpcEngine` | `OncRpcEngine` (`oncrpc.rs`) |
+| type | `JsonRpcEngine` | `OncRpcProtocol` (`oncrpc.rs`) |
 | Framing (2) | 4-byte length prefix | ONC RPC record marking (RFC 5531 §11) |
 | Codec (3) | JSON + TXDR (shared) | XDR (shared) |
 | Envelope (4) | JSON-RPC 2.0 / TXDR | ONC RPC `rpc_msg`, `AUTH_NONE`/`AUTH_SYS` |
 | Bind | `$/negotiate` (in-band) | the listener (program/version) |
 
-**Sharing the op-table.** A binary engine routes a decoded `(proc_id, params)` to the registered
-method whose XDR proc-id equals it, via `JsonRpcProtocol::run_xdr_proc` → the XDR-encoded result bytes
-(or a `JsonRpcError` the engine maps onto its own status, e.g. `METHOD_NOT_FOUND` → ONC RPC
-`PROC_UNAVAIL`). So a method registered once (with `.xdr(proc_id)`) is served over **both** the
-JSON-RPC transports and the ONC RPC wire — one service, many wires, differing only in framing and
-envelope. (`run_xdr_proc` shares the binary-dispatch prelude with `dispatch_xdr` behind a
-`#[inline(always)]` that is load-bearing for the hot path — see PERF.md.)
+**Sharing the op-table — `Service`.** The op-table is a first-class, wire-neutral type: `Service<S>`
+holds the registered methods, the decode→authorize→run→audit run core, and the session registry. Each
+wire is a *view* over one `Service`: `JsonRpcProtocol` (the JSON-RPC + TXDR view) and `OncRpcProtocol`
+(the ONC RPC view) both hold an `Arc<Service<S>>` and serve its methods — so a registered protocol's
+`Service` is what `$/negotiate` binds *and* what a binary engine consumes (`JsonRpcProtocol::service()`
+exposes it). A binary engine routes a decoded `(proc_id, params)` to the registered method whose XDR
+proc-id equals it, via `Service::run_proc` → the XDR-encoded result bytes (or a `JsonRpcError` the
+engine maps onto its own status, e.g. `METHOD_NOT_FOUND` → ONC RPC `PROC_UNAVAIL`). So a method
+registered once (with `.xdr(proc_id)`) is served over **both** the JSON-RPC transports and the ONC RPC
+wire — one service, many wires, differing only in framing and envelope. (`Service::run_proc` shares the
+binary-dispatch prelude with `JsonRpcProtocol::dispatch_xdr` behind a `#[inline(always)]` that is
+load-bearing for the hot path — see PERF.md.)
 
 **Wiring.** `serve_unix_listener` / `serve_tcp_listener` run the default engine;
 `serve_unix_listener_with(.., engine)` / `serve_tcp_listener_with(.., engine)` run a caller-supplied
-engine; `serve_oncrpc_unix_listener(.., protocol)` is the ONC RPC convenience.
+engine; `serve_oncrpc_unix_listener(.., config)` is the ONC RPC convenience (an `OncRpcConfig` names
+the protocol + its ONC RPC program/version).
 
 **The implementor contract** for a new wire: implement `ProtocolEngine`; capture whatever substrate
-you need at construction; bring your own framing + envelope + control verbs; route data requests to
-`run_xdr_proc`. **Deferred, by design (no consumer yet):** a per-engine control plane (the `$/` verbs
+you need at construction (a `Service`, via the bound protocol's `service()`); bring your own framing +
+envelope + control verbs; route data requests to `Service::run_proc`. **Deferred, by design (no
+consumer yet):** a per-engine control plane (the `$/` verbs
 are JSON-RPC-specific — Gap 4 in [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md)), and
 server→client push over a binary wire (the core's pub/sub emits JSON notifications, so a binary event
 path waits for a protocol that actually needs one).
