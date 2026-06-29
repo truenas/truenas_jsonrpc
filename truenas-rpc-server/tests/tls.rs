@@ -13,10 +13,10 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    FileTransfer, JsonRpcError, JsonRpcFdTransferMethod, JsonRpcMethod, JsonRpcProtocol, MethodDef,
+    FileTransfer, JsonRpcError, RpcFdTransferMethod, RpcMethod, JsonRpcProtocol, MethodDef,
     RequestCtx, TransferDirection,
 };
-use truenas_rpc_server::{FileTransferExt, JsonRpcServer, TlsConfig, TlsMode};
+use truenas_rpc_server::{FileTransferExt, TruenasRpcServer, TlsConfig, TlsMode};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -46,15 +46,15 @@ fn pattern_byte(i: usize) -> u8 {
     (i % 251) as u8
 }
 
-fn server() -> JsonRpcServer<()> {
+fn server() -> TruenasRpcServer<()> {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("math.add"),
             |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
         ))
         .unwrap()
         // A download transfer: the server streams `n` pattern bytes over the (kTLS) fd.
-        .fd_transfer_method(JsonRpcFdTransferMethod::<DlArgs, DlReady, DlDone, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<DlArgs, DlReady, DlDone, _, _>::new(
             MethodDef::new("x.download"),
             TransferDirection::Download,
             |a: &DlArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DlReady { size: a.n }),
@@ -66,7 +66,7 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         .build();
-    JsonRpcServer::<()>::builder("tls-server")
+    TruenasRpcServer::<()>::builder("tls-server")
         .protocol("main", proto)
         .allow_unauthenticated_network() // transport test: the protocol has no $/sessionSetup
         .build()
@@ -161,7 +161,7 @@ async fn round_trip(mode: TlsMode) {
     let (cert, key) = self_signed_pem();
     let tls = TlsConfig::from_pem(&cert, &key, mode).unwrap();
     let srv = server();
-    let (listener, addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
@@ -195,7 +195,7 @@ async fn kernel_tls_transfer_is_encrypted() {
     let (cert, key) = self_signed_pem();
     let tls = TlsConfig::from_pem(&cert, &key, TlsMode::Kernel).unwrap();
     let srv = server();
-    let (listener, addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
@@ -225,9 +225,9 @@ struct CertLen {
 }
 
 /// A server whose `cert.len` returns the length of the client cert the transport surfaced.
-fn mtls_server() -> JsonRpcServer<CertState> {
+fn mtls_server() -> TruenasRpcServer<CertState> {
     let proto = JsonRpcProtocol::<CertState>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("cert.len"),
             |_a: NoArgs, cx: &RequestCtx<CertState>| {
                 let len = cx.session().with_internal(|s| s.and_then(|c| c.as_ref()).map_or(0, Vec::len));
@@ -236,7 +236,7 @@ fn mtls_server() -> JsonRpcServer<CertState> {
         ))
         .unwrap()
         .build();
-    JsonRpcServer::<CertState>::builder("mtls-server")
+    TruenasRpcServer::<CertState>::builder("mtls-server")
         .allow_unauthenticated_network() // this transport test serves no $/sessionSetup
         // capture the verified client cert (if any) into the session state
         .state_from_peer(|peer| Some(peer.tls.as_ref().and_then(|t| t.peer_cert.clone())))
@@ -326,7 +326,7 @@ async fn mtls_surfaces_verified_client_cert() {
 
     let tls = TlsConfig::from_pem_with_client_ca(&server_cert, &server_key, &ca_pem, TlsMode::Userspace).unwrap();
     let srv = mtls_server();
-    let (listener, addr) = JsonRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
@@ -355,9 +355,9 @@ struct BindingResult {
 
 /// A server that reports this connection's `tls-server-end-point` binding (base64) to the client.
 /// `S` carries the binding the transport surfaced on `Peer::tls`.
-fn binding_server() -> JsonRpcServer<CertState> {
+fn binding_server() -> TruenasRpcServer<CertState> {
     let proto = JsonRpcProtocol::<CertState>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("binding.get"),
             |_a: NoArgs, cx: &RequestCtx<CertState>| {
                 let binding = cx.session().with_internal(|s| {
@@ -368,7 +368,7 @@ fn binding_server() -> JsonRpcServer<CertState> {
         ))
         .unwrap()
         .build();
-    JsonRpcServer::<CertState>::builder("binding-server")
+    TruenasRpcServer::<CertState>::builder("binding-server")
         .allow_unauthenticated_network() // transport test: the protocol has no $/sessionSetup
         .state_from_peer(|peer| Some(peer.tls.as_ref().and_then(|t| t.channel_binding.clone())))
         .protocol("main", proto)
@@ -409,7 +409,7 @@ async fn tls_surfaces_server_end_point_binding() {
     for mode in [TlsMode::Userspace, TlsMode::Kernel] {
         let tls = TlsConfig::from_pem(&cert, &key, mode).unwrap();
         let srv = binding_server();
-        let (listener, addr) = JsonRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
+        let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
         let task = {
             let srv = srv.clone();
             tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })

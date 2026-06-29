@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use truenas_rpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_rpc_server::{framing, JsonRpcServer, OncRpcConfig, UnixConfig, UnixTrust};
+use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc_server::{framing, TruenasRpcServer, OncRpcConfig, UnixConfig, UnixTrust};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
 // The ONC RPC demo program (matches the engine).
@@ -38,7 +38,7 @@ struct AddResult {
 /// wires.
 fn demo() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("demo", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("math.add").xdr(ADD_PROC),
             |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
         ))
@@ -109,9 +109,9 @@ async fn main() -> std::io::Result<()> {
     let _ = std::fs::remove_file(&onc_path);
 
     // One server, one registered protocol — served on two listeners with two engines.
-    let server = JsonRpcServer::<()>::builder("dual-wire").protocol("demo", demo()).build();
-    let json_listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&json_path))?;
-    let onc_listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&onc_path))?;
+    let server = TruenasRpcServer::<()>::builder("dual-wire").protocol("demo", demo()).build();
+    let json_listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&json_path))?;
+    let onc_listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&onc_path))?;
 
     let json_srv = server.clone();
     let json_task =

@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use truenas_rpc::{
-    tnfilter, CompiledFilters, CompiledOptions, FilterableJsonRpcMethod, JsonRpcError,
+    tnfilter, CompiledFilters, CompiledOptions, FilterableRpcMethod, JsonRpcError,
     JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
 };
 
@@ -54,7 +54,7 @@ async fn main() {
     let data: &'static [Entry] = Box::leak(data.into_boxed_slice());
 
     let proto = JsonRpcProtocol::<()>::builder("bench", "1.0.0")
-        .filterable(FilterableJsonRpcMethod::<QueryArgs, &'static Entry, _>::new(
+        .filterable(FilterableRpcMethod::<QueryArgs, &'static Entry, _>::new(
             MethodDef::new("x.query"),
             move |_a: QueryArgs, _cx: &RequestCtx<()>, f: &CompiledFilters, o: &CompiledOptions| {
                 Ok::<_, JsonRpcError>(tnfilter(data.iter(), f, o)?)

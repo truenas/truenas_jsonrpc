@@ -3,9 +3,9 @@
 //! control messages — the **Envelope** (4), **Dispatch** (5), **Authorization** gate, and
 //! **Control-plane** of the `ARCHITECTURE.md` layer stack.
 //!
-//! `dispatch` is `async` and **branches on the method kind**: a sync [`JsonRpcMethod`]
+//! `dispatch` is `async` and **branches on the method kind**: a sync [`RpcMethod`]
 //! runs its whole pipeline (decode → authorize → handler → audit) on a `spawn_blocking`
-//! worker; an [`AsyncJsonRpcMethod`] is awaited.
+//! worker; an [`AsyncRpcMethod`] is awaited.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -23,8 +23,8 @@ use serde_json::{json, Value};
 use crate::envelope::{self, ParsedRequest};
 use crate::error::{BuildResult, Error, ErrorCode, JsonRpcError};
 use crate::method::{
-    decode_params, encode_result, AsyncJsonRpcMethod, Codec, ErasedTransfer, FilterableJsonRpcMethod,
-    JsonRpcFdPassMethod, JsonRpcFdTransferMethod, JsonRpcMethod, Method, MethodDef, MethodImpl,
+    decode_params, encode_result, AsyncRpcMethod, Codec, ErasedTransfer, FilterableRpcMethod,
+    RpcFdPassMethod, RpcFdTransferMethod, RpcMethod, Method, MethodDef, MethodImpl,
     MethodMeta, SubscriptionDef, SubscriptionImpl, WireParams, WireReply,
 };
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
@@ -33,7 +33,7 @@ use crate::role::{RoleMask, Roles};
 use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SessionOrigin, SystemClock, UuidGen};
 use crate::setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 use crate::transfer::{FileTransfer, Transfer, TransferDirection};
-use crate::types::{JsonRpcRequest, MessageDirection, SessionLifecycle};
+use crate::types::{RequestInfo, MessageDirection, SessionLifecycle};
 use truenas_filter::{CompiledFilters, CompiledOptions, Filtered};
 
 const CANCEL_METHOD: &str = "$/cancelRequest";
@@ -152,7 +152,7 @@ pub trait AuditSink<S>: Send + Sync {
     /// Record one audit entry (`request.params` is redacted; `outcome` carries success/failure).
     fn audit(
         &self,
-        request: &JsonRpcRequest,
+        request: &RequestInfo,
         outcome: AuditOutcome<'_>,
         session: &Session<S>,
         audit_message: Option<&str>,
@@ -161,11 +161,11 @@ pub trait AuditSink<S>: Send + Sync {
 
 impl<S, F> AuditSink<S> for F
 where
-    F: Fn(&JsonRpcRequest, AuditOutcome<'_>, &Session<S>, Option<&str>) + Send + Sync,
+    F: Fn(&RequestInfo, AuditOutcome<'_>, &Session<S>, Option<&str>) + Send + Sync,
 {
     fn audit(
         &self,
-        request: &JsonRpcRequest,
+        request: &RequestInfo,
         outcome: AuditOutcome<'_>,
         session: &Session<S>,
         audit_message: Option<&str>,
@@ -178,14 +178,14 @@ where
 /// target request's cooperative cancel flag (e.g. close a socket to unblock I/O).
 pub trait Canceller<S>: Send + Sync {
     /// Actively abort the in-flight `request` (e.g. close a socket to unblock its I/O).
-    fn cancel(&self, request: &JsonRpcRequest, session: &Session<S>);
+    fn cancel(&self, request: &RequestInfo, session: &Session<S>);
 }
 
 impl<S, F> Canceller<S> for F
 where
-    F: Fn(&JsonRpcRequest, &Session<S>) + Send + Sync,
+    F: Fn(&RequestInfo, &Session<S>) + Send + Sync,
 {
-    fn cancel(&self, request: &JsonRpcRequest, session: &Session<S>) {
+    fn cancel(&self, request: &RequestInfo, session: &Session<S>) {
         (self)(request, session)
     }
 }
@@ -408,7 +408,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     }
 
     /// Register a synchronous request method.
-    pub fn method<F, A, R>(mut self, method: JsonRpcMethod<F>) -> BuildResult<Self>
+    pub fn method<F, A, R>(mut self, method: RpcMethod<F>) -> BuildResult<Self>
     where
         F: Fn(A, &RequestCtx<S>) -> Result<R, JsonRpcError> + Send + Sync + 'static,
         A: DeserializeOwned + Serialize + Send + 'static,
@@ -419,7 +419,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     }
 
     /// Register an async request method.
-    pub fn async_method<F, A, R, Fut>(mut self, method: AsyncJsonRpcMethod<F>) -> BuildResult<Self>
+    pub fn async_method<F, A, R, Fut>(mut self, method: AsyncRpcMethod<F>) -> BuildResult<Self>
     where
         F: Fn(A, RequestCtx<S>) -> Fut + Send + Sync + 'static,
         A: DeserializeOwned + Serialize + Send + 'static,
@@ -447,7 +447,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     /// [`truenas_filter::tnfilter`]; the framework applies the `get`/`count` finalize.
     pub fn filterable<F, A, E>(
         mut self,
-        method: FilterableJsonRpcMethod<A, E, F>,
+        method: FilterableRpcMethod<A, E, F>,
     ) -> BuildResult<Self>
     where
         F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
@@ -467,7 +467,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     /// streams over the connection's raw fd.
     pub fn fd_transfer_method<A, N, R, FN, FT>(
         mut self,
-        method: JsonRpcFdTransferMethod<A, N, R, FN, FT>,
+        method: RpcFdTransferMethod<A, N, R, FN, FT>,
     ) -> BuildResult<Self>
     where
         A: DeserializeOwned + Send + 'static,
@@ -485,7 +485,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     /// receives open fds rather than streaming bytes.
     pub fn fd_pass_method<A, N, R, FN, FT>(
         mut self,
-        method: JsonRpcFdPassMethod<A, N, R, FN, FT>,
+        method: RpcFdPassMethod<A, N, R, FN, FT>,
     ) -> BuildResult<Self>
     where
         A: DeserializeOwned + Send + 'static,
@@ -777,14 +777,14 @@ impl<S: Send + Sync + 'static> Service<S> {
         let audit_id =
             if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
         let req = if method.meta.audit {
-            JsonRpcRequest {
+            RequestInfo {
                 method: method.meta.name.to_string(),
                 id: audit_id.clone(),
                 params: Value::Null,
                 roles: method.meta.roles.to_vec(),
             }
         } else {
-            JsonRpcRequest { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
+            RequestInfo { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
         };
         let is_async = matches!(method.imp, MethodImpl::Async(_));
         let cx = RequestCtx::new_xdr(
@@ -1220,7 +1220,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // python body (`run_python` reads `req.method`); a plain method never touches it. So move
         // `parsed.method` in only when needed (mirroring the XDR path) rather than cloning it.
         let need_method = need_snapshot || matches!(method.imp, MethodImpl::Python);
-        let req = JsonRpcRequest {
+        let req = RequestInfo {
             method: if need_method { parsed.method } else { String::new() },
             id: rid.clone(),
             params: if need_snapshot { raw_to_value(parsed.params.as_deref()) } else { Value::Null },
@@ -1289,7 +1289,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // 2. The authz/audit snapshot (also stored on the subscription).
         let snapshot = raw_to_value(parsed.params.as_deref());
         let need_snapshot = method.meta.audit;
-        let req = JsonRpcRequest {
+        let req = RequestInfo {
             method: parsed.method,
             id: rid.clone(),
             params: if need_snapshot { snapshot.clone() } else { Value::Null },
@@ -1360,7 +1360,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         };
 
         let need_snapshot = method.meta.audit;
-        let req = JsonRpcRequest {
+        let req = RequestInfo {
             method: parsed.method.clone(),
             id: Some(rid.clone()),
             params: if need_snapshot { raw_to_value(parsed.params.as_deref()) } else { Value::Null },
@@ -1464,7 +1464,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     fn handle_sessions(&self, parsed: ParsedRequest, session: &Arc<Session<S>>) -> Dispatched {
         let note = parsed.id.is_none();
         let rid = parsed.id.clone();
-        let req = JsonRpcRequest {
+        let req = RequestInfo {
             method: parsed.method.clone(),
             id: rid.clone(),
             params: Value::Null,
@@ -1678,7 +1678,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
     /// Audit a control op (`$/sessionClose`, `$/cancelRequest`): no method metadata, so there are
     /// no `secret_fields` to redact (the params are ids, not credentials) and no static message.
-    fn audit_control(&self, req: &JsonRpcRequest, outcome: AuditOutcome<'_>, session: &Session<S>) {
+    fn audit_control(&self, req: &RequestInfo, outcome: AuditOutcome<'_>, session: &Session<S>) {
         if let Some(sink) = self.service.audit_sink.as_deref() {
             sink.audit(req, outcome, session, None);
         }
@@ -1701,7 +1701,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         }
         self.close_session(session);
         // The session was closed → audit the successful control op (no params).
-        let req = JsonRpcRequest {
+        let req = RequestInfo {
             method: parsed.method,
             id: rid.clone(),
             params: Value::Null,
@@ -1750,7 +1750,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 .map(|session_id| CancelTarget::Subscription { session_id }),
         };
 
-        let req = JsonRpcRequest {
+        let req = RequestInfo {
             method: parsed.method.clone(),
             id: rid.clone(),
             params: raw_to_value(parsed.params.as_deref()),
@@ -1900,7 +1900,7 @@ impl<S: Send + Sync + 'static> Caller<S> {
             (elevated && self.audit_elevated).then(|| (method.meta.clone(), cx.session().clone()));
         let outcome = run_method_value(method, args, cx).await;
         if let (Some((meta, session)), Some(sink)) = (audit, &self.audit_sink) {
-            let req = JsonRpcRequest {
+            let req = RequestInfo {
                 method: meta.name.to_string(),
                 id: None,
                 params: Value::Null,
@@ -2004,7 +2004,7 @@ fn audit_setup<S>(
     session: &Session<S>,
 ) {
     redact_value(&mut snapshot, secret_fields);
-    let req = JsonRpcRequest { method, id: rid, params: snapshot, roles: Vec::new() };
+    let req = RequestInfo { method, id: rid, params: snapshot, roles: Vec::new() };
     sink.audit(&req, outcome, session, audit_message);
 }
 
@@ -2037,7 +2037,7 @@ fn redact_value(value: &mut Value, secret_fields: &[String]) {
 fn audit_call<S>(
     sink: &dyn AuditSink<S>,
     meta: &MethodMeta,
-    req: &JsonRpcRequest,
+    req: &RequestInfo,
     outcome: AuditOutcome<'_>,
     detail: Option<&str>,
     session: &Session<S>,
@@ -2061,7 +2061,7 @@ fn audit_call<S>(
 struct Pipeline<S> {
     method: Arc<Method<S>>,
     session: Arc<Session<S>>,
-    req: JsonRpcRequest,
+    req: RequestInfo,
     rid: Option<String>,
     audit_sink: Option<Arc<dyn AuditSink<S>>>,
     py_dispatcher: Option<Arc<dyn PyDispatcher>>,
@@ -2313,7 +2313,7 @@ mod tests {
         Pipeline {
             method: Arc::new(method),
             session: dummy_session(),
-            req: JsonRpcRequest { method: "m".into(), id: None, params: Value::Null, roles: Vec::new() },
+            req: RequestInfo { method: "m".into(), id: None, params: Value::Null, roles: Vec::new() },
             rid: None,
             audit_sink: None,
             py_dispatcher: None,
@@ -2334,9 +2334,9 @@ mod tests {
     #[tokio::test]
     async fn shared_handlers_execute() {
         let proto = JsonRpcProtocol::<()>::builder("t", "1")
-            .method(JsonRpcMethod::new(MethodDef::new("s"), nil_ok))
+            .method(RpcMethod::new(MethodDef::new("s"), nil_ok))
             .unwrap()
-            .async_method(AsyncJsonRpcMethod::new(MethodDef::new("a"), nil_ok_async))
+            .async_method(AsyncRpcMethod::new(MethodDef::new("a"), nil_ok_async))
             .unwrap()
             .build();
         let s = proto.new_session(Some(()), Arc::new(NullOutbound));
@@ -2354,7 +2354,7 @@ mod tests {
     #[should_panic(expected = "non-sync")]
     fn run_sync_on_async_method_panics() {
         let method =
-            AsyncJsonRpcMethod::new(MethodDef::new("a"), nil_ok_async).erase::<(), Value, Value, _>();
+            AsyncRpcMethod::new(MethodDef::new("a"), nil_ok_async).erase::<(), Value, Value, _>();
         let session = dummy_session();
         let cx = dummy_cx(&session);
         let _ = pipeline(method).run_sync(None, cx);
@@ -2363,7 +2363,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "non-async")]
     async fn run_async_on_sync_method_panics() {
-        let method = JsonRpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
+        let method = RpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
         let session = dummy_session();
         let cx = dummy_cx(&session);
         let _ = pipeline(method).run_async(None, cx).await;
@@ -2372,7 +2372,7 @@ mod tests {
     #[tokio::test]
     #[should_panic(expected = "run_xdr_async on a non-async")]
     async fn run_xdr_async_on_sync_method_panics() {
-        let method = JsonRpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
+        let method = RpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
         let session = dummy_session();
         let cx = dummy_cx(&session);
         let _ = pipeline(method).run_xdr_async(&[], cx).await;

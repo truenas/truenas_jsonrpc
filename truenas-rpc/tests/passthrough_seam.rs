@@ -11,7 +11,7 @@ use serde_json::value::{to_raw_value, RawValue};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    Dispatched, FileTransfer, JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound,
+    Dispatched, FileTransfer, JsonRpcError, JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound,
     Session, SessionLifecycle, SetupHandoff, SetupOutcome,
 };
 
@@ -58,7 +58,7 @@ fn proto(captured: Option<Captured>) -> JsonRpcProtocol<()> {
         },
     );
     let b = match captured {
-        Some(cap) => b.audit_sink(move |r: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        Some(cap) => b.audit_sink(move |r: &RequestInfo, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             let error = outcome.error().map(|e| json!({ "code": e.code, "message": e.message }));
             cap.lock().unwrap().push(json!({ "params": r.params, "error": error }));
         }),

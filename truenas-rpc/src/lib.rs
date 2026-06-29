@@ -14,9 +14,9 @@
 //! ## Execution model (blocking vs. awaitable)
 //!
 //! [`JsonRpcProtocol::dispatch`] is `async` and **branches on the method kind**: a
-//! sync [`JsonRpcMethod`] (the default — covers blocking work like ZFS ioctls,
+//! sync [`RpcMethod`] (the default — covers blocking work like ZFS ioctls,
 //! file I/O, and auth-stack crypto) runs its pipeline on a `spawn_blocking` worker;
-//! an [`AsyncJsonRpcMethod`] (for genuinely awaitable work) is awaited on the runtime.
+//! an [`AsyncRpcMethod`] (for genuinely awaitable work) is awaited on the runtime.
 
 mod envelope;
 mod error;
@@ -34,8 +34,8 @@ mod types;
 pub use error::{BuildResult, Error, ErrorCode, JsonRpcError};
 pub use meta::Secret;
 pub use method::{
-    AsyncJsonRpcMethod, FilterableJsonRpcMethod, JsonRpcFdPassMethod, JsonRpcFdTransferMethod,
-    JsonRpcMethod, MethodDef, SubscriptionDef,
+    AsyncRpcMethod, FilterableRpcMethod, RpcFdPassMethod, RpcFdTransferMethod,
+    RpcMethod, MethodDef, SubscriptionDef,
 };
 pub use protocol::{
     AuditOutcome, AuditSink, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
@@ -50,7 +50,7 @@ pub use session::{
     Clock, Credential, IdGen, NullOutbound, Outbound, Session, SessionId, SessionOrigin,
     SystemClock, UuidGen,
 };
-pub use types::{JsonRpcRequest, MessageDirection, ServerInfo, SessionLifecycle};
+pub use types::{RequestInfo, MessageDirection, ServerInfo, SessionLifecycle};
 // Re-exported from `truenas-filter` so consumers can write filterable (query) handlers
 // without a direct dependency on the engine crate.
 pub use truenas_filter::{

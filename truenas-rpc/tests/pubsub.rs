@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    Dispatched, IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
+    Dispatched, IdGen, JsonRpcError, RpcMethod, JsonRpcProtocol, RequestInfo, MethodDef,
     NullOutbound, Outbound, RequestCtx, Roles, Session, SessionId, SubscriptionDef,
 };
 
@@ -145,7 +145,7 @@ async fn subscribe_is_audited() {
             MethodDef::new("events").audit_message("subscribed"),
         ))
         .unwrap()
-        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             cap.lock().unwrap().push(json!({ "method": r.method, "msg": msg }));
         })
         .id_gen(FixedId(PINNED.parse().unwrap()))
@@ -192,7 +192,7 @@ async fn publish_unknown_topic_errors() {
 #[tokio::test]
 async fn publish_to_client_server_method_errors() {
     let proto = JsonRpcProtocol::<()>::builder("t", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("ping"), |_a: NoArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("ping"), |_a: NoArgs, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()

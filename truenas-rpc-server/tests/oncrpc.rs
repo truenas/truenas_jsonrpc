@@ -1,5 +1,5 @@
 //! End-to-end: a registered `math.add` served over **ONC RPC** (RFC 5531) through
-//! [`serve_oncrpc_unix_listener`](truenas_rpc_server::JsonRpcServer::serve_oncrpc_unix_listener).
+//! [`serve_oncrpc_unix_listener`](truenas_rpc_server::TruenasRpcServer::serve_oncrpc_unix_listener).
 //! The same method is reachable over the JSON-RPC transports too — one service, two wires — but here
 //! a hand-rolled ONC RPC client (record marking + `rpc_msg`, AUTH_NONE) drives the binary wire: the
 //! `NULL` probe (procedure 0) and `math.add` via its XDR proc-id (1001).
@@ -7,8 +7,8 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use truenas_rpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_rpc_server::{JsonRpcServer, OncRpcConfig, UnixConfig};
+use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc_server::{TruenasRpcServer, OncRpcConfig, UnixConfig};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
 const PROG: u32 = 0x2000_0001;
@@ -28,7 +28,7 @@ struct AddResult {
 /// The protocol whose `math.add` (XDR proc-id 1001) the server serves over both wires.
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("demo", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("math.add").xdr(1001),
             |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
         ))
@@ -72,8 +72,8 @@ async fn read_reply(stream: &mut UnixStream) -> (u32, Vec<u8>) {
 async fn registered_method_served_over_oncrpc() {
     let path = std::env::temp_dir().join(format!("tnrpc-{}-oncrpc.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let srv = JsonRpcServer::<()>::builder("dual-wire").protocol("demo", proto()).build();
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let srv = TruenasRpcServer::<()>::builder("dual-wire").protocol("demo", proto()).build();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task =
         tokio::spawn(async move { srv.serve_oncrpc_unix_listener(listener, OncRpcConfig::new("demo")).await });
 

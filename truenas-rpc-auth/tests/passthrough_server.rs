@@ -1,4 +1,4 @@
-//! Passthrough wired end to end through a **real** `JsonRpcServer` over AF_UNIX: a client
+//! Passthrough wired end to end through a **real** `TruenasRpcServer` over AF_UNIX: a client
 //! negotiates and sends `$/sessionSetup{PASSTHROUGH}`; the server's connection loop runs the
 //! takeover (`run_passthrough`), handing the live client fd to a broker, which conducts its
 //! exchange directly on that fd. Receiving the broker's bytes on the client connection proves the
@@ -19,7 +19,7 @@ use truenas_rpc::JsonRpcProtocol;
 use truenas_rpc_auth::{
     install, AuthSession, AuthStack, BrokerContext, BrokerServer, BrokerVerdict, Principal,
 };
-use truenas_rpc_server::{framing, JsonRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
 
 fn tmp(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("tn-pt-srv-{}-{tag}.sock", std::process::id()));
@@ -58,11 +58,11 @@ async fn passthrough_over_a_real_unix_server_hands_off_to_the_broker() {
     // The server: an auth protocol offering passthrough, served over AF_UNIX.
     let stack = AuthStack::builder().passthrough(&broker_path).build();
     let proto = install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build();
-    let srv = JsonRpcServer::<AuthSession>::builder("srv")
+    let srv = TruenasRpcServer::<AuthSession>::builder("srv")
         .state_from_peer(AuthSession::from_peer)
         .protocol("main", proto)
         .build();
-    let listener = JsonRpcServer::<AuthSession>::bind_unix(&UnixConfig::new(&server_path)).unwrap();
+    let listener = TruenasRpcServer::<AuthSession>::bind_unix(&UnixConfig::new(&server_path)).unwrap();
     let task = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
 
     let got = tokio::time::timeout(Duration::from_secs(5), async {

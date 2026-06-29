@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod, JsonRpcError,
-    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Session,
+    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod, JsonRpcError,
+    JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, Session,
 };
 
 fn unhex(s: &str) -> Vec<u8> {
@@ -48,7 +48,7 @@ fn dataset() -> Vec<FEntry> {
 /// `xdr.query` is filterable at proc-id 1003; it streams the dataset through `tnfilter`.
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("conf", "1")
-        .filterable(FilterableJsonRpcMethod::<QueryArgs, FEntry, _>::new(
+        .filterable(FilterableRpcMethod::<QueryArgs, FEntry, _>::new(
             MethodDef::new("xdr.query").xdr(1003),
             |_a: QueryArgs, _cx: &RequestCtx<()>, f: &CompiledFilters, o: &CompiledOptions| {
                 Ok::<_, JsonRpcError>(tnfilter(dataset(), f, o)?)
@@ -99,14 +99,14 @@ async fn audited_filterable_xdr_call_emits_audit_record() {
     let records: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let rec = records.clone();
     let p = JsonRpcProtocol::<()>::builder("conf", "1")
-        .filterable(FilterableJsonRpcMethod::<QueryArgs, FEntry, _>::new(
+        .filterable(FilterableRpcMethod::<QueryArgs, FEntry, _>::new(
             MethodDef::new("xdr.query").xdr(1003).audit_message("queried"),
             |_a: QueryArgs, _cx: &RequestCtx<()>, f: &CompiledFilters, o: &CompiledOptions| {
                 Ok::<_, JsonRpcError>(tnfilter(dataset(), f, o)?)
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             rec.lock().unwrap().push(json!({ "params": req.params }));
         })
         .build();

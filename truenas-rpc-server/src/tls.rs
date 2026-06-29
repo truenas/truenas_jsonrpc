@@ -31,7 +31,7 @@ use tokio_openssl::SslStream;
 
 use crate::engine::{ConnContext, JsonRpcEngine, ProtocolEngine};
 use crate::peer::{Peer, TlsPeer, TransportPosture};
-use crate::server::JsonRpcServer;
+use crate::server::TruenasRpcServer;
 
 // Linux kTLS confirmation: getsockopt(SOL_TLS, TLS_TX/TLS_RX) returns the 4-byte
 // `struct tls_crypto_info` header once that direction's crypto is installed, else errors.
@@ -103,7 +103,7 @@ impl TlsConfig {
     }
 }
 
-impl<S: Send + Sync + 'static> JsonRpcServer<S> {
+impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// Accept TLS connections on a bound TCP `listener` until an accept error occurs, per the
     /// config's [`TlsMode`]. A handshake failure (or kTLS not engaging, in kernel mode) drops
     /// just that connection.

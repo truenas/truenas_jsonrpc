@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use truenas_rpc::{
-    AsyncJsonRpcMethod, JsonRpcMethod, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
+    AsyncRpcMethod, RpcMethod, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
 };
 
 #[derive(Deserialize, Serialize)]
@@ -60,7 +60,7 @@ async fn main() {
     // 1) Pure dispatch overhead — no-op handler, 1 thread, inline (no spawn_blocking).
     {
         let proto = JsonRpcProtocol::<()>::builder("bench", "1.0")
-            .async_method(AsyncJsonRpcMethod::new(MethodDef::new("bench"), |a: Args, _c: RequestCtx<()>| async move {
+            .async_method(AsyncRpcMethod::new(MethodDef::new("bench"), |a: Args, _c: RequestCtx<()>| async move {
                 Ok(Res { n: a.n + 1 })
             }))
             .unwrap()
@@ -83,7 +83,7 @@ async fn main() {
         const XID: [u8; 16] =
             [0xf8, 0x1d, 0x4f, 0xae, 0x7d, 0xec, 0x11, 0xd0, 0xa7, 0x65, 0x00, 0xa0, 0xc9, 0x1e, 0x6b, 0xf6];
         let proto = JsonRpcProtocol::<()>::builder("bench", "1.0")
-            .async_method(AsyncJsonRpcMethod::new(
+            .async_method(AsyncRpcMethod::new(
                 MethodDef::new("bench").xdr(1001),
                 |a: Args, _c: RequestCtx<()>| async move { Ok(Res { n: a.n + 1 }) },
             ))
@@ -112,7 +112,7 @@ async fn main() {
             [0xf8, 0x1d, 0x4f, 0xae, 0x7d, 0xec, 0x11, 0xd0, 0xa7, 0x65, 0x00, 0xa0, 0xc9, 0x1e, 0x6b, 0xf6];
         let proto = Arc::new(
             JsonRpcProtocol::<()>::builder("bench", "1.0")
-                .async_method(AsyncJsonRpcMethod::new(
+                .async_method(AsyncRpcMethod::new(
                     MethodDef::new("bench").xdr(1001),
                     |a: Args, _c: RequestCtx<()>| async move { Ok(Res { n: a.n + 1 }) },
                 ))
@@ -154,7 +154,7 @@ async fn main() {
     // A realistic sync handler (real CPU work) on the spawn_blocking path.
     let proto = Arc::new(
         JsonRpcProtocol::<()>::builder("bench", "1.0")
-            .method(JsonRpcMethod::new(MethodDef::new("bench"), |a: Args, _c: &RequestCtx<()>| {
+            .method(RpcMethod::new(MethodDef::new("bench"), |a: Args, _c: &RequestCtx<()>| {
                 Ok(Res { n: realistic_work(a.n) })
             }))
             .unwrap()

@@ -11,10 +11,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_rpc::{
-    FileTransfer, JsonRpcError, JsonRpcFdPassMethod, JsonRpcFdTransferMethod, JsonRpcProtocol,
+    FileTransfer, JsonRpcError, RpcFdPassMethod, RpcFdTransferMethod, JsonRpcProtocol,
     MethodDef, RequestCtx, TransferDirection,
 };
-use truenas_rpc_server::{framing, FileTransferExt, JsonRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, FileTransferExt, TruenasRpcServer, UnixConfig, UnixTrust};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 const N: usize = 4096;
@@ -48,10 +48,10 @@ fn pattern_byte(i: usize) -> u8 {
     (i % 251) as u8
 }
 
-fn server() -> JsonRpcServer<()> {
+fn server() -> TruenasRpcServer<()> {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         // download: the server produces `n` bytes of the pattern over the fd.
-        .fd_transfer_method(JsonRpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
             MethodDef::new("x.download"),
             TransferDirection::Download,
             |a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DownloadReady { size: a.n }),
@@ -63,7 +63,7 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         // upload: the server consumes `n` bytes from the fd and reports a checksum.
-        .fd_transfer_method(JsonRpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
             MethodDef::new("x.upload"),
             TransferDirection::Upload,
             |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
@@ -76,7 +76,7 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         // fd-pass upload: the client passes an fd; the server reads the file it points to.
-        .fd_pass_method(JsonRpcFdPassMethod::<Args, UploadReady, FdDone, _, _>::new(
+        .fd_pass_method(RpcFdPassMethod::<Args, UploadReady, FdDone, _, _>::new(
             MethodDef::new("x.recvfd"),
             TransferDirection::Upload,
             |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
@@ -95,7 +95,7 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         // download via sendfile(2): stream `n` pattern bytes from a temp file (zero-copy).
-        .fd_transfer_method(JsonRpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
             MethodDef::new("x.download_sf"),
             TransferDirection::Download,
             |a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DownloadReady { size: a.n }),
@@ -111,7 +111,7 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         // upload via recvfile(2): splice `n` bytes into a temp file, then checksum it.
-        .fd_transfer_method(JsonRpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
             MethodDef::new("x.upload_rf"),
             TransferDirection::Upload,
             |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
@@ -128,7 +128,7 @@ fn server() -> JsonRpcServer<()> {
         ))
         .unwrap()
         .build();
-    JsonRpcServer::<()>::builder("xfer-server").protocol("main", proto).build()
+    TruenasRpcServer::<()>::builder("xfer-server").protocol("main", proto).build()
 }
 
 /// Send one fd to `sock` via `SCM_RIGHTS` (the client side of fd passing).
@@ -163,7 +163,7 @@ async fn connect(tag: &str) -> (UnixStream, std::path::PathBuf, tokio::task::Joi
     let path = unique(tag);
     let _ = std::fs::remove_file(&path);
     let srv = server();
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await })

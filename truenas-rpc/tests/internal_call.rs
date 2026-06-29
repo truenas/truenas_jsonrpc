@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AsyncJsonRpcMethod, AuditOutcome, CompiledFilters, CompiledOptions, FilterableJsonRpcMethod,
-    Filtered, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcProtocolBuilder, JsonRpcRequest,
+    AsyncRpcMethod, AuditOutcome, CompiledFilters, CompiledOptions, FilterableRpcMethod,
+    Filtered, JsonRpcError, RpcMethod, JsonRpcProtocol, JsonRpcProtocolBuilder, RequestInfo,
     MethodDef, NullOutbound, RequestCtx, Roles, Session, SubscriptionDef,
 };
 
@@ -45,12 +45,12 @@ fn base() -> JsonRpcProtocolBuilder<()> {
     JsonRpcProtocol::<()>::builder("t", "1")
         .roles(Roles::new(["ADMIN"]))
         // --- callable sub-operations ---
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("op_add").xdr(OP_ADD),
             |p: Pair, _c: &RequestCtx<()>| Ok::<_, JsonRpcError>(Sum { sum: p.a + p.b }),
         ))
         .unwrap()
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("op_slow").xdr(OP_SLOW),
             |_p: Pair, _c: &RequestCtx<()>| {
                 std::thread::sleep(Duration::from_millis(SLEEP_MS)); // blocking I/O stand-in
@@ -58,17 +58,17 @@ fn base() -> JsonRpcProtocolBuilder<()> {
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("op_aadd").xdr(OP_AADD),
             |p: Pair, _c: RequestCtx<()>| async move { Ok::<_, JsonRpcError>(Sum { sum: p.a + p.b }) },
         ))
         .unwrap()
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("op_guarded").xdr(OP_GUARDED).roles(["ADMIN"]),
             |p: Pair, _c: &RequestCtx<()>| Ok::<_, JsonRpcError>(Sum { sum: p.a + p.b }),
         ))
         .unwrap()
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("op_boom").xdr(OP_BOOM),
             |_p: Pair, _c: &RequestCtx<()>| -> Result<Sum, JsonRpcError> {
                 panic!("op handler blew up")
@@ -76,7 +76,7 @@ fn base() -> JsonRpcProtocolBuilder<()> {
         ))
         .unwrap()
         // a filterable method (by name) — internally callable returns an error
-        .filterable(FilterableJsonRpcMethod::<Pair, Sum, _>::new(
+        .filterable(FilterableRpcMethod::<Pair, Sum, _>::new(
             MethodDef::new("op_filt"),
             |_p: Pair, _c: &RequestCtx<()>, _f: &CompiledFilters, _o: &CompiledOptions| {
                 Ok::<_, JsonRpcError>(Filtered::Count(0))
@@ -87,84 +87,84 @@ fn base() -> JsonRpcProtocolBuilder<()> {
         .subscription(SubscriptionDef::<Pair, Sum>::new(MethodDef::new("op_sub")))
         .unwrap()
         // --- drivers: each is dispatched on the wire and calls into the op-table in-process ---
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_sync"),
             |p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_op(OP_ADD, Box::new(p)).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_async"),
             |p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_op(OP_AADD, Box::new(p)).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_named"),
             |p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_named("op_add", Box::new(p)).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_guarded"),
             |p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_op(OP_GUARDED, Box::new(p)).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_guarded_elev"),
             |p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_op_elevated(OP_GUARDED, Box::new(p)).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_named_elev"),
             |p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_named_elevated("op_guarded", Box::new(p)).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_notfound"),
             |_p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_op(9999, Box::new(Pair { a: 0, b: 0 })).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_named_notfound"),
             |_p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_named("nope", Box::new(())).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_boom"),
             |p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_op(OP_BOOM, Box::new(p)).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_filt"),
             |_p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_named("op_filt", Box::new(())).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_sub"),
             |_p: Pair, cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(as_sum(cx.call_named("op_sub", Box::new(())).await?))
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_series"),
             |_p: Pair, cx: RequestCtx<()>| async move {
                 let mut n = 0i64;
@@ -176,7 +176,7 @@ fn base() -> JsonRpcProtocolBuilder<()> {
             },
         ))
         .unwrap()
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("drv_scatter"),
             |_p: Pair, cx: RequestCtx<()>| async move {
                 // Scatter-gather: K independent ops in flight at once. The sync `op_slow` runs on
@@ -272,7 +272,7 @@ async fn elevated_internal_calls_are_unaudited_by_default_but_logged_under_polic
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
     let proto = base()
-        .audit_sink(move |_r: &JsonRpcRequest, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |_r: &RequestInfo, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             h.fetch_add(1, Ordering::SeqCst);
         })
         .build(); // audit_internal_elevated defaults to OFF
@@ -285,7 +285,7 @@ async fn elevated_internal_calls_are_unaudited_by_default_but_logged_under_polic
     let h = hits.clone();
     let proto = base()
         .audit_internal_elevated(true)
-        .audit_sink(move |_r: &JsonRpcRequest, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |_r: &RequestInfo, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             h.fetch_add(1, Ordering::SeqCst);
         })
         .build();

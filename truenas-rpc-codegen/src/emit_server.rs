@@ -251,7 +251,7 @@ fn emit_register(spec: &Spec) -> Result<String> {
                 uses_handlers = true;
                 let params = ref_name_of(&m.params, "params")?;
                 body.push_str(&format!(
-                    "    let h = handlers.clone();\n    let builder = builder.method(truenas_rpc::JsonRpcMethod::new({def}, move |request: {params}, cx: &truenas_rpc::RequestCtx<S>| h.{}(request, cx)))?;\n",
+                    "    let h = handlers.clone();\n    let builder = builder.method(truenas_rpc::RpcMethod::new({def}, move |request: {params}, cx: &truenas_rpc::RequestCtx<S>| h.{}(request, cx)))?;\n",
                     m.handler
                 ));
             }
@@ -263,7 +263,7 @@ fn emit_register(spec: &Spec) -> Result<String> {
                     "entry",
                 )?;
                 body.push_str(&format!(
-                    "    let h = handlers.clone();\n    let builder = builder.filterable(truenas_rpc::FilterableJsonRpcMethod::<{params}, {entry}, _>::new({def}, move |request: {params}, cx: &truenas_rpc::RequestCtx<S>, filters: &truenas_rpc::CompiledFilters, options: &truenas_rpc::CompiledOptions| h.{}(request, cx, filters, options)))?;\n",
+                    "    let h = handlers.clone();\n    let builder = builder.filterable(truenas_rpc::FilterableRpcMethod::<{params}, {entry}, _>::new({def}, move |request: {params}, cx: &truenas_rpc::RequestCtx<S>, filters: &truenas_rpc::CompiledFilters, options: &truenas_rpc::CompiledOptions| h.{}(request, cx, filters, options)))?;\n",
                     m.handler
                 ));
             }

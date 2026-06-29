@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    Dispatched, JsonRpcMethod, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RoleMask,
+    Dispatched, RpcMethod, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RoleMask,
     Session,
 };
 
@@ -62,11 +62,11 @@ async fn call(proto: &JsonRpcProtocol<()>, s: &Arc<Session<()>>, wire: &[u8]) ->
 
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("test", "1.0.0")
-        .method(JsonRpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
             Ok(EchoResult { echo: a.msg })
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
             Ok(AddResult { sum: a.a + a.b })
         }))
         .unwrap()

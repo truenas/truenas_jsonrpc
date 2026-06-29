@@ -81,7 +81,7 @@ impl ForwardedOrigin {
     /// Parse the real client from the TrueNAS-middleware nginx headers: `X-Real-Remote-Addr`,
     /// `X-Real-Remote-Port`, and `X-Https` (`"on"` ⇒ the client→proxy leg was TLS). `None` if the
     /// address header is absent or empty. A drop-in
-    /// [`forwarded_extractor`](crate::JsonRpcServerBuilder::forwarded_extractor) for the standard
+    /// [`forwarded_extractor`](crate::TruenasRpcServerBuilder::forwarded_extractor) for the standard
     /// nginx setup; pass your own closure to read different headers. Requires the `websocket` feature.
     #[cfg(feature = "websocket")]
     pub fn from_real_remote_headers(headers: &HeaderMap) -> Option<Self> {

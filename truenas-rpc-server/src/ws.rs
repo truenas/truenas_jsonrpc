@@ -23,9 +23,9 @@ use truenas_rpc::{Dispatched, ErrorCode};
 
 use crate::connection::{self, BoundConn};
 use crate::peer::{self, Peer, UnixTrust};
-use crate::server::{JsonRpcServer, ServerShared};
+use crate::server::{TruenasRpcServer, ServerShared};
 
-impl<S: Send + Sync + 'static> JsonRpcServer<S> {
+impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// Accept WebSocket connections on a bound TCP `listener` until an accept error occurs. A
     /// failed WebSocket handshake drops just that connection.
     pub async fn serve_websocket_listener(&self, listener: TcpListener) -> std::io::Result<()> {
@@ -99,7 +99,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
 }
 
 #[cfg(feature = "tls")]
-impl<S: Send + Sync + 'static> JsonRpcServer<S> {
+impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// Accept WebSocket-over-TLS (`wss://`) connections on a bound TCP `listener` until an
     /// accept error occurs. The TLS handshake is **userspace** (the WebSocket library owns the
     /// stream, so kTLS doesn't apply); raw-fd transfer is refused on these connections. The

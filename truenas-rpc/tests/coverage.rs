@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    AsyncJsonRpcMethod, Clock, Dispatched, Error, ErrorCode, IdGen, JsonRpcError, JsonRpcMethod,
-    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, RoleMask, Roles, Session,
+    AsyncRpcMethod, Clock, Dispatched, Error, ErrorCode, IdGen, JsonRpcError, RpcMethod,
+    JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, RoleMask, Roles, Session,
     SessionId, SessionLifecycle,
 };
 
@@ -56,7 +56,7 @@ struct EchoResult {
 
 fn echo_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("test", "1.0.0")
-        .method(JsonRpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
             Ok::<_, JsonRpcError>(EchoResult { echo: a.msg })
         }))
         .unwrap()
@@ -111,7 +111,7 @@ async fn request_ctx_and_session_surface() {
     let raise_ok = Arc::new(AtomicBool::new(false));
     let (i, n, c, r) = (id_seen.clone(), name_seen.clone(), cancelled.clone(), raise_ok.clone());
     let proto = JsonRpcProtocol::<String>::builder("pname", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("probe"),
             move |_a: Value, cx: &RequestCtx<String>| {
                 *i.lock().unwrap() = cx.id().map(str::to_string);
@@ -151,7 +151,7 @@ async fn method_def_setters_are_all_usable() {
         .secret_fields(["secret"]);
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
         .roles(Roles::new(["admin", "ops"]))
-        .method(JsonRpcMethod::new(def, |a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(a)))
+        .method(RpcMethod::new(def, |a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(a)))
         .unwrap()
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
@@ -183,22 +183,22 @@ async fn builder_id_gen_and_clock_overrides() {
 
 #[test]
 fn builder_rejects_reserved_and_duplicate_names() {
-    let reserved_dollar = JsonRpcProtocol::<()>::builder("p", "1").method(JsonRpcMethod::new(
+    let reserved_dollar = JsonRpcProtocol::<()>::builder("p", "1").method(RpcMethod::new(
         MethodDef::new("$/x"),
         |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
     ));
     assert!(reserved_dollar.is_err());
-    let reserved_rpc = JsonRpcProtocol::<()>::builder("p", "1").method(JsonRpcMethod::new(
+    let reserved_rpc = JsonRpcProtocol::<()>::builder("p", "1").method(RpcMethod::new(
         MethodDef::new("rpc.y"),
         |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
     ));
     assert!(reserved_rpc.is_err());
     let dup = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("dup"), |_a: Value, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("dup"), |_a: Value, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("dup"), |_a: Value, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("dup"), |_a: Value, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }));
     assert!(dup.is_err());
@@ -356,7 +356,7 @@ async fn session_setup_is_audited_and_redacted() {
             MethodDef::new("$/sessionSetup").secret_fields(["password"]),
             |_a: SetupArgs, _s: &Session<String>| Ok((SessionLifecycle::Established, json!({ "token": "sekret" }))),
         )
-        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<String>, _m: Option<&str>| {
+        .audit_sink(move |r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<String>, _m: Option<&str>| {
             cap.lock().unwrap().push(json!({ "params": r.params }));
         })
         .build();
@@ -373,7 +373,7 @@ async fn session_setup_is_audited_and_redacted() {
 #[tokio::test]
 async fn sync_handler_panic_is_internal_error() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("boom"), |_a: Value, _c: &RequestCtx<()>| -> Result<Value, JsonRpcError> {
+        .method(RpcMethod::new(MethodDef::new("boom"), |_a: Value, _c: &RequestCtx<()>| -> Result<Value, JsonRpcError> {
             panic!("handler kaboom")
         }))
         .unwrap()
@@ -390,7 +390,7 @@ async fn unauthorized_call_is_not_authorized() {
     // A method whose required role the session lacks → NOT_AUTHORIZED (the native role gate).
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
         .roles(Roles::new(["AUTH"]))
-        .method(JsonRpcMethod::new(MethodDef::new("m").roles(["AUTH"]), |_a: Value, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("m").roles(["AUTH"]), |_a: Value, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
@@ -407,11 +407,11 @@ async fn audited_request_without_params_snapshots_empty_object() {
     let seen = Arc::new(Mutex::new(Value::Null));
     let sp = seen.clone();
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("noargs").audit(), |_a: Value, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("noargs").audit(), |_a: Value, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             *sp.lock().unwrap() = req.params.clone();
         })
         .build();
@@ -438,7 +438,7 @@ fn role_mask_and_registry_basics() {
 
 #[test]
 fn method_with_roles_but_no_registry_is_a_build_error() {
-    let r = JsonRpcProtocol::<()>::builder("p", "1").method(JsonRpcMethod::new(
+    let r = JsonRpcProtocol::<()>::builder("p", "1").method(RpcMethod::new(
         MethodDef::new("m").roles(["x"]),
         |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
     ));
@@ -449,7 +449,7 @@ fn method_with_roles_but_no_registry_is_a_build_error() {
 fn method_with_unregistered_role_is_a_build_error() {
     let r = JsonRpcProtocol::<()>::builder("p", "1")
         .roles(Roles::new(["known"]))
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("m").roles(["unknown"]),
             |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
         ));
@@ -461,21 +461,21 @@ async fn audit_message_join_variants() {
     let cap = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
     let sink = cap.clone();
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("both").audit_message("static"), |_a: Value, cx: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("both").audit_message("static"), |_a: Value, cx: &RequestCtx<()>| {
             cx.set_audit("runtime");
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("runtime_only").audit(), |_a: Value, cx: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("runtime_only").audit(), |_a: Value, cx: &RequestCtx<()>| {
             cx.set_audit("rt");
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("neither").audit(), |_a: Value, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("neither").audit(), |_a: Value, _c: &RequestCtx<()>| {
             Ok::<Value, JsonRpcError>(json!(null))
         }))
         .unwrap()
-        .audit_sink(move |_r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |_r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             sink.lock().unwrap().push(msg.map(str::to_string));
         })
         .build();
@@ -494,12 +494,12 @@ async fn audit_redacts_secrets_in_nested_arrays() {
     let cap = Arc::new(Mutex::new(Vec::<Value>::new()));
     let sink = cap.clone();
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("login").audit().secret_fields(["password"]),
             |a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(a),
         ))
         .unwrap()
-        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             sink.lock().unwrap().push(r.params.clone());
         })
         .build();
@@ -554,7 +554,7 @@ fn parking_proto(
     let (st, pr) = (started.clone(), proceed.clone());
     let cc = canceller_called;
     let b = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("slow").cancellable(), move |_a: Value, cx: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("slow").cancellable(), move |_a: Value, cx: &RequestCtx<()>| {
             st.store(true, Ordering::SeqCst);
             while !pr.load(Ordering::SeqCst) {
                 std::thread::sleep(Duration::from_millis(1));
@@ -563,7 +563,7 @@ fn parking_proto(
             Ok::<Value, JsonRpcError>(json!({ "done": true }))
         }))
         .unwrap()
-        .cancellation(move |_req: &JsonRpcRequest, _s: &Session<()>| cc.store(true, Ordering::SeqCst));
+        .cancellation(move |_req: &RequestInfo, _s: &Session<()>| cc.store(true, Ordering::SeqCst));
     Arc::new(b.build())
 }
 
@@ -628,7 +628,7 @@ async fn cancel_by_a_different_non_admin_session_is_denied() {
 async fn async_pipeline_decode_and_authz_branches() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
         .roles(Roles::new(["AUTH"]))
-        .async_method(AsyncJsonRpcMethod::new(MethodDef::new("aecho").roles(["AUTH"]), |a: EchoArgs, _cx: RequestCtx<()>| async move {
+        .async_method(AsyncRpcMethod::new(MethodDef::new("aecho").roles(["AUTH"]), |a: EchoArgs, _cx: RequestCtx<()>| async move {
             Ok::<_, JsonRpcError>(EchoResult { echo: a.msg })
         }))
         .unwrap()

@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::json;
 use truenas_audit::{AuditPrincipal, LinuxAuditSink};
 use truenas_rpc::{
-    AuditOutcome, AuditSink, JsonRpcError, JsonRpcProtocol, JsonRpcRequest, NullOutbound, Session,
+    AuditOutcome, AuditSink, JsonRpcError, JsonRpcProtocol, RequestInfo, NullOutbound, Session,
 };
 
 #[test]
@@ -30,7 +30,7 @@ fn audit_drives_through_the_sink_without_panicking() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1").build();
     let session = proto.new_session(None, Arc::new(NullOutbound));
 
-    let req = JsonRpcRequest {
+    let req = RequestInfo {
         method: "pool.query".into(),
         id: Some("id-1".into()),
         params: json!({ "pool": "tank", "recursive": true }),
@@ -43,7 +43,7 @@ fn audit_drives_through_the_sink_without_panicking() {
         sink.audit(&req, AuditOutcome::Success, &session, Some("query pools"));
     }
     sink.audit(&req, AuditOutcome::Failure(&denied), &session, None);
-    let setup = JsonRpcRequest {
+    let setup = RequestInfo {
         method: "$/sessionSetup".into(),
         id: Some("id-2".into()),
         params: json!({ "mechanism": "********" }),

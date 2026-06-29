@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-use truenas_rpc::{AuditOutcome, JsonRpcRequest};
+use truenas_rpc::{AuditOutcome, RequestInfo};
 
 // AUDIT_* user-message types (uapi/linux/audit.h + audit-records.h); see the PAM mapping.
 const AUDIT_USER_AUTH: u16 = 1100;
@@ -42,7 +42,7 @@ pub(crate) fn build_record(
     service: &str,
     aid: &str,
     sess: &str,
-    request: &JsonRpcRequest,
+    request: &RequestInfo,
     outcome: AuditOutcome<'_>,
     principal: &AuditPrincipal,
     audit_message: Option<&str>,
@@ -168,8 +168,8 @@ mod tests {
     use serde_json::json;
     use truenas_rpc::JsonRpcError;
 
-    fn req(method: &str, params: Value) -> JsonRpcRequest {
-        JsonRpcRequest { method: method.into(), id: Some("rid-1".into()), params, roles: vec![] }
+    fn req(method: &str, params: Value) -> RequestInfo {
+        RequestInfo { method: method.into(), id: Some("rid-1".into()), params, roles: vec![] }
     }
 
     #[test]

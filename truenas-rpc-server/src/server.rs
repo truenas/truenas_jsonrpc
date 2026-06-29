@@ -1,4 +1,4 @@
-//! [`JsonRpcServer`] — the **Transport** layer (layer 1) entry point: binds one or more transports,
+//! [`TruenasRpcServer`] — the **Transport** layer (layer 1) entry point: binds one or more transports,
 //! selects a named protocol per connection with `$/negotiate`, and serves the dispatch loop. The
 //! notification routing is push-based via each session's [`Outbound`](truenas_rpc::Outbound), so
 //! there are no per-protocol drain threads.
@@ -58,7 +58,7 @@ impl UnixConfig {
 }
 
 /// How to serve a registered protocol over the ONC RPC wire (see
-/// [`serve_oncrpc_unix_listener`](JsonRpcServer::serve_oncrpc_unix_listener)): which protocol's
+/// [`serve_oncrpc_unix_listener`](TruenasRpcServer::serve_oncrpc_unix_listener)): which protocol's
 /// methods to serve, and the ONC RPC program number + version they answer to. [`new`](Self::new)
 /// defaults the program/version to the reference engine's (`0x2000_0001` / `1`); override with
 /// [`program`](Self::program) / [`version`](Self::version).
@@ -124,9 +124,9 @@ impl<S> ServerShared<S> {
     }
 }
 
-/// Builds a [`JsonRpcServer`]: register one or more named protocols, optionally map the
+/// Builds a [`TruenasRpcServer`]: register one or more named protocols, optionally map the
 /// connecting [`Peer`] to the session's server state, and set the inbound message limit.
-pub struct JsonRpcServerBuilder<S> {
+pub struct TruenasRpcServerBuilder<S> {
     protocols: HashMap<String, Arc<JsonRpcProtocol<S>>>,
     name: Option<String>,
     state_fn: Option<StateFn<S>>,
@@ -136,7 +136,7 @@ pub struct JsonRpcServerBuilder<S> {
     forwarded_extractor: Option<ForwardedFn>,
 }
 
-impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
+impl<S: Send + Sync + 'static> TruenasRpcServerBuilder<S> {
     /// Register a named protocol (the `$/negotiate` discriminator). Re-registering a name
     /// replaces it.
     #[must_use]
@@ -194,8 +194,8 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
 
     /// Finish building the server.
     #[must_use]
-    pub fn build(self) -> JsonRpcServer<S> {
-        JsonRpcServer {
+    pub fn build(self) -> TruenasRpcServer<S> {
+        TruenasRpcServer {
             shared: Arc::new(ServerShared {
                 protocols: self.protocols,
                 name: self.name,
@@ -211,20 +211,20 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
 
 /// A runnable server. Cheap to clone (an `Arc` handle), so a clone can be moved into each
 /// transport's accept task.
-pub struct JsonRpcServer<S> {
+pub struct TruenasRpcServer<S> {
     pub(crate) shared: Arc<ServerShared<S>>,
 }
 
-impl<S> Clone for JsonRpcServer<S> {
+impl<S> Clone for TruenasRpcServer<S> {
     fn clone(&self) -> Self {
-        JsonRpcServer { shared: self.shared.clone() }
+        TruenasRpcServer { shared: self.shared.clone() }
     }
 }
 
-impl<S: Send + Sync + 'static> JsonRpcServer<S> {
+impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// Begin building a server identified by `name` (reported in `$/negotiate`).
-    pub fn builder(name: impl Into<String>) -> JsonRpcServerBuilder<S> {
-        JsonRpcServerBuilder {
+    pub fn builder(name: impl Into<String>) -> TruenasRpcServerBuilder<S> {
+        TruenasRpcServerBuilder {
             protocols: HashMap::new(),
             name: Some(name.into()),
             state_fn: None,
@@ -238,7 +238,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     /// Guard for the network transports (TCP / TLS / WebSocket): refuse to serve if any
     /// registered protocol has no `$/sessionSetup` (so an unauthenticated remote client can't
     /// reach gated methods), unless the server opted in via
-    /// [`allow_unauthenticated_network`](JsonRpcServerBuilder::allow_unauthenticated_network).
+    /// [`allow_unauthenticated_network`](TruenasRpcServerBuilder::allow_unauthenticated_network).
     /// AF_UNIX is exempt and never calls this. This runs at serve time — the transport is chosen
     /// per `serve_*` call, not at build.
     pub(crate) fn require_network_auth(&self) -> std::io::Result<()> {

@@ -327,7 +327,7 @@ impl<S: Send + Sync + 'static> ProtocolEngine for OncRpcProtocol<S> {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
-    use truenas_rpc::{JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+    use truenas_rpc::{RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
     use truenas_xdr::from_bytes;
 
     #[derive(Deserialize, Serialize)]
@@ -344,7 +344,7 @@ mod tests {
     fn add_proto() -> Arc<JsonRpcProtocol<()>> {
         Arc::new(
             JsonRpcProtocol::<()>::builder("demo", "1")
-                .method(JsonRpcMethod::new(
+                .method(RpcMethod::new(
                     MethodDef::new("math.add").xdr(1001),
                     |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
                 ))

@@ -15,8 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
-use truenas_rpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_rpc_server::{framing, JsonRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
 
 #[derive(Deserialize, Serialize)]
 struct AddArgs {
@@ -42,12 +42,12 @@ struct HelloResult {
 /// framework handles parsing, routing, and the reply envelope.
 fn demo_protocol() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("demo", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("math.add"),
             |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
         ))
         .unwrap()
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("greeting.hello"),
             |a: HelloArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(HelloResult { greeting: format!("hello, {}!", a.name) })
@@ -71,13 +71,13 @@ async fn main() -> std::io::Result<()> {
     let _ = std::fs::remove_file(&path); // bind fails if the path already exists
 
     // 1. Build the server: register one named protocol; it is served by the default JSON-RPC engine.
-    let server = JsonRpcServer::<()>::builder("example-server")
+    let server = TruenasRpcServer::<()>::builder("example-server")
         .protocol("demo", demo_protocol())
         .build();
 
     // 2. Bind a Unix socket and serve it in the background. `UnixTrust::Local` means the peer is a
     //    genuinely-local process (its `SO_PEERCRED` is the caller, not a reverse proxy).
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path))?;
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path))?;
     let server_task =
         tokio::spawn(async move { server.serve_unix_listener(listener, UnixTrust::Local).await });
 

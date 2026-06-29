@@ -5,10 +5,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_rpc::{
-    JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx, RoleMask, Session,
+    JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx, RoleMask, Session,
     SessionLifecycle,
 };
-use truenas_rpc_server::{framing, JsonRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
 
 // Bound requests must carry a UUID id (the core envelope parser enforces it; `$/negotiate` is
 // exempt, being server-handled). Reused across this connection's sequential, non-cancellable calls.
@@ -30,15 +30,15 @@ fn admin_proto() -> JsonRpcProtocol<()> {
 /// A second, unrelated protocol — its connections just need to register a session.
 fn other_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("other", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("ping"), |_a: Empty, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("ping"), |_a: Empty, _c: &RequestCtx<()>| {
             Ok::<_, JsonRpcError>(json!({ "pong": true }))
         }))
         .unwrap()
         .build()
 }
 
-fn server() -> JsonRpcServer<()> {
-    JsonRpcServer::<()>::builder("test-server")
+fn server() -> TruenasRpcServer<()> {
+    TruenasRpcServer::<()>::builder("test-server")
         .protocol("admin", admin_proto())
         .protocol("other", other_proto())
         .allow_unauthenticated_network()
@@ -73,7 +73,7 @@ async fn sessions_lists_every_protocol_server_wide() {
     let _ = std::fs::remove_file(&path);
 
     let srv = server();
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let handle = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
 
     // Connection 1: a live session on `other`.
@@ -120,7 +120,7 @@ async fn sessions_denied_for_non_admin() {
     let path = std::env::temp_dir().join(format!("tn-sessions-deny-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let srv = server();
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let handle = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
 
     // Negotiate `admin` but DON'T set up → no roles → `$/sessions` is Not authorized.

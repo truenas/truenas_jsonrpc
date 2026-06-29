@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome, Credential, Dispatched, JsonRpcProtocol, JsonRpcRequest, NullOutbound, RoleMask,
+    AuditOutcome, Credential, Dispatched, JsonRpcProtocol, RequestInfo, NullOutbound, RoleMask,
     Session, SessionOrigin,
 };
 
@@ -35,7 +35,7 @@ async fn sessions_gate_listing_and_audit() {
     let audited: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = audited.clone();
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
-        .audit_sink(move |r: &JsonRpcRequest, o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |r: &RequestInfo, o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             sink.lock().unwrap().push((r.method.clone(), o.succeeded()));
         })
         .build();

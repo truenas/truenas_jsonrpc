@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    Dispatched, FileTransfer, JsonRpcError, JsonRpcFdPassMethod, JsonRpcFdTransferMethod,
-    JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Roles, Session,
+    Dispatched, FileTransfer, JsonRpcError, RpcFdPassMethod, RpcFdTransferMethod,
+    JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, Roles, Session,
     TransferDirection,
 };
 
@@ -55,7 +55,7 @@ fn request(params: Value, id: Option<&str>) -> Vec<u8> {
 /// A download transfer method with neither authz nor audit (the `need_snapshot = false` path).
 fn download_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("t", "1")
-        .fd_transfer_method(JsonRpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
             MethodDef::new("zfs.send"),
             TransferDirection::Download,
             |a: &SendArgs, _cx: &RequestCtx<()>| {
@@ -99,7 +99,7 @@ async fn download_round_trip() {
 #[tokio::test]
 async fn upload_fd_pass_directive() {
     let p = JsonRpcProtocol::<()>::builder("t", "1")
-        .fd_pass_method(JsonRpcFdPassMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
+        .fd_pass_method(RpcFdPassMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
             MethodDef::new("zfs.send"),
             TransferDirection::Upload,
             |_a: &SendArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(ReadyInfo { size: 0 }),
@@ -159,14 +159,14 @@ where
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
     let p = JsonRpcProtocol::<()>::builder("t", "1")
-        .fd_transfer_method(JsonRpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
             MethodDef::new("zfs.send").audit(),
             TransferDirection::Download,
             negotiate,
             transfer,
         ))
         .unwrap()
-        .audit_sink(move |_r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |_r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             h.fetch_add(1, Ordering::SeqCst);
         })
         .build();
@@ -193,14 +193,14 @@ async fn authz_denial_is_audited() {
     let h = hits.clone();
     let p = JsonRpcProtocol::<()>::builder("t", "1")
         .roles(Roles::new(["AUTH"]))
-        .fd_transfer_method(JsonRpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
             MethodDef::new("zfs.send").audit().roles(["AUTH"]),
             TransferDirection::Download,
             |_a: &SendArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(ReadyInfo { size: 0 }),
             |_a: SendArgs, _ft: &dyn FileTransfer| Ok::<_, JsonRpcError>(Done { ok: true }),
         ))
         .unwrap()
-        .audit_sink(move |_r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |_r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             h.fetch_add(1, Ordering::SeqCst);
         })
         .build();
@@ -218,7 +218,7 @@ async fn denial_and_refusal_without_audit() {
     // (a) authorization denial, not audited.
     let p = JsonRpcProtocol::<()>::builder("t", "1")
         .roles(Roles::new(["AUTH"]))
-        .fd_transfer_method(JsonRpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
             MethodDef::new("zfs.send").roles(["AUTH"]),
             TransferDirection::Download,
             |_a: &SendArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(ReadyInfo { size: 0 }),
@@ -235,7 +235,7 @@ async fn denial_and_refusal_without_audit() {
 
     // (b) negotiate refusal, not audited.
     let p = JsonRpcProtocol::<()>::builder("t", "1")
-        .fd_transfer_method(JsonRpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
+        .fd_transfer_method(RpcFdTransferMethod::<SendArgs, ReadyInfo, Done, _, _>::new(
             MethodDef::new("zfs.send"),
             TransferDirection::Download,
             |_a: &SendArgs, _cx: &RequestCtx<()>| {

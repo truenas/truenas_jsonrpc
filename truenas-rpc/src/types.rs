@@ -37,7 +37,7 @@ pub enum MessageDirection {
 /// notification. `roles` are the dispatched method's declared roles (metadata only — the
 /// protocol does not enforce them).
 #[derive(Clone, Debug)]
-pub struct JsonRpcRequest {
+pub struct RequestInfo {
     /// The method name.
     pub method: String,
     /// The request id (`None` for a notification).

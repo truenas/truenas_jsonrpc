@@ -94,13 +94,13 @@ where
     H: Handlers<S> + 'static,
 {
     let h = handlers.clone();
-    let builder = builder.method(truenas_rpc::JsonRpcMethod::new(truenas_rpc::MethodDef::new("login").doc("Authenticate a user; returns a session token.").audit_message("user login").secret_fields(["password"]), move |request: LoginArgs, cx: &truenas_rpc::RequestCtx<S>| h.login(request, cx)))?;
+    let builder = builder.method(truenas_rpc::RpcMethod::new(truenas_rpc::MethodDef::new("login").doc("Authenticate a user; returns a session token.").audit_message("user login").secret_fields(["password"]), move |request: LoginArgs, cx: &truenas_rpc::RequestCtx<S>| h.login(request, cx)))?;
     let h = handlers.clone();
-    let builder = builder.method(truenas_rpc::JsonRpcMethod::new(truenas_rpc::MethodDef::new("ping").doc("Liveness probe.").xdr(1001u32), move |request: PingArgs, cx: &truenas_rpc::RequestCtx<S>| h.ping(request, cx)))?;
+    let builder = builder.method(truenas_rpc::RpcMethod::new(truenas_rpc::MethodDef::new("ping").doc("Liveness probe.").xdr(1001u32), move |request: PingArgs, cx: &truenas_rpc::RequestCtx<S>| h.ping(request, cx)))?;
     let h = handlers.clone();
-    let builder = builder.method(truenas_rpc::JsonRpcMethod::new(truenas_rpc::MethodDef::new("crash").doc("Always raises (exercises the error-audit path).").audit_message("crash op"), move |request: CrashArgs, cx: &truenas_rpc::RequestCtx<S>| h.crash(request, cx)))?;
+    let builder = builder.method(truenas_rpc::RpcMethod::new(truenas_rpc::MethodDef::new("crash").doc("Always raises (exercises the error-audit path).").audit_message("crash op"), move |request: CrashArgs, cx: &truenas_rpc::RequestCtx<S>| h.crash(request, cx)))?;
     let h = handlers.clone();
-    let builder = builder.filterable(truenas_rpc::FilterableJsonRpcMethod::<QueryArgs, Entry, _>::new(truenas_rpc::MethodDef::new("x.query").doc("Filterable query over a collection of entries."), move |request: QueryArgs, cx: &truenas_rpc::RequestCtx<S>, filters: &truenas_rpc::CompiledFilters, options: &truenas_rpc::CompiledOptions| h.query(request, cx, filters, options)))?;
+    let builder = builder.filterable(truenas_rpc::FilterableRpcMethod::<QueryArgs, Entry, _>::new(truenas_rpc::MethodDef::new("x.query").doc("Filterable query over a collection of entries."), move |request: QueryArgs, cx: &truenas_rpc::RequestCtx<S>, filters: &truenas_rpc::CompiledFilters, options: &truenas_rpc::CompiledOptions| h.query(request, cx, filters, options)))?;
     let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_rpc::Session<S>| truenas_audit::AuditPrincipal::default()));
     Ok(builder)
 }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
+    Dispatched, JsonRpcError, RpcMethod, JsonRpcProtocol, RequestInfo, MethodDef,
     NullOutbound, Outbound, RequestCtx, Roles, Session, SessionLifecycle,
 };
 
@@ -52,13 +52,13 @@ async fn call<S: Send + Sync + 'static>(
 fn echo_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("test", "1.0.0")
         .method(
-            JsonRpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _cx: &RequestCtx<()>| {
+            RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _cx: &RequestCtx<()>| {
                 Ok(EchoResult { echo: a.msg })
             }),
         )
         .unwrap()
         .method(
-            JsonRpcMethod::new(MethodDef::new("boom"), |_a: EchoArgs, _cx: &RequestCtx<()>| {
+            RpcMethod::new(MethodDef::new("boom"), |_a: EchoArgs, _cx: &RequestCtx<()>| {
                 Err::<EchoResult, _>(JsonRpcError::request_failed("kaboom"))
             }),
         )
@@ -147,7 +147,7 @@ async fn invalid_params_precedes_not_authorized() {
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
         .roles(Roles::new(["AUTH"]))
         .method(
-            JsonRpcMethod::new(MethodDef::new("echo").roles(["AUTH"]), |a: EchoArgs, _cx: &RequestCtx<()>| {
+            RpcMethod::new(MethodDef::new("echo").roles(["AUTH"]), |a: EchoArgs, _cx: &RequestCtx<()>| {
                 Ok(EchoResult { echo: a.msg })
             }),
         )
@@ -168,7 +168,7 @@ async fn invalid_params_precedes_not_authorized() {
 #[tokio::test]
 async fn async_method_happy_path() {
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
-        .async_method(truenas_rpc::AsyncJsonRpcMethod::new(
+        .async_method(truenas_rpc::AsyncRpcMethod::new(
             MethodDef::new("aecho"),
             |a: EchoArgs, _cx: RequestCtx<()>| async move { Ok(EchoResult { echo: a.msg }) },
         ))
@@ -191,7 +191,7 @@ async fn session_gate_and_setup() {
     }
     let proto = JsonRpcProtocol::<String>::builder("test", "1.0.0")
         .method(
-            JsonRpcMethod::new(MethodDef::new("whoami"), |_a: EchoArgs, cx: &RequestCtx<String>| {
+            RpcMethod::new(MethodDef::new("whoami"), |_a: EchoArgs, cx: &RequestCtx<String>| {
                 let who = cx.session().with_internal(|s| s.cloned().unwrap_or_default());
                 Ok(EchoResult { echo: who })
             }),
@@ -247,13 +247,13 @@ async fn audit_redacts_secret_fields() {
     let sink = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
         .method(
-            JsonRpcMethod::new(
+            RpcMethod::new(
                 MethodDef::new("login").audit_message("user login").secret_fields(["password"]),
                 |a: Value, _cx: &RequestCtx<()>| Ok(a),
             ),
         )
         .unwrap()
-        .audit_sink(move |r: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             sink.lock().unwrap().push((r.params.clone(), msg.map(str::to_string)));
         })
         .build();
@@ -283,7 +283,7 @@ async fn progress_reaches_the_outbound_sink() {
     let sink = Arc::new(Mutex::new(Vec::new()));
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
         .method(
-            JsonRpcMethod::new(MethodDef::new("work"), |_a: EchoArgs, cx: &RequestCtx<()>| {
+            RpcMethod::new(MethodDef::new("work"), |_a: EchoArgs, cx: &RequestCtx<()>| {
                 cx.update_progress(Some(50.0), Some("half"), None);
                 Ok(EchoResult { echo: "done".into() })
             }),
@@ -309,7 +309,7 @@ async fn cancel_and_close_control_ops_are_audited() {
         .session_setup(MethodDef::new("$/sessionSetup"), |_a: Value, _s: &Session<()>| {
             Ok((SessionLifecycle::Established, json!({ "ok": true })))
         })
-        .audit_sink(move |r: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |r: &RequestInfo, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             sink.lock().unwrap().push((r.method.clone(), outcome.succeeded()));
         })
         .build();

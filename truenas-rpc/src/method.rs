@@ -1,8 +1,8 @@
 //! Method definitions + the type-erased registry entry. Home of the **Codec** seam (layer 3:
 //! `Codec`/`WireParams`/`WireReply`) and the **Dispatch** (layer 5) method erasure (`Method`/`MethodImpl`).
 //!
-//! A consumer registers a [`JsonRpcMethod`] (sync handler — the common case) or an
-//! [`AsyncJsonRpcMethod`] (async handler). The handler is any closure / `fn`
+//! A consumer registers a [`RpcMethod`] (sync handler — the common case) or an
+//! [`AsyncRpcMethod`] (async handler). The handler is any closure / `fn`
 //! `Fn(Accepts, &RequestCtx<S>) -> Result<Returns, JsonRpcError>` (or the async form).
 //! Each erases to an internal [`Method`] whose [`MethodImpl`] kind tells `dispatch`
 //! whether to run the handler on a `spawn_blocking` worker or await it.
@@ -576,8 +576,8 @@ pub(crate) struct MethodMeta {
 }
 
 /// A method's name + flags (`pre_auth`, `audit`, `audit_message`, `cancellable`, `roles`,
-/// `doc`, `secret_fields`). Built fluently; passed to [`JsonRpcMethod::new`] /
-/// [`AsyncJsonRpcMethod::new`].
+/// `doc`, `secret_fields`). Built fluently; passed to [`RpcMethod::new`] /
+/// [`AsyncRpcMethod::new`].
 pub struct MethodDef {
     name: Arc<str>,
     pre_auth: bool,
@@ -725,12 +725,12 @@ impl<S> Method<S> {
 
 /// A synchronous request method (the common case). Pairs a [`MethodDef`] with a sync
 /// handler closure/`fn`.
-pub struct JsonRpcMethod<F> {
+pub struct RpcMethod<F> {
     def: MethodDef,
     handler: F,
 }
 
-impl<F> JsonRpcMethod<F> {
+impl<F> RpcMethod<F> {
     /// Pair a [`MethodDef`] with a synchronous handler.
     pub fn new(def: MethodDef, handler: F) -> Self {
         Self { def, handler }
@@ -752,12 +752,12 @@ impl<F> JsonRpcMethod<F> {
 
 /// An async request method (for awaitable work). Pairs a [`MethodDef`] with an async
 /// handler closure.
-pub struct AsyncJsonRpcMethod<F> {
+pub struct AsyncRpcMethod<F> {
     def: MethodDef,
     handler: F,
 }
 
-impl<F> AsyncJsonRpcMethod<F> {
+impl<F> AsyncRpcMethod<F> {
     /// Pair a [`MethodDef`] with an asynchronous handler.
     pub fn new(def: MethodDef, handler: F) -> Self {
         Self { def, handler }
@@ -817,13 +817,13 @@ impl<A, N> SubscriptionDef<A, N> {
 /// `A` is the base accepts type; `E` is the list element (`entry`) type — metadata for a
 /// future `describe()`/codegen, carried as `PhantomData` and unused at
 /// runtime (the result is encoded as-is).
-pub struct FilterableJsonRpcMethod<A, E, F> {
+pub struct FilterableRpcMethod<A, E, F> {
     def: MethodDef,
     handler: F,
     _p: PhantomData<fn() -> (A, E)>,
 }
 
-impl<A, E, F> FilterableJsonRpcMethod<A, E, F> {
+impl<A, E, F> FilterableRpcMethod<A, E, F> {
     /// Pair a [`MethodDef`] with a filterable handler. The handler is
     /// `Fn(Accepts, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>`.
     pub fn new(def: MethodDef, handler: F) -> Self {
@@ -863,7 +863,7 @@ impl<A, E, F> FilterableJsonRpcMethod<A, E, F> {
 /// `direction` is [`TransferDirection::Download`] (server produces) or
 /// [`TransferDirection::Upload`] (server consumes). Transfers require a plain or kTLS
 /// connection (the fd must carry plaintext) — see `truenas-rpc-server`.
-pub struct JsonRpcFdTransferMethod<A, N, R, FN, FT> {
+pub struct RpcFdTransferMethod<A, N, R, FN, FT> {
     def: MethodDef,
     direction: TransferDirection,
     negotiate: FN,
@@ -873,7 +873,7 @@ pub struct JsonRpcFdTransferMethod<A, N, R, FN, FT> {
     _p: PhantomData<fn() -> (A, N, R)>,
 }
 
-impl<A, N, R, FN, FT> JsonRpcFdTransferMethod<A, N, R, FN, FT> {
+impl<A, N, R, FN, FT> RpcFdTransferMethod<A, N, R, FN, FT> {
     /// Pair a [`MethodDef`] with a transfer `direction` and the `negotiate` / `transfer`
     /// callbacks.
     pub fn new(def: MethodDef, direction: TransferDirection, negotiate: FN, transfer: FT) -> Self {
@@ -905,18 +905,18 @@ impl<A, N, R, FN, FT> JsonRpcFdTransferMethod<A, N, R, FN, FT> {
 }
 
 /// A **file-descriptor passing** method — `SCM_RIGHTS` over an AF_UNIX connection. Identical
-/// to [`JsonRpcFdTransferMethod`], but the `transfer` callback passes/receives open fds (via
+/// to [`RpcFdTransferMethod`], but the `transfer` callback passes/receives open fds (via
 /// the server crate's `FileTransfer` `SCM_RIGHTS` helpers) instead of streaming bytes.
 /// **AF_UNIX only** — the server rejects a call over any other transport with `REQUEST_FAILED`.
-pub struct JsonRpcFdPassMethod<A, N, R, FN, FT> {
-    inner: JsonRpcFdTransferMethod<A, N, R, FN, FT>,
+pub struct RpcFdPassMethod<A, N, R, FN, FT> {
+    inner: RpcFdTransferMethod<A, N, R, FN, FT>,
 }
 
-impl<A, N, R, FN, FT> JsonRpcFdPassMethod<A, N, R, FN, FT> {
+impl<A, N, R, FN, FT> RpcFdPassMethod<A, N, R, FN, FT> {
     /// Pair a [`MethodDef`] with a transfer `direction` and the `negotiate` / `transfer`
     /// callbacks; the connection must be AF_UNIX.
     pub fn new(def: MethodDef, direction: TransferDirection, negotiate: FN, transfer: FT) -> Self {
-        let mut inner = JsonRpcFdTransferMethod::new(def, direction, negotiate, transfer);
+        let mut inner = RpcFdTransferMethod::new(def, direction, negotiate, transfer);
         inner.af_unix = true;
         Self { inner }
     }

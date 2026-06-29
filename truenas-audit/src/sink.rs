@@ -22,7 +22,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use truenas_rpc::{AuditOutcome, AuditSink, JsonRpcRequest, Session};
+use truenas_rpc::{AuditOutcome, AuditSink, RequestInfo, Session};
 
 use crate::netlink::{AuditSocket, SendStatus};
 use crate::record::{build_record, lost_record, AuditPrincipal};
@@ -56,7 +56,7 @@ impl<S> LinuxAuditSink<S> {
 impl<S: Send + Sync + 'static> AuditSink<S> for LinuxAuditSink<S> {
     fn audit(
         &self,
-        request: &JsonRpcRequest,
+        request: &RequestInfo,
         outcome: AuditOutcome<'_>,
         session: &Session<S>,
         audit_message: Option<&str>,

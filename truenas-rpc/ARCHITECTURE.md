@@ -55,11 +55,11 @@ The relevant axis is **blocking vs. awaitable**, *not* "I/O-bound vs. CPU-bound.
 drivers); it is the wrong place for **blocking** syscalls or **CPU** work, which hold the
 thread. So the core offers **two method kinds**, and the author picks per method:
 
-- **`JsonRpcMethod` (sync handler) — the default.** Covers the bulk of TrueNAS handlers,
+- **`RpcMethod` (sync handler) — the default.** Covers the bulk of TrueNAS handlers,
   which block: ZFS `ioctl`s / `lzc_send`, file reads/writes, subprocess, and auth-stack
   crypto. Its whole per-request pipeline runs on a **`tokio::task::spawn_blocking`**
   blocking-pool worker.
-- **`AsyncJsonRpcMethod` (async handler) — the niche.** For handlers that genuinely
+- **`AsyncRpcMethod` (async handler) — the niche.** For handlers that genuinely
   `.await` non-blocking work (an async service call, an async DB driver). It is **awaited
   inline** on the runtime; it must not block (offload any blocking/CPU work via its own
   `spawn_blocking`).
@@ -72,9 +72,9 @@ processed on another task while a long handler runs.
 
 | handler work | nature | runs on |
 |---|---|---|
-| ZFS ioctls, file I/O, subprocess | blocking | the blocking pool (`JsonRpcMethod`) |
-| SCRAM/PBKDF2/bcrypt, PAM | CPU-bound | the blocking pool (`JsonRpcMethod`) |
-| awaiting another async service / driver | awaitable | the runtime (`AsyncJsonRpcMethod`) |
+| ZFS ioctls, file I/O, subprocess | blocking | the blocking pool (`RpcMethod`) |
+| SCRAM/PBKDF2/bcrypt, PAM | CPU-bound | the blocking pool (`RpcMethod`) |
+| awaiting another async service / driver | awaitable | the runtime (`AsyncRpcMethod`) |
 
 The core depends on `tokio` only for `spawn_blocking` and being `async`; it is otherwise
 transport-free (it returns `Vec<u8>` and emits the back-channel through an `Outbound`
@@ -206,7 +206,7 @@ steps, and the authz/audit/cancellation hooks:
 | call / mechanism | role |
 |---|---|
 | `JsonRpcProtocol::builder(name, version)` + `.authorizer(..)` `.audit_sink(..)` `.cancellation(..)` | the protocol + its authz / audit / cancellation hooks |
-| `.method(JsonRpcMethod::new(def, handler))?` / `.async_method(AsyncJsonRpcMethod::new(def, handler))?` | register a sync / async method |
+| `.method(RpcMethod::new(def, handler))?` / `.async_method(AsyncRpcMethod::new(def, handler))?` | register a sync / async method |
 | `.session_setup(def, handler)` / `.session_setup_continue(def, handler)` | the two auth setup steps |
 | `.server_info(handler)` | the `$/serverInfo` handler |
 | `new_session` / `close_session` / `has_session_setup` (on `JsonRpcProtocol<S>`) | per-connection session lifecycle |
@@ -226,9 +226,9 @@ that avoids the `impl Trait for F where F: Fn(A) -> R` unconstrained-type-parame
 problem (E0207):
 
 ```rust
-// sync — JsonRpcMethod (the common case)
+// sync — RpcMethod (the common case)
 |accepts: Accepts, cx: &RequestCtx<S>| -> Result<Returns, JsonRpcError> { … }
-// async — AsyncJsonRpcMethod
+// async — AsyncRpcMethod
 |accepts: Accepts, cx: RequestCtx<S>| async move { … Ok(returns) }
 ```
 
@@ -249,13 +249,13 @@ cancellation (`is_cancelled()` / `raise_if_cancelled()` over an `Arc<AtomicBool>
 |---|---|
 | sync method | `Fn(Accepts, &RequestCtx<S>) -> Result<Returns, JsonRpcError>` |
 | async method | `Fn(Accepts, RequestCtx<S>) -> impl Future<Output = Result<Returns, JsonRpcError>>` |
-| `Authorizer` | `Fn(&JsonRpcRequest, &Session<S>, Option<CancelTarget>) -> AuthorizationResponse` |
-| `AuditSink` | `Fn(&JsonRpcRequest, &serde_json::Value, &Session<S>, Option<&str>)` |
-| `Canceller` | `Fn(&JsonRpcRequest, &Session<S>)` |
+| `Authorizer` | `Fn(&RequestInfo, &Session<S>, Option<CancelTarget>) -> AuthorizationResponse` |
+| `AuditSink` | `Fn(&RequestInfo, &serde_json::Value, &Session<S>, Option<&str>)` |
+| `Canceller` | `Fn(&RequestInfo, &Session<S>)` |
 | `ServerInfoHandler` | `Fn(&Session<S>) -> Result<serde_json::Value, JsonRpcError>` |
 | session setup | `Fn(Accepts, &Session<S>) -> Result<(SessionLifecycle, Returns), JsonRpcError>` |
 
-`target` is `Some` only for `$/cancelRequest`. The authz/audit `JsonRpcRequest.params` is
+`target` is `Some` only for `$/cancelRequest`. The authz/audit `RequestInfo.params` is
 a `serde_json::Value` snapshot (decoupled from the concrete `Accepts`); it is materialized
 only when an authorizer or an audited method will actually read it.
 
@@ -338,8 +338,8 @@ Tracked against the full-parity plan; the wire contract for each is in the root 
 
 ## 14. Notable design choices
 
-1. **Two method kinds.** `JsonRpcMethod` (sync, on the blocking pool) is the default and
-   covers the bulk of handlers; `AsyncJsonRpcMethod` (awaited on the runtime) is the niche
+1. **Two method kinds.** `RpcMethod` (sync, on the blocking pool) is the default and
+   covers the bulk of handlers; `AsyncRpcMethod` (awaited on the runtime) is the niche
    for genuinely non-blocking work (§2).
 2. **`Outbound` sink + one ordered per-connection writer.** A handler emits all its
    progress before it returns, so progress precedes its reply on the wire with no purge,

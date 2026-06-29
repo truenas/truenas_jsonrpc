@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, WebSocketStream};
-use truenas_rpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_rpc_server::JsonRpcServer;
+use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc_server::TruenasRpcServer;
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -26,15 +26,15 @@ struct AddResult {
     sum: i64,
 }
 
-fn server() -> JsonRpcServer<()> {
+fn server() -> TruenasRpcServer<()> {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("math.add"),
             |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
         ))
         .unwrap()
         .build();
-    JsonRpcServer::<()>::builder("ws-server")
+    TruenasRpcServer::<()>::builder("ws-server")
         .protocol("main", proto)
         .allow_unauthenticated_network() // transport test: the protocol has no $/sessionSetup
         .build()
@@ -88,7 +88,7 @@ fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
 #[tokio::test]
 async fn websocket_round_trip() {
     let srv = server();
-    let (listener, addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_websocket_listener(listener).await })
@@ -119,7 +119,7 @@ async fn websocket_over_unix_round_trip() {
     let srv = server();
     let path = std::env::temp_dir().join(format!("tn-ws-unix-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_websocket_unix_listener(listener, UnixTrust::Local).await })
@@ -158,14 +158,14 @@ async fn websocket_unix_forwarded_origin_surfaces_the_real_client() {
             Ok::<_, JsonRpcError>((SessionLifecycle::Established, json!({ "ok": true })))
         })
         .build();
-    let srv = JsonRpcServer::<()>::builder("fwd-server")
+    let srv = TruenasRpcServer::<()>::builder("fwd-server")
         .protocol("main", proto)
         .forwarded_extractor(|_peer, headers| ForwardedOrigin::from_real_remote_headers(headers))
         .build();
 
     let path = std::env::temp_dir().join(format!("tn-ws-fwd-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move {
@@ -216,7 +216,7 @@ async fn wss_round_trip() {
     let (cert, key) = self_signed_pem();
     let tls = TlsConfig::from_pem(&cert, &key, TlsMode::Userspace).unwrap();
     let srv = server();
-    let (listener, addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_wss_listener(listener, tls).await })

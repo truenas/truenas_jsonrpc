@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    AsyncJsonRpcMethod, Dispatched, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest,
+    AsyncRpcMethod, Dispatched, JsonRpcError, RpcMethod, JsonRpcProtocol, RequestInfo,
     MethodDef, NullOutbound, RequestCtx, Roles, Session, SessionLifecycle,
 };
 use truenas_xdr::frame::{self, build_request};
@@ -42,7 +42,7 @@ struct MapResult {
 /// A protocol whose `xdr.add` (proc 1001) sums its args — the conformance method.
 fn add_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001),
             |a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
@@ -96,7 +96,7 @@ async fn run_proc_surfaces_errors() {
     // A panicking sync handler over `run_proc` surfaces INTERNAL_ERROR (the spawn_blocking
     // worker unwinds) — parity with the framed XDR path.
     let boom = JsonRpcProtocol::<()>::builder("c", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.boom").xdr(2001),
             |_a: AddArgs, _cx: &RequestCtx<()>| -> Result<AddResult, JsonRpcError> { panic!("boom") },
         ))
@@ -146,7 +146,7 @@ async fn closed_session_is_rejected() {
 #[tokio::test]
 async fn session_gate_blocks_before_established() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001),
             |a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
@@ -167,7 +167,7 @@ async fn session_gate_blocks_before_established() {
 async fn authorizer_denial_is_rejected() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .roles(Roles::new(["AUTH"]))
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001).roles(["AUTH"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
@@ -184,7 +184,7 @@ async fn authorizer_denial_is_rejected() {
 #[tokio::test]
 async fn handler_error_carries_data_in_the_detail() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.fail").xdr(2004),
             |_a: AddArgs, _cx: &RequestCtx<()>| {
                 Err::<AddResult, _>(JsonRpcError::request_failed("nope").with_data(json!({"why": 1})))
@@ -212,7 +212,7 @@ async fn malformed_params_are_invalid_params() {
 #[tokio::test]
 async fn unencodable_result_is_internal_error() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.map").xdr(2003),
             |_a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(MapResult { m: BTreeMap::from([("k".to_string(), 1)]) })
@@ -231,7 +231,7 @@ async fn handler_panic_is_internal_error() {
     // The body runs on the blocking pool (`spawn_blocking`); a panicking handler unwinds that
     // worker, and the dispatch replies INTERNAL_ERROR — parity with the JSON sync path.
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.boom").xdr(2005),
             |_a: AddArgs, _cx: &RequestCtx<()>| -> Result<AddResult, JsonRpcError> {
                 panic!("xdr kaboom")
@@ -253,14 +253,14 @@ async fn audited_xdr_call_emits_redacted_audit_record() {
     let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.secret").xdr(2010).audit_message("did the secret thing").secret_fields(["a"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
         })
         .build();
@@ -283,14 +283,14 @@ async fn audited_xdr_denial_is_audited() {
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .roles(Roles::new(["AUTH"]))
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.guarded").xdr(2011).audit().roles(["AUTH"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
         })
         .build();
@@ -328,7 +328,7 @@ async fn python_method_is_not_on_the_xdr_wire() {
 /// An async `xdr.add` (proc 1001), same signature as [`add_proto`]'s sync conformance method.
 fn add_proto_async() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("conf", "1")
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001),
             |a: AddArgs, _cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
@@ -365,7 +365,7 @@ async fn async_malformed_params_are_invalid_params() {
 #[tokio::test]
 async fn async_handler_error_is_request_failed() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("xdr.afail").xdr(2012),
             |_a: AddArgs, _cx: RequestCtx<()>| async move {
                 Err::<AddResult, _>(JsonRpcError::request_failed("nope"))
@@ -382,7 +382,7 @@ async fn async_handler_error_is_request_failed() {
 #[tokio::test]
 async fn async_unencodable_result_is_internal_error() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("xdr.amap").xdr(2013),
             |_a: AddArgs, _cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(MapResult { m: BTreeMap::from([("k".to_string(), 1)]) })
@@ -404,14 +404,14 @@ async fn async_audited_xdr_call_emits_redacted_audit_record() {
     let captured: Arc<Mutex<Option<Value>>> = Arc::new(Mutex::new(None));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("xdr.secret").xdr(2010).audit_message("did the secret thing").secret_fields(["a"]),
             |a: AddArgs, _cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
         })
         .build();
@@ -433,14 +433,14 @@ async fn async_audited_denial_is_audited() {
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .roles(Roles::new(["AUTH"]))
-        .async_method(AsyncJsonRpcMethod::new(
+        .async_method(AsyncRpcMethod::new(
             MethodDef::new("xdr.guarded").xdr(2011).audit().roles(["AUTH"]),
             |a: AddArgs, _cx: RequestCtx<()>| async move {
                 Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
             *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
         })
         .build();
@@ -458,7 +458,7 @@ async fn xdr_handler_reads_lazy_request_id() {
     // The handler reads `cx.id()` — on the XDR wire this lazily formats the raw 16 id bytes to the
     // canonical UUID string (the hot path never calls it, so it's never formatted).
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("xdr.whoami").xdr(2030),
             |_a: AddArgs, cx: &RequestCtx<()>| {
                 Ok::<_, JsonRpcError>(AddResult { sum: 0, label: cx.id().unwrap_or("none").into() })
@@ -479,12 +479,12 @@ fn registration_rejects_reserved_and_duplicate_proc_ids() {
     };
     // Reserved band (<= 1000).
     assert!(JsonRpcProtocol::<()>::builder("c", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("x").xdr(500), h))
+        .method(RpcMethod::new(MethodDef::new("x").xdr(500), h))
         .is_err());
     // Duplicate proc-id.
     let dup = JsonRpcProtocol::<()>::builder("c", "1")
-        .method(JsonRpcMethod::new(MethodDef::new("a").xdr(1001), h))
+        .method(RpcMethod::new(MethodDef::new("a").xdr(1001), h))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("b").xdr(1001), h));
+        .method(RpcMethod::new(MethodDef::new("b").xdr(1001), h));
     assert!(dup.is_err());
 }

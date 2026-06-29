@@ -27,7 +27,7 @@
 //! let proto = install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack)
 //!     .method(/* … app methods … */)
 //!     .build();
-//! let server = JsonRpcServer::<AuthSession>::builder("srv")
+//! let server = TruenasRpcServer::<AuthSession>::builder("srv")
 //!     .state_from_peer(AuthSession::from_peer)
 //!     .protocol("main", proto)
 //!     .build();

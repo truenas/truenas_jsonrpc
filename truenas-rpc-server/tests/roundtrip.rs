@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
-use truenas_rpc::{JsonRpcError, JsonRpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_rpc_server::{framing, JsonRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -23,7 +23,7 @@ struct AddResult {
 
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("conf", "1")
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("math.add"),
             |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
         ))
@@ -31,10 +31,10 @@ fn proto() -> JsonRpcProtocol<()> {
         .build()
 }
 
-fn server() -> JsonRpcServer<()> {
+fn server() -> TruenasRpcServer<()> {
     // These transport tests intentionally serve a protocol with no `$/sessionSetup`; opt past the
     // network-auth guard (see `network_auth_guard` for the guard itself).
-    JsonRpcServer::<()>::builder("test-server")
+    TruenasRpcServer::<()>::builder("test-server")
         .protocol("main", proto())
         .allow_unauthenticated_network()
         .build()
@@ -80,7 +80,7 @@ async fn unix_round_trip() {
     let path = std::env::temp_dir().join(format!("tnrpc-{}-unix.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let srv = server();
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await })
@@ -96,7 +96,7 @@ async fn unix_round_trip() {
 #[tokio::test]
 async fn tcp_round_trip() {
     let srv = server();
-    let (listener, addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tcp_listener(listener).await })
@@ -111,7 +111,7 @@ async fn tcp_round_trip() {
 #[tokio::test]
 async fn negotiate_errors() {
     let srv = server();
-    let (listener, addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tcp_listener(listener).await })
@@ -136,12 +136,12 @@ async fn negotiate_errors() {
 async fn network_auth_guard() {
     // A protocol with no `$/sessionSetup`, on a server that has NOT opted out.
     let unauth = || {
-        JsonRpcServer::<()>::builder("test-server").protocol("main", proto()).build()
+        TruenasRpcServer::<()>::builder("test-server").protocol("main", proto()).build()
     };
 
     // (1) A network transport refuses it (an unauthenticated remote client must not reach gated
     //     methods) — the serve call returns immediately with InvalidInput, naming the protocol.
-    let (listener, _addr) = JsonRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, _addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let err = unauth().serve_tcp_listener(listener).await.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("main"), "error should name the protocol: {err}");
@@ -150,7 +150,7 @@ async fn network_auth_guard() {
     let path = std::env::temp_dir().join(format!("tnrpc-{}-guard.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
     let srv = unauth();
-    let listener = JsonRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
     let mut client = UnixStream::connect(&path).await.unwrap();
     negotiate_then_add(&mut client).await;

@@ -10,13 +10,13 @@ transport see `truenas-rpc-server`.
   `dispatch(wire, &session) -> Dispatched`. `S` is the per-session server state.
 - `dispatch` returns `Dispatched::{Reply(Vec<u8>), Nothing, Transfer(Transfer)}`.
 - Method kinds:
-  - `JsonRpcMethod` — synchronous handler (run on `spawn_blocking`).
-  - `AsyncJsonRpcMethod` — async handler (awaited).
-  - `FilterableJsonRpcMethod` — query method (`query-filters` / `query-options`); returns
+  - `RpcMethod` — synchronous handler (run on `spawn_blocking`).
+  - `AsyncRpcMethod` — async handler (awaited).
+  - `FilterableRpcMethod` — query method (`query-filters` / `query-options`); returns
     `Filtered<E>`.
   - `SubscriptionDef` — a `SERVER_CLIENT` pub/sub topic; publish via
     `JsonRpcProtocol::send_notification`.
-  - `JsonRpcFdTransferMethod` / `JsonRpcFdPassMethod` — raw-fd transfer / `SCM_RIGHTS`
+  - `RpcFdTransferMethod` / `RpcFdPassMethod` — raw-fd transfer / `SCM_RIGHTS`
     contract (`negotiate` + `transfer` callbacks). The core emits a `Transfer` directive; the
     server drives the wire handshake and the fd. See `FileTransfer` / `TransferDirection`.
 - `MethodDef` — per-method flags: `pre_auth`, `audit`, `audit_message`, `cancellable`,

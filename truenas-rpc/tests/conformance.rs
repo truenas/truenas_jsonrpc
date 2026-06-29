@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    tnfilter, AuditOutcome, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod,
-    Filtered, IdGen, JsonRpcError, JsonRpcMethod, JsonRpcProtocol, JsonRpcRequest, MethodDef,
+    tnfilter, AuditOutcome, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod,
+    Filtered, IdGen, JsonRpcError, RpcMethod, JsonRpcProtocol, RequestInfo, MethodDef,
     Outbound, RequestCtx, Roles, Session, SessionId, SessionLifecycle, SubscriptionDef,
 };
 
@@ -118,25 +118,25 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("ref-open", "1.0.0")
-        .method(JsonRpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
             Ok(EchoResult { echo: a.msg })
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
             Ok(AddResult { sum: a.a + a.b })
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("boom"), |_a: Empty, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("boom"), |_a: Empty, _c: &RequestCtx<()>| {
             Err::<OkResult, _>(JsonRpcError::request_failed("kaboom"))
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(
+        .method(RpcMethod::new(
             MethodDef::new("audit_me").audit_message("audited op").secret_fields(["password"]),
             |a: AuditArgs, _c: &RequestCtx<()>| Ok(AuditResult { user: a.user, password: a.password }),
         ))
         .unwrap()
         .server_info(|_s: &Session<()>| Ok(json!({"name": "ref", "version": "1.0.0"})))
-        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             cap.lock().unwrap().push(json!({
                 "method": req.method,
                 "params": req.params,
@@ -147,7 +147,7 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
             SubscriptionDef::<Empty, PoolEvent>::new(MethodDef::new("events").audit_message("subscribed")),
         )
         .unwrap()
-        .filterable(FilterableJsonRpcMethod::<Empty, Value, _>::new(
+        .filterable(FilterableRpcMethod::<Empty, Value, _>::new(
             MethodDef::new("x.query"),
             query_handler,
         ))
@@ -160,23 +160,23 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
 fn build_gated() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("ref-gated", "1.0.0")
         .roles(Roles::new(["AUTH"]))
-        .method(JsonRpcMethod::new(MethodDef::new("ping").pre_auth(), |_a: Empty, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("ping").pre_auth(), |_a: Empty, _c: &RequestCtx<()>| {
             Ok(PingResult { pong: true })
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
             Ok(EchoResult { echo: a.msg })
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
             Ok(AddResult { sum: a.a + a.b })
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("boom"), |_a: Empty, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("boom"), |_a: Empty, _c: &RequestCtx<()>| {
             Err::<OkResult, _>(JsonRpcError::request_failed("kaboom"))
         }))
         .unwrap()
-        .method(JsonRpcMethod::new(MethodDef::new("secret_op").roles(["AUTH"]), |_a: Empty, _c: &RequestCtx<()>| {
+        .method(RpcMethod::new(MethodDef::new("secret_op").roles(["AUTH"]), |_a: Empty, _c: &RequestCtx<()>| {
             Ok(OkResult { ok: true })
         }))
         .unwrap()

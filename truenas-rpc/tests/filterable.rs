@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     AuditOutcome,
-    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableJsonRpcMethod, Filtered,
-    JsonRpcError, JsonRpcProtocol, JsonRpcRequest, MethodDef, NullOutbound, RequestCtx, Roles,
+    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod, Filtered,
+    JsonRpcError, JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, Roles,
     Session,
 };
 
@@ -43,7 +43,7 @@ fn query(
 
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("t", "1.0.0")
-        .filterable(FilterableJsonRpcMethod::<NoArgs, Value, _>::new(
+        .filterable(FilterableRpcMethod::<NoArgs, Value, _>::new(
             MethodDef::new("x.query"),
             query,
         ))
@@ -135,7 +135,7 @@ async fn authz_denied_before_compile() {
     // (which would be INVALID_PARAMS) never runs — proving NOT_AUTHORIZED wins.
     let p = JsonRpcProtocol::<()>::builder("t", "1.0.0")
         .roles(Roles::new(["AUTH"]))
-        .filterable(FilterableJsonRpcMethod::<NoArgs, Value, _>::new(
+        .filterable(FilterableRpcMethod::<NoArgs, Value, _>::new(
             MethodDef::new("x.query").roles(["AUTH"]),
             query,
         ))
@@ -150,12 +150,12 @@ async fn filterable_is_audited() {
     let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
     let cap = captured.clone();
     let p = JsonRpcProtocol::<()>::builder("t", "1.0.0")
-        .filterable(FilterableJsonRpcMethod::<NoArgs, Value, _>::new(
+        .filterable(FilterableRpcMethod::<NoArgs, Value, _>::new(
             MethodDef::new("x.query").audit_message("queried"),
             query,
         ))
         .unwrap()
-        .audit_sink(move |req: &JsonRpcRequest, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
+        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
             cap.lock().unwrap().push(json!({"method": req.method, "msg": msg}));
         })
         .build();
