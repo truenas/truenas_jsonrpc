@@ -14,7 +14,7 @@ use http::HeaderMap;
 use tokio::net::{TcpListener, ToSocketAddrs, UnixListener};
 use truenas_jsonrpc::JsonRpcProtocol;
 
-use crate::engine::{JsonRpcEngine, ProtocolEngine};
+use crate::engine::{ConnContext, JsonRpcEngine, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
 use crate::oncrpc::OncRpcEngine;
 use crate::peer::{self, Peer, UnixTrust};
@@ -73,10 +73,6 @@ pub(crate) struct ServerShared<S> {
     pub(crate) state_fn: StateFn<S>,
     pub(crate) limit: usize,
     pub(crate) allow_unauthenticated: bool,
-    /// The wire-protocol engine bound to this server's listeners (default [`JsonRpcEngine`]).
-    /// Resolved once; each connection's loop runs inside it. The boundary is per-connection, never
-    /// per-request, so the per-request hot path stays monomorphized.
-    pub(crate) engine: Arc<dyn ProtocolEngine<S>>,
     /// User-supplied forwarded-origin parser; only meaningful on the WebSocket accept path, so it
     /// exists only with the `websocket` feature.
     #[cfg(feature = "websocket")]
@@ -170,7 +166,6 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
                 state_fn: self.state_fn.unwrap_or_else(|| Box::new(|_| None)),
                 limit: self.limit,
                 allow_unauthenticated: self.allow_unauthenticated,
-                engine: Arc::new(JsonRpcEngine),
                 #[cfg(feature = "websocket")]
                 forwarded_extractor: self.forwarded_extractor,
             }),
@@ -261,14 +256,44 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         if trust == UnixTrust::Proxied {
             self.require_network_auth()?;
         }
+        let engine: Arc<dyn ProtocolEngine> = Arc::new(JsonRpcEngine::new(self.shared.clone()));
+        self.accept_unix(listener, trust, engine).await
+    }
+
+    /// Like [`serve_unix_listener`](Self::serve_unix_listener), but serves a caller-supplied
+    /// [`ProtocolEngine`] in place of JSON-RPC — the per-listener extension point. The engine owns
+    /// its own authentication, so the JSON-RPC network-auth guard is not applied here; scope the
+    /// listener's exposure to match the engine's auth model.
+    pub async fn serve_unix_listener_with(
+        &self,
+        listener: UnixListener,
+        trust: UnixTrust,
+        engine: Arc<dyn ProtocolEngine>,
+    ) -> std::io::Result<()> {
+        self.accept_unix(listener, trust, engine).await
+    }
+
+    /// The shared AF_UNIX accept loop: each accepted connection becomes a [`ConnContext`] handed to
+    /// `engine`, which owns it for the rest of its life.
+    async fn accept_unix(
+        &self,
+        listener: UnixListener,
+        trust: UnixTrust,
+        engine: Arc<dyn ProtocolEngine>,
+    ) -> std::io::Result<()> {
         loop {
             let (stream, _addr) = listener.accept().await?;
             let fd = stream.as_raw_fd();
             let peer = Peer::unix(peer::peer_cred(fd)).with_posture(trust.into());
-            let engine = self.shared.engine.clone();
-            let shared = self.shared.clone();
+            let ctx = ConnContext {
+                stream: Box::new(stream),
+                transfer_fd: Some(fd),
+                peer,
+                limit: self.shared.limit,
+            };
+            let engine = engine.clone();
             tokio::spawn(async move {
-                engine.serve(Box::new(stream), Some(fd), peer, shared).await;
+                engine.serve(ctx).await;
             });
         }
     }
@@ -288,17 +313,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     /// with `AUTH_NONE`, so it is offered only over AF_UNIX (local peer-credential trust), never a
     /// network transport. Runs forever on the happy path.
     pub async fn serve_oncrpc_unix_listener(&self, listener: UnixListener) -> std::io::Result<()> {
-        let engine: Arc<dyn ProtocolEngine<S>> = Arc::new(OncRpcEngine);
-        loop {
-            let (stream, _addr) = listener.accept().await?;
-            let fd = stream.as_raw_fd();
-            let peer = Peer::unix(peer::peer_cred(fd));
-            let engine = engine.clone();
-            let shared = self.shared.clone();
-            tokio::spawn(async move {
-                engine.serve(Box::new(stream), Some(fd), peer, shared).await;
-            });
-        }
+        self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(OncRpcEngine)).await
     }
 
     /// Bind and serve a TCP `addr` (length-prefixed JSON framing). Refuses (before binding) if a
@@ -322,15 +337,42 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     /// unauthenticated protocol over the network (see [`require_network_auth`](Self::require_network_auth)).
     pub async fn serve_tcp_listener(&self, listener: TcpListener) -> std::io::Result<()> {
         self.require_network_auth()?;
+        let engine: Arc<dyn ProtocolEngine> = Arc::new(JsonRpcEngine::new(self.shared.clone()));
+        self.accept_tcp(listener, engine).await
+    }
+
+    /// Like [`serve_tcp_listener`](Self::serve_tcp_listener), but serves a caller-supplied
+    /// [`ProtocolEngine`] in place of JSON-RPC — the per-listener extension point. The engine owns
+    /// its own authentication (the JSON-RPC network-auth guard is not applied).
+    pub async fn serve_tcp_listener_with(
+        &self,
+        listener: TcpListener,
+        engine: Arc<dyn ProtocolEngine>,
+    ) -> std::io::Result<()> {
+        self.accept_tcp(listener, engine).await
+    }
+
+    /// The shared TCP accept loop: each accepted connection becomes a [`ConnContext`] handed to
+    /// `engine`, which owns it for the rest of its life.
+    async fn accept_tcp(
+        &self,
+        listener: TcpListener,
+        engine: Arc<dyn ProtocolEngine>,
+    ) -> std::io::Result<()> {
         loop {
             let (stream, peer_addr) = listener.accept().await?;
             let _ = stream.set_nodelay(true);
             let fd = stream.as_raw_fd();
             let peer = Peer::tcp(peer_addr);
-            let engine = self.shared.engine.clone();
-            let shared = self.shared.clone();
+            let ctx = ConnContext {
+                stream: Box::new(stream),
+                transfer_fd: Some(fd),
+                peer,
+                limit: self.shared.limit,
+            };
+            let engine = engine.clone();
             tokio::spawn(async move {
-                engine.serve(Box::new(stream), Some(fd), peer, shared).await;
+                engine.serve(ctx).await;
             });
         }
     }

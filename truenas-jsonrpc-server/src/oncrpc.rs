@@ -14,24 +14,21 @@
 //!   * **Dispatch (layer 5):** its own tiny program — a `NULL` probe plus one demo procedure —
 //!     routed on `(program, version, procedure)`, independent of the JSON-RPC method registry.
 //!
-//! The engine consumes almost nothing from [`ServerShared`](crate::server::ServerShared): only the
-//! inbound size limit. That narrowness is the finding — it maps how little a peer engine actually
-//! needs from the substrate, informing a future, narrower engine-facing API. Routing a binary wire
-//! to the *registered* handlers would need a procedure-level dispatch entry the core does not yet
-//! expose; that is left for later rather than built speculatively here.
+//! The engine consumes almost nothing from its [`ConnContext`](crate::engine::ConnContext): only the
+//! inbound size limit (it ignores the peer and the raw-fd transfer channel). That narrowness is why
+//! the seam hands every engine a small protocol-neutral context rather than the JSON-RPC server
+//! substrate. Routing a binary wire to the *registered* handlers would need a procedure-level
+//! dispatch entry the core does not yet expose; that is left for later rather than built
+//! speculatively here.
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
-use crate::engine::{AsyncStream, ProtocolEngine};
-use crate::peer::Peer;
-use crate::server::ServerShared;
+use crate::engine::{ConnContext, ProtocolEngine};
 
 use std::future::Future;
-use std::os::fd::RawFd;
 use std::pin::Pin;
-use std::sync::Arc;
 
 // --- ONC RPC message constants (RFC 5531 §9) --------------------------------
 
@@ -234,20 +231,12 @@ async fn serve_oncrpc<IO: AsyncRead + AsyncWrite + Unpin + Send>(mut stream: IO,
 /// The ONC RPC engine. Stateless: every connection runs the same demo program.
 pub(crate) struct OncRpcEngine;
 
-impl<S: Send + Sync + 'static> ProtocolEngine<S> for OncRpcEngine {
-    fn serve<'a>(
-        &'a self,
-        stream: Box<dyn AsyncStream>,
-        transfer_fd: Option<RawFd>,
-        peer: Peer,
-        shared: Arc<ServerShared<S>>,
-    ) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        // This engine routes on its own program table and authenticates with AUTH_NONE, so the
-        // peer identity and the raw-fd transfer channel are unused; only the inbound size limit is
-        // drawn from the substrate.
-        let _ = (transfer_fd, peer);
-        let limit = shared.limit;
-        Box::pin(serve_oncrpc(stream, limit))
+impl ProtocolEngine for OncRpcEngine {
+    fn serve<'a>(&'a self, ctx: ConnContext) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        // This engine routes on its own program table and authenticates with AUTH_NONE, so the peer
+        // identity and the raw-fd transfer channel go unused; only the inbound size limit is drawn
+        // from the connection context.
+        Box::pin(serve_oncrpc(ctx.stream, ctx.limit))
     }
 }
 

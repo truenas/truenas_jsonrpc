@@ -29,6 +29,7 @@ use openssl::x509::{X509Ref, X509};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_openssl::SslStream;
 
+use crate::engine::{ConnContext, JsonRpcEngine, ProtocolEngine};
 use crate::peer::{Peer, TlsPeer, TransportPosture};
 use crate::server::JsonRpcServer;
 
@@ -139,15 +140,25 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                         let fd = kfd.as_raw_fd();
                         let Ok(stream) = TcpStream::from_std(kfd) else { return };
                         // kTLS: the fd is plaintext to us / kernel-encrypted → transfer works.
-                        let engine = shared.engine.clone();
-                        engine.serve(Box::new(stream), Some(fd), tls_peer(addr, cert, binding, Some(TransportPosture::KernelTls)), shared).await;
+                        let ctx = ConnContext {
+                            stream: Box::new(stream),
+                            transfer_fd: Some(fd),
+                            peer: tls_peer(addr, cert, binding, Some(TransportPosture::KernelTls)),
+                            limit: shared.limit,
+                        };
+                        JsonRpcEngine::new(shared).serve(ctx).await;
                     }
                     TlsMode::Userspace => {
                         let Some(stream) = userspace_accept(&acceptor, tcp).await else { return };
                         let (cert, binding) = tls_facts(stream.ssl());
                         // Userspace TLS: ciphertext on the fd → no raw-fd transfer (None).
-                        let engine = shared.engine.clone();
-                        engine.serve(Box::new(stream), None, tls_peer(addr, cert, binding, None), shared).await;
+                        let ctx = ConnContext {
+                            stream: Box::new(stream),
+                            transfer_fd: None,
+                            peer: tls_peer(addr, cert, binding, None),
+                            limit: shared.limit,
+                        };
+                        JsonRpcEngine::new(shared).serve(ctx).await;
                     }
                 }
             });
