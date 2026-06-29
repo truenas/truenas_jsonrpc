@@ -15,6 +15,9 @@ rust-version.workspace = true
 
 [dependencies]
 truenas-jsonrpc = { path = "../truenas-jsonrpc" }
+# The XDR codec — the second `ProtocolEngine` (ONC RPC, `oncrpc.rs`) encodes/decodes its binary
+# wire directly. Already in the lock (transitive via truenas-jsonrpc's XDR dispatch), so no new crate.
+truenas-xdr = { path = "../truenas-xdr" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 # `net` pulls mio + socket2 (the only new transitive crates for AF_UNIX/TCP — tokio's own
@@ -61,6 +64,9 @@ passthrough = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+# The `tests/oncrpc.rs` client encodes/decodes ONC RPC frames directly (already a normal dep above;
+# repeated here so the separate integration-test crate can name it).
+truenas-xdr = { path = "../truenas-xdr" }
 
 # This crate makes syscalls (SO_PEERCRED now; kTLS / SCM_RIGHTS in later phases), so it cannot
 # use the workspace's `unsafe_code = "forbid"`. It denies unsafe by default and allows it only

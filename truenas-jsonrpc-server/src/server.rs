@@ -16,6 +16,7 @@ use truenas_jsonrpc::JsonRpcProtocol;
 
 use crate::engine::{JsonRpcEngine, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
+use crate::oncrpc::OncRpcEngine;
 use crate::peer::{self, Peer, UnixTrust};
 #[cfg(feature = "websocket")]
 use crate::peer::ForwardedOrigin;
@@ -278,6 +279,26 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
         let trust = config.trust;
         let listener = Self::bind_unix(&config)?;
         self.serve_unix_listener(listener, trust).await
+    }
+
+    /// Accept ONC RPC connections (RFC 5531, record-marking framed) on a bound AF_UNIX `listener`,
+    /// serving the reference *second* protocol engine. The wire protocol is bound
+    /// to the listener — chosen per listener, never per request — which is what lets one server
+    /// speak JSON-RPC on one socket and this binary wire on another. The demo program authenticates
+    /// with `AUTH_NONE`, so it is offered only over AF_UNIX (local peer-credential trust), never a
+    /// network transport. Runs forever on the happy path.
+    pub async fn serve_oncrpc_unix_listener(&self, listener: UnixListener) -> std::io::Result<()> {
+        let engine: Arc<dyn ProtocolEngine<S>> = Arc::new(OncRpcEngine);
+        loop {
+            let (stream, _addr) = listener.accept().await?;
+            let fd = stream.as_raw_fd();
+            let peer = Peer::unix(peer::peer_cred(fd));
+            let engine = engine.clone();
+            let shared = self.shared.clone();
+            tokio::spawn(async move {
+                engine.serve(Box::new(stream), Some(fd), peer, shared).await;
+            });
+        }
     }
 
     /// Bind and serve a TCP `addr` (length-prefixed JSON framing). Refuses (before binding) if a

@@ -19,6 +19,7 @@ pub mod framing;
 mod connection;
 mod engine;
 mod negotiate;
+mod oncrpc;
 mod peer;
 #[cfg(feature = "passthrough")]
 pub mod scm;
