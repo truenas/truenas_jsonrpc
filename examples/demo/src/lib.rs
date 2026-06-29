@@ -1,5 +1,5 @@
 //! End-to-end demo: a consumer crate that generates server bindings from `json-idl/demo.json`
-//! and dispatches through the live `truenas-jsonrpc` core — proving the generated code
+//! and dispatches through the live `truenas-rpc` core — proving the generated code
 //! compiles against the core and works over both the JSON and XDR wires. Also serves as the
 //! reference for the documented consumer layout (`json-idl/` + build.rs → include! → impl
 //! `Handlers` → register → dispatch).
@@ -19,7 +19,7 @@ mod tests {
     use std::sync::Arc;
 
     use serde_json::{json, Value};
-    use truenas_jsonrpc::{
+    use truenas_rpc::{
         tnfilter, CompiledFilters, CompiledOptions, Dispatched, Filtered, JsonRpcError,
         JsonRpcProtocol, NullOutbound, RequestCtx, Session,
     };

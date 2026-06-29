@@ -1,0 +1,70 @@
+# `truenas-rpc-auth` — the optional authentication layer for `truenas-rpc`.
+#
+# Models the TrueNAS middleware auth mixin without PAM: an
+# `AuthStack` of pluggable challenge-response `Mechanism`s wired onto the core's
+# `$/sessionSetup` / `$/sessionSetupContinue` seam. AF_UNIX peer-cred is the default; TCP
+# mechanisms (mTLS, SCRAM-SHA-512-PLUS, GSSAPI, passthrough) are user-declared. Crypto goes
+# through OpenSSL (added in the SCRAM phase). Not in the workspace `default-members` — it sits
+# above both the core and the server transport; depend on it to authenticate connections.
+[package]
+name = "truenas-rpc-auth"
+version = "0.1.0"
+description = "Authentication layer (peer-cred / mTLS / SCRAM-SHA-512-PLUS) for truenas-rpc"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-rpc = { path = "../truenas-rpc" }
+# The auth stack reads the connection's `Peer` (transport / SO_PEERCRED / the TLS client cert +
+# channel binding) to gate mechanisms on what the channel offers.
+truenas-rpc-server = { path = "../truenas-rpc-server" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# System OpenSSL is the crate's one crypto/codec dependency, shared by every mechanism that needs it:
+# SCRAM (the same OpenSSL the C truenas_scram uses, incl. its `EVP_EncodeBlock`/`DecodeBlock` base64,
+# so verifiers/encodings are byte-identical), OAuth (offline JWT signature verification — no `ring`),
+# and GSSAPI (token base64). Off by default; peercred/mTLS pull no openssl.
+openssl = { version = "0.10", optional = true }
+# The keyring-backed `CredentialSource` (the `keyring` feature): looks SCRAM verifiers up in the
+# kernel keyring written by `truenas-keyring` or the `truenas_keyring` extension. Optional — an embedder
+# may supply its own `CredentialSource` (in-memory, an RPC to middleware, …) instead. The same
+# crate also backs the `server_roles` (uid → roles) lookup for authorization.
+truenas-keyring = { path = "../truenas-keyring", optional = true }
+# The passwd lookup (the `nss` feature): resolve a SCRAM username → uid so authorization can key off
+# the uid. Optional — an embedder may supply its own username→uid resolver instead.
+truenas-nss = { path = "../truenas-nss", optional = true }
+# Native GSSAPI/Kerberos acceptor (the `gssapi` feature): our own minimal FFI to the system MIT krb5
+# GSSAPI (no `libgssapi`/`bindgen`/`clang-sys`). The half-built `ServerCtx` is `Send` not `Sync`, so
+# `gssapi.rs` rides it across rounds inside a `Mutex` — no `unsafe` in this crate. Token base64 reuses
+# `openssl::base64` (GSSAPI tokens are standard padded base64), so the `gssapi` feature pulls openssl.
+truenas-gssapi = { path = "../truenas-gssapi", optional = true }
+
+[features]
+# SCRAM-SHA-512(-PLUS) challenge-response. Off by default.
+scram = ["dep:openssl"]
+# A kernel-keyring-backed `CredentialSource` for SCRAM (implies `scram`).
+keyring = ["scram", "dep:truenas-keyring"]
+# A built-in passwd-backed username→uid resolver (`getpwnam`) for keying authorization off the uid.
+nss = ["dep:truenas-nss"]
+# OIDC/OAuth ID-token verification: offline JWT signature + claim validation (over OpenSSL) against
+# IdP JWKS keys the embedder supplies (no HTTP client here). Off by default.
+oauth = ["dep:openssl"]
+# Native GSSAPI/Kerberos: in-process multi-round acceptor over our `truenas-gssapi` FFI (links the
+# system MIT krb5). Pulls openssl for the token base64. Off by default.
+gssapi = ["dep:truenas-gssapi", "dep:openssl"]
+# Passthrough auth: hand the client fd to a local AF_UNIX broker (+ the broker-server mode). Pulls
+# the server crate's SCM_RIGHTS primitives (no new external dep). Off by default.
+passthrough = ["truenas-rpc-server/passthrough"]
+
+[dev-dependencies]
+# `net`/`io-util`/`time`/`rt-multi-thread` drive the full passthrough integration test (a real
+# `JsonRpcServer` over AF_UNIX with an async client + a timeout).
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time"] }
+
+# Pure-Rust state machine + (later) OpenSSL's safe API — no syscalls/FFI of its own, so it keeps
+# the workspace's `unsafe_code = "forbid"`. (The keyring / pwenc syscalls live in their own crates.)
+[lints]
+workspace = true

@@ -1,4 +1,4 @@
-# truenas_jsonrpc — protocol architecture
+# truenas_rpc — protocol architecture
 
 The **protocol reference** for this stack: the dispatch-core/transport boundary, the session
 state machine, the per-request dispatch flow, the `$/` control messages, the server-integration
@@ -6,7 +6,7 @@ contract, the raw-fd bulk-transfer handshake, and the error taxonomy — the wir
 implementation targets.
 
 For the Rust implementation's concrete API mapping (the `dispatch()` seam, handler signatures, the
-encoder, kTLS setup) see [truenas-jsonrpc/ARCHITECTURE.md](truenas-jsonrpc/ARCHITECTURE.md).
+encoder, kTLS setup) see [truenas-rpc/ARCHITECTURE.md](truenas-rpc/ARCHITECTURE.md).
 
 It is JSON-RPC 2.0 ([spec](https://www.jsonrpc.org/specification)) with deliberate
 refinements (§9), and borrows its control-message namespace, progress, cancellation, and
@@ -21,17 +21,17 @@ strata, bottom → top:
 
 | # | Layer | Responsibility | Modules / types |
 |---|---|---|---|
-| 1 | **Transport** | Owns the file descriptor: accept loop, read/write event loop, TLS/kTLS, peer-cred identity, raw-fd (`sendfile`/`SCM_RIGHTS`) transfer, WebSocket. Moves opaque bytes. | `truenas-jsonrpc-server`: `connection.rs`, `server.rs`, `tls.rs`, `peer.rs` (`Transport`, `Peer`), `scm.rs`, `transfer.rs`, `ws.rs` |
-| 2 | **Framing** | Delimits one message in the byte stream (today: a 4-byte big-endian length prefix; one WebSocket message = one frame). Yields an opaque body. | `truenas-jsonrpc-server`: `framing.rs` (`frame_into`, `FrameError`), `connection.rs::take_frame` |
-| 3 | **Codec** | Bytes ↔ typed params/result for a wire. Both current wires are serde-driven (JSON via `serde_json`; the TXDR binary wire via `truenas-xdr`), but the layer is *not defined as* serde — a hand-written body parser is equally a codec. | `truenas-jsonrpc`: `method.rs` (`Codec` / `WireParams` / `WireReply`); the `truenas-xdr` crate |
-| 4 | **Envelope** | The per-message header: request id, method name / opcode, error taxonomy, request↔reply correlation. On the JSON wire a top-level array is a JSON-RPC 2.0 batch — several requests in one frame (§3, §9). | `truenas-jsonrpc`: `envelope.rs` |
-| 5 | **Dispatch** | Routes a decoded, authorized request to its handler through an O(1) keyed table — JSON by method name (`HashMap<Arc<str>>`), XDR by proc-id (`HashMap<u32>`), both sharing one `Arc<Method>`. Wire-neutral. | `truenas-jsonrpc`: `protocol.rs` (`dispatch` / `dispatch_xdr`, the registries, `Dispatched`), `method.rs` (`Method` / `MethodImpl`) |
+| 1 | **Transport** | Owns the file descriptor: accept loop, read/write event loop, TLS/kTLS, peer-cred identity, raw-fd (`sendfile`/`SCM_RIGHTS`) transfer, WebSocket. Moves opaque bytes. | `truenas-rpc-server`: `connection.rs`, `server.rs`, `tls.rs`, `peer.rs` (`Transport`, `Peer`), `scm.rs`, `transfer.rs`, `ws.rs` |
+| 2 | **Framing** | Delimits one message in the byte stream (today: a 4-byte big-endian length prefix; one WebSocket message = one frame). Yields an opaque body. | `truenas-rpc-server`: `framing.rs` (`frame_into`, `FrameError`), `connection.rs::take_frame` |
+| 3 | **Codec** | Bytes ↔ typed params/result for a wire. Both current wires are serde-driven (JSON via `serde_json`; the TXDR binary wire via `truenas-xdr`), but the layer is *not defined as* serde — a hand-written body parser is equally a codec. | `truenas-rpc`: `method.rs` (`Codec` / `WireParams` / `WireReply`); the `truenas-xdr` crate |
+| 4 | **Envelope** | The per-message header: request id, method name / opcode, error taxonomy, request↔reply correlation. On the JSON wire a top-level array is a JSON-RPC 2.0 batch — several requests in one frame (§3, §9). | `truenas-rpc`: `envelope.rs` |
+| 5 | **Dispatch** | Routes a decoded, authorized request to its handler through an O(1) keyed table — JSON by method name (`HashMap<Arc<str>>`), XDR by proc-id (`HashMap<u32>`), both sharing one `Arc<Method>`. Wire-neutral. | `truenas-rpc`: `protocol.rs` (`dispatch` / `dispatch_xdr`, the registries, `Dispatched`), `method.rs` (`Method` / `MethodImpl`) |
 | — | → **Handler** | The consumer's `Fn(Accepts, &RequestCtx) -> Result<Returns>`. | consumer code |
 
 **Cross-cutting concerns** — named separately because they attach at a point, they are *not* strata:
 
 - **Authentication** — establishes the peer credential (SASL/SCRAM, GSSAPI, OAuth, mTLS, peer-cred) during
-  the negotiate/setup handshake. `truenas-jsonrpc-auth` (`Channel`, `Capability`, the mechanisms); the
+  the negotiate/setup handshake. `truenas-rpc-auth` (`Channel`, `Capability`, the mechanisms); the
   handshake in `setup.rs` + the server's `negotiate.rs`.
 - **Authorization** — gates each call by a role-mask subset test, run *between* codec-decode and handler so
   `INVALID_PARAMS` precedes `NOT_AUTHORIZED`. The gate in `protocol.rs` + `role.rs` (`RoleMask`).
@@ -55,8 +55,8 @@ Two deliberate choices: **Framing is its own layer** (not folded into transport)
 per protocol — see [FRAMING.md](FRAMING.md); and the **Control-plane** is what makes this more than bare
 request/response RPC — long-lived, authenticated, multiplexed connections.
 
-The **load-bearing seam** is between layers **1–2** (transport + framing — the `truenas-jsonrpc-server`
-crate) and layers **3–5** (the transport-free **dispatch core** — the `truenas-jsonrpc` crate): one call,
+The **load-bearing seam** is between layers **1–2** (transport + framing — the `truenas-rpc-server`
+crate) and layers **3–5** (the transport-free **dispatch core** — the `truenas-rpc` crate): one call,
 `dispatch(message, session)` (framed bytes in, bytes out). The next section details exactly that boundary.
 
 ## 1. Dispatch core vs transport — the boundary
@@ -477,7 +477,7 @@ omits them (or sends `"params": {}`) gets the full, unfiltered list.
 ## 10. Protocol engines — one core, many wires
 
 Because the dispatch core (layers 3–5) is wire-neutral, the *same* registered methods can be served
-over more than one wire protocol. A **`ProtocolEngine`** (`truenas-jsonrpc-server`: `engine.rs`) owns
+over more than one wire protocol. A **`ProtocolEngine`** (`truenas-rpc-server`: `engine.rs`) owns
 one connection's protocol end to end — framing, envelope, control verbs, and the per-connection loop.
 
 **Selection is per *listener*, never per request.** A listener is bound to exactly one engine at

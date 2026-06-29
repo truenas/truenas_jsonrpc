@@ -1,7 +1,7 @@
 # truenas-filter
 
 The TrueNAS middlewared `query-filters` / `query-options` engine, matching the `truenas_pyfilter`
-C engine byte-for-byte. Used by `truenas-jsonrpc`'s filterable methods; also usable standalone.
+C engine byte-for-byte. Used by `truenas-rpc`'s filterable methods; also usable standalone.
 
 ## Public API
 

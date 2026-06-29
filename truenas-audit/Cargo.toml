@@ -1,6 +1,6 @@
 # `truenas-audit` — emit TrueNAS audit records to the Linux kernel audit subsystem.
 #
-# A [`truenas_jsonrpc::AuditSink`] backend that writes one record per audited call to `NETLINK_AUDIT`
+# A [`truenas_rpc::AuditSink`] backend that writes one record per audited call to `NETLINK_AUDIT`
 # (auditd → `/var/log/audit/audit.log`, queryable with `ausearch`/`aureport`). Records use the
 # linux-PAM field conventions (`op=<svc>:<verb>`, `acct=`, `res=success|failed`) plus the TrueNAS
 # audit payload flattened to native `svc_*` / `event_data_<key>` fields. The netlink send happens on
@@ -9,7 +9,7 @@
 [package]
 name = "truenas-audit"
 version = "0.1.0"
-description = "Linux kernel audit (NETLINK_AUDIT) backend for the truenas-jsonrpc AuditSink"
+description = "Linux kernel audit (NETLINK_AUDIT) backend for the truenas-rpc AuditSink"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -17,7 +17,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-truenas-jsonrpc = { path = "../truenas-jsonrpc" }
+truenas-rpc = { path = "../truenas-rpc" }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }

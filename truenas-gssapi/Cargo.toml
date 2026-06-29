@@ -8,7 +8,7 @@
 [package]
 name = "truenas-gssapi"
 version = "0.1.0"
-description = "Minimal FFI to the system GSSAPI (MIT krb5) acceptor for truenas-jsonrpc-auth"
+description = "Minimal FFI to the system GSSAPI (MIT krb5) acceptor for truenas-rpc-auth"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

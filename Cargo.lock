@@ -113,8 +113,8 @@ dependencies = [
  "serde_json",
  "tokio",
  "truenas-audit",
- "truenas-jsonrpc",
- "truenas-jsonrpc-codegen",
+ "truenas-rpc",
+ "truenas-rpc-codegen",
  "truenas-xdr",
 ]
 
@@ -716,7 +716,7 @@ dependencies = [
  "libc",
  "serde_json",
  "thiserror 2.0.18",
- "truenas-jsonrpc",
+ "truenas-rpc",
  "uuid",
 ]
 
@@ -736,7 +736,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "truenas-jsonrpc"
+name = "truenas-keyring"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "truenas-nss"
+version = "0.1.0"
+dependencies = [
+ "libc",
+]
+
+[[package]]
+name = "truenas-rpc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -750,7 +767,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "truenas-jsonrpc-auth"
+name = "truenas-rpc-auth"
 version = "0.1.0"
 dependencies = [
  "openssl",
@@ -758,14 +775,14 @@ dependencies = [
  "serde_json",
  "tokio",
  "truenas-gssapi",
- "truenas-jsonrpc",
- "truenas-jsonrpc-server",
  "truenas-keyring",
  "truenas-nss",
+ "truenas-rpc",
+ "truenas-rpc-server",
 ]
 
 [[package]]
-name = "truenas-jsonrpc-codegen"
+name = "truenas-rpc-codegen"
 version = "0.1.0"
 dependencies = [
  "serde",
@@ -773,17 +790,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "truenas-jsonrpc-pyo3"
+name = "truenas-rpc-pyo3"
 version = "0.1.0"
 dependencies = [
  "pyo3-ffi",
  "serde_json",
  "tokio",
- "truenas-jsonrpc",
+ "truenas-rpc",
 ]
 
 [[package]]
-name = "truenas-jsonrpc-server"
+name = "truenas-rpc-server"
 version = "0.1.0"
 dependencies = [
  "bytes",
@@ -799,25 +816,8 @@ dependencies = [
  "tokio",
  "tokio-openssl",
  "tokio-tungstenite",
- "truenas-jsonrpc",
+ "truenas-rpc",
  "truenas-xdr",
-]
-
-[[package]]
-name = "truenas-keyring"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "truenas-nss"
-version = "0.1.0"
-dependencies = [
- "libc",
 ]
 
 [[package]]

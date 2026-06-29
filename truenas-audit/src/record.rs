@@ -9,7 +9,7 @@
 
 use serde_json::Value;
 
-use truenas_jsonrpc::{AuditOutcome, JsonRpcRequest};
+use truenas_rpc::{AuditOutcome, JsonRpcRequest};
 
 // AUDIT_* user-message types (uapi/linux/audit.h + audit-records.h); see the PAM mapping.
 const AUDIT_USER_AUTH: u16 = 1100;
@@ -166,7 +166,7 @@ fn sanitize_key(key: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
-    use truenas_jsonrpc::JsonRpcError;
+    use truenas_rpc::JsonRpcError;
 
     fn req(method: &str, params: Value) -> JsonRpcRequest {
         JsonRpcRequest { method: method.into(), id: Some("rid-1".into()), params, roles: vec![] }

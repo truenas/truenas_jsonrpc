@@ -22,7 +22,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use truenas_jsonrpc::{AuditOutcome, AuditSink, JsonRpcRequest, Session};
+use truenas_rpc::{AuditOutcome, AuditSink, JsonRpcRequest, Session};
 
 use crate::netlink::{AuditSocket, SendStatus};
 use crate::record::{build_record, lost_record, AuditPrincipal};

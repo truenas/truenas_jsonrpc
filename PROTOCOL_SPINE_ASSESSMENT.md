@@ -232,15 +232,15 @@ SMB exercises only the transport/authz half** — the same half AFP would, with 
 
 ## Critical files (evidence + where the work would land)
 
-- `truenas-jsonrpc/src/method.rs` — the four erased traits with open-coded JSON+XDR method pairs and
+- `truenas-rpc/src/method.rs` — the four erased traits with open-coded JSON+XDR method pairs and
   the `DeserializeOwned + Serialize` bound (`:56-101`, `:108-113`, `:262-335`); the `MethodImpl`
   variants (`:595-617`). **The Tier-2 `Codec` refactor lands here.**
-- `truenas-jsonrpc/src/protocol.rs` — the two registries + shared `Arc` (`:312-314`, `:387-390`); the
+- `truenas-rpc/src/protocol.rs` — the two registries + shared `Arc` (`:312-314`, `:387-390`); the
   magic-byte wire fork in `dispatch()` (`:790-801`); `dispatch_xdr`/`dispatch_parsed`; the
   `Dispatched` seam (`:46`). **The Tier-3 `ProtocolEngine` seam lands here.**
-- `truenas-jsonrpc-server/src/connection.rs` — `take_frame` hardcoded `u32·blob` (`:71-84`) and the
+- `truenas-rpc-server/src/connection.rs` — `take_frame` hardcoded `u32·blob` (`:71-84`) and the
   write-coalescing fast path (`:112+`). **The Tier-3 `Framing` trait + perf-sensitive path.**
-- `truenas-jsonrpc-codegen/src/{lib.rs,model.rs,emit_server.rs}` — three serde-struct emitters, no
+- `truenas-rpc-codegen/src/{lib.rs,model.rs,emit_server.rs}` — three serde-struct emitters, no
   backend trait; XDR as a per-struct derive toggle (`emit_server.rs:96,124`). **A non-serde wire needs
   a new backend + IDL here.**
 - `truenas-xdr/src/frame.rs` — the magic-prefixed in-body TXDR frame/envelope (codec/envelope-side
@@ -318,7 +318,7 @@ typed-decode only; `rtrip` = decode → handler → encode.)
 collapsed: `ErasedSync`/`ErasedAsync` go from four wire-methods (`decode`/`run` + `xdr_decode`/`xdr_run`)
 to one `decode`/`run` pair delegating to a `Codec` (`Json | Xdr`) seam — a `WireParams` in, a `WireReply`
 out, with the per-wire serde behind `decode_plain` + `Codec::encode_result`
-(`truenas-jsonrpc/src/method.rs`). The four `protocol.rs` dispatch sites pass `WireParams::{Json,Xdr}` /
+(`truenas-rpc/src/method.rs`). The four `protocol.rs` dispatch sites pass `WireParams::{Json,Xdr}` /
 `Codec::{Json,Xdr}` and unwrap the reply. Adding a third serde-shaped wire is now a new `Codec` arm + a
 dispatch entry, not a method-pair on every erasure. Behavior-preserving: `cargo test --workspace
 --all-features` green, `./coverage.sh` 100%, `cargo clippy --workspace --all-features --all-targets` clean.

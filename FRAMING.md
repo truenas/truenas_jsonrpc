@@ -21,7 +21,7 @@ socket bytes ──[framing]──> opaque body ──[codec sniff]──> typed
   (`framing.rs:16`). The constant is duplicated in both files.
 - **The body is opaque to framing.** Inbound it's handed up zero-copy as `bytes::Bytes`
   (`connection.rs:83,177`); the wire is then chosen by an *in-body* magic sniff inside `dispatch`
-  (`truenas-jsonrpc/src/protocol.rs:790-795`: `if is_xdr(wire) …`), where `is_xdr` compares the body's
+  (`truenas-rpc/src/protocol.rs:790-795`: `if is_xdr(wire) …`), where `is_xdr` compares the body's
   first 4 bytes to `"TXDR"` (`truenas-xdr/src/frame.rs`).
 - **The existing binary (XDR) wire is _not_ a second framing.** It rides the *same* length prefix; its
   magic + version + `proc_id` + 16-byte request id live **inside** the opaque body as an XDR envelope

@@ -34,7 +34,7 @@ jobs:
 
       # Runs the unit/integration tests, including tests/conformance.rs — the differential
       # check that replays the committed frozen golden corpus
-      # (truenas-jsonrpc/tests/conformance/golden.json) through the Rust dispatch core and
+      # (truenas-rpc/tests/conformance/golden.json) through the Rust dispatch core and
       # asserts byte-stable responses + audit records. No external dependency.
       - name: Test
         run: cargo test --all-features --locked

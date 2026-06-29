@@ -1,6 +1,6 @@
-//! Linux kernel audit backend for [`truenas_jsonrpc`]'s audit seam.
+//! Linux kernel audit backend for [`truenas_rpc`]'s audit seam.
 //!
-//! [`LinuxAuditSink`] implements [`truenas_jsonrpc::AuditSink`] by writing one record per audited
+//! [`LinuxAuditSink`] implements [`truenas_rpc::AuditSink`] by writing one record per audited
 //! call to the kernel audit subsystem over a `NETLINK_AUDIT` socket — so audit lands in
 //! `/var/log/audit/audit.log` and is queryable with `ausearch`/`aureport`, alongside PAM's records.
 //!
@@ -21,7 +21,7 @@
 //!
 //! ```no_run
 //! use truenas_audit::{AuditPrincipal, LinuxAuditSink};
-//! use truenas_jsonrpc::Session;
+//! use truenas_rpc::Session;
 //!
 //! // `S` is your per-session state; read the identity out of it for the record.
 //! let sink = LinuxAuditSink::<()>::builder("truenas-api")

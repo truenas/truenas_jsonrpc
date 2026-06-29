@@ -16,7 +16,7 @@ machine, back to back*. Don't compare across machines; re-measure the baseline l
 catches per-request alloc / `dyn` regressions directly.
 
 ```sh
-cargo run --release -p truenas-jsonrpc --example bench [noop_iters]   # default 5_000_000
+cargo run --release -p truenas-rpc --example bench [noop_iters]   # default 5_000_000
 # best-of-3 is plenty:
 for r in 1 2 3; do taskset -c 0-7 ./target/release/examples/bench 2000000; done
 ```
@@ -27,7 +27,7 @@ regressions (what Phase 2+ touches). `bench/` is local tooling, not committed; t
 no-deps file built with `rustc`.
 
 ```sh
-cargo build --release -p truenas-jsonrpc-server --example bench_server   # the server (untracked, local)
+cargo build --release -p truenas-rpc-server --example bench_server   # the server (untracked, local)
 rustc -O --edition 2021 bench/unix_ab/driver.rs -o bench/unix_ab/driver  # the load driver (gitignored)
 # start server on a socket, then: ./bench/unix_ab/driver <sock> 50000 8   (50k req × 8 conns)
 # BENCH_MODE=async on the server for the inline/async path.

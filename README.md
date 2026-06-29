@@ -1,4 +1,4 @@
-# truenas_jsonrpc
+# truenas_rpc
 
 A JSON-RPC 2.0 **server/client protocol stack** for TrueNAS — a transport-agnostic dispatch
 core, a few transports, and a matching client — implemented in Rust as a Cargo workspace. The
@@ -117,7 +117,7 @@ notification) — plus an outbound queue for server→client messages. It owns n
 or threads; everything around it is the transport's job. The full layer model is in
 [ARCHITECTURE.md → Layers](ARCHITECTURE.md#layers).
 
-| Dispatch core (`truenas-jsonrpc`) | Transport layer (`truenas-jsonrpc-server`) |
+| Dispatch core (`truenas-rpc`) | Transport layer (`truenas-rpc-server`) |
 |---|---|
 | envelope parse + validation; the dispatch state machine | connection accept; framing; the event / read loop |
 | method routing; the authorize → handler → audit pipeline | the `session → connection` registry and message routing |
@@ -130,25 +130,25 @@ The split mirrors the [layer stack](ARCHITECTURE.md#layers) (and, for two of the
 requirement — see below), not a per-crate dependency you take on. What actually goes in your
 `Cargo.toml`:
 
-- **`truenas-jsonrpc`** — *your only runtime dependency.* The transport-agnostic **dispatch core**:
+- **`truenas-rpc`** — *your only runtime dependency.* The transport-agnostic **dispatch core**:
   envelope parse/validation, the session lifecycle + gate, the authorize → handler → audit
   pipeline, the `$/` control messages, pub/sub (`SERVER_CLIENT` subscriptions), and filterable
   (query) methods. Sync handlers run on `spawn_blocking`; async handlers are awaited. It
   **re-exports the filter API** (`tnfilter`, `Filtered`, `CompiledFilters`, …), so you
-  `use truenas_jsonrpc::…` for filtering too.
-- **`truenas-jsonrpc-codegen`** — a **build-dependency** (never a runtime one): the `json-idl/`
-  → Rust generator, run from `build.rs` (see [Code generation](#code-generation-truenas-jsonrpc-codegen)).
-- **`truenas-jsonrpc-pyo3`** — **optional**, only if you run `python:true` handler bodies in an
+  `use truenas_rpc::…` for filtering too.
+- **`truenas-rpc-codegen`** — a **build-dependency** (never a runtime one): the `json-idl/`
+  → Rust generator, run from `build.rs` (see [Code generation](#code-generation-truenas-rpc-codegen)).
+- **`truenas-rpc-pyo3`** — **optional**, only if you run `python:true` handler bodies in an
   embedded CPython interpreter. It is excluded from the workspace's default members, so a default
   `cargo build` links **zero** libpython.
 
-The remaining crates are **internal** — pulled in transitively by `truenas-jsonrpc`, so you don't
+The remaining crates are **internal** — pulled in transitively by `truenas-rpc`, so you don't
 name them. Each is self-contained with a smaller dependency set, so it's *also* usable standalone
 if you want just that piece:
 
 - **`truenas-filter`** — the `query-filters` / `query-options` **engine** (deps: `serde` +
   `serde_json`), matching the TrueNAS middleware's `truenas_pyfilter` C filter engine. Re-exported
-  through `truenas-jsonrpc`.
+  through `truenas-rpc`.
 - **`truenas-xdr`** — a serde **XDR (RFC 4506) codec** + the TXDR binary frame (deps: `serde` +
   `thiserror`), driving the binary wire inside the core's dispatch. Its `derive` feature adds
   `#[derive(XdrEnum/XdrUnion)]`.
@@ -159,8 +159,8 @@ if you want just that piece:
 ## Dependency graph
 
 Arrows are Cargo dependencies (`A --> B` means A depends on B). `[opt]` marks an optional add-on,
-pulled only for that capability. A typical consumer names only `truenas-jsonrpc` (runtime) and
-`truenas-jsonrpc-codegen` (build-dependency); the rest are transitive or opt-in.
+pulled only for that capability. A typical consumer names only `truenas-rpc` (runtime) and
+`truenas-rpc-codegen` (build-dependency); the rest are transitive or opt-in.
 
 ```text
                           consumer service crate
@@ -169,17 +169,17 @@ pulled only for that capability. A typical consumer names only `truenas-jsonrpc`
               build-dep|                          | runtime
                        v                          |
        +------------------------------+           |
-       | truenas-jsonrpc-codegen      |           |
+       | truenas-rpc-codegen      |           |
        | json-idl -> Rust (build time;|           |
-       | output uses truenas-jsonrpc) |           |
+       | output uses truenas-rpc) |           |
        +------------------------------+           |
                                                   v
     +------------------------+ [opt]   +-----------------------+
-    | truenas-jsonrpc-server |-------->|    truenas-jsonrpc    |
+    | truenas-rpc-server |-------->|    truenas-rpc    |
     | (AF_UNIX / TCP)        |         |    (dispatch core)    |
     +------------------------+         |                       |
     +------------------------+ [opt]   |                       |
-    | truenas-jsonrpc-pyo3   |-------->|                       |
+    | truenas-rpc-pyo3   |-------->|                       |
     | (embedded CPython)     |         +-----+-----------+-----+
     +------------------------+               |           |
                                             v           v
@@ -196,14 +196,14 @@ pulled only for that capability. A typical consumer names only `truenas-jsonrpc`
                                                       +---------------------+
 ```
 
-`truenas-jsonrpc-codegen` runs at build time only; it is never linked into the runtime — its
-*generated code* uses `truenas-jsonrpc`. `truenas-jsonrpc` re-exports the `truenas-filter` API, so
+`truenas-rpc-codegen` runs at build time only; it is never linked into the runtime — its
+*generated code* uses `truenas-rpc`. `truenas-rpc` re-exports the `truenas-filter` API, so
 a filterable handler needs only the core crate.
 
 ## Parity & proof
 
 **Differential conformance** is the gating proof: the conformance tests replay a committed, frozen
-golden corpus (`truenas-jsonrpc/tests/conformance/golden.json` and
+golden corpus (`truenas-rpc/tests/conformance/golden.json` and
 `truenas-filter/tests/conformance/golden.json`) and assert **byte-identical** results across the
 dispatch core and the filter engine. Line coverage is gated at 100% (`./coverage.sh`).
 
@@ -244,7 +244,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 The golden corpora are committed, frozen fixtures — the conformance tests replay them with no
 external dependency.
 
-## Code generation (`truenas-jsonrpc-codegen`)
+## Code generation (`truenas-rpc-codegen`)
 
 A consumer defines a `json-idl/` directory of JSON-Schema specs and generates typed server
 bindings (structs + a `Handlers` trait + `register()`), a typed client, and an OpenRPC document —
@@ -252,14 +252,14 @@ via a `build.rs` build-dependency (prost/tonic-build style):
 
 ```rust
 // server-gen/build.rs
-truenas_jsonrpc_codegen::Build::new().json_idl("../json-idl").emit_server().unwrap();
+truenas_rpc_codegen::Build::new().json_idl("../json-idl").emit_server().unwrap();
 ```
 
 The generated server **audits on by default** — every `audit: true` method (and the `$/` control
 ops) emits to the Linux kernel audit subsystem via `truenas-audit`; a top-level `audit` block in
 the spec configures the service / queue bound or turns it off (`audit.enabled = false`).
 
-See `truenas-jsonrpc-codegen/README.md` for the dialect, the consumer crate layout (`json-idl/` +
+See `truenas-rpc-codegen/README.md` for the dialect, the consumer crate layout (`json-idl/` +
 `server-gen` + `client-gen` + your own crate), and the packaging caveat.
 
 ## References
