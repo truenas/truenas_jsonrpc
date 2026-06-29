@@ -501,7 +501,7 @@ trait ProtocolEngine: Send + Sync {
 | Framing (2) | 4-byte length prefix | ONC RPC record marking (RFC 5531 §11) |
 | Codec (3) | JSON + TXDR (shared) | XDR (shared) |
 | Envelope (4) | JSON-RPC 2.0 / TXDR | ONC RPC `rpc_msg`, `AUTH_NONE`/`AUTH_SYS` |
-| Bind | `$/negotiate` (in-band) | the listener (program/version) |
+| Bind | `serve_*(l, JsonRpc)`, then `$/negotiate` | `serve_*(l, OncRpc::protocol(..))` |
 
 **Sharing the op-table — `Service`.** The op-table is a first-class, wire-neutral type: `Service<S>`
 holds the registered methods, the decode→authorize→run→audit run core, and the session registry. Each
@@ -516,14 +516,24 @@ wire — one service, many wires, differing only in framing and envelope. (`Serv
 binary-dispatch prelude with `JsonRpcProtocol::dispatch_xdr` behind a `#[inline(always)]` that is
 load-bearing for the hot path — see PERF.md.)
 
-**Wiring.** `serve_unix_listener` / `serve_tcp_listener` run the default engine;
-`serve_unix_listener_with(.., engine)` / `serve_tcp_listener_with(.., engine)` run a caller-supplied
-engine; `serve_oncrpc_unix_listener(.., config)` is the ONC RPC convenience (an `OncRpcConfig` names
-the protocol + its ONC RPC program/version).
+**Wiring — the `Wire` seam.** The wire is a typed value passed to a `serve_*` method:
+`serve_unix_listener(l, JsonRpc)`, `serve_unix_listener(l, OncRpc::protocol("x"))`,
+`serve_tcp_listener(l, JsonRpc)`. A `Wire` resolves to its `ProtocolEngine` **once per listener** via
+`Wire::into_engine(WireHost)` — `WireHost` is the construction-time analogue of `ConnContext`: it wraps
+the crate-private `ServerShared`, handing a wire only "the default JSON-RPC engine" or "a registered
+`Service` by name", so the substrate never crosses the seam. `NetworkWire: Wire` marks the wires
+servable over a network transport (TCP / TLS / reverse-proxied AF_UNIX) and carries the session-auth
+guard (`admit_network`); `OncRpc` is `Wire` but **not** `NetworkWire`, so `serve_tcp_listener(l,
+OncRpc::..)` is a *compile error* — ONC RPC (AUTH_NONE/AUTH_SYS) is AF_UNIX-only, made unrepresentable.
+`CustomWire(engine)` serves any pre-built engine. WebSocket is a message-framed JSON-RPC-only transport
+and sits *outside* the byte-stream `Wire` seam (its own `serve_websocket*` methods).
 
-**The implementor contract** for a new wire: implement `ProtocolEngine`; capture whatever substrate
-you need at construction (a `Service`, via the bound protocol's `service()`); bring your own framing +
-envelope + control verbs; route data requests to `Service::run_proc`. **Deferred, by design (no
+**The implementor contract** for a new wire: implement `ProtocolEngine` for the per-connection loop
+(capture the op-table you serve — a `Service`, via `WireHost::service` or the bound protocol's
+`service()`); bring your own framing + envelope + control verbs; route data requests to
+`Service::run_proc`. Make it a first-class `serve_*(l, MyWire)` value by implementing `Wire` (and
+`NetworkWire` if it authenticates network clients), or wrap a pre-built engine in `CustomWire`.
+**Deferred, by design (no
 consumer yet):** a per-engine control plane (the `$/` verbs
 are JSON-RPC-specific — Gap 4 in [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md)), and
 server→client push over a binary wire (the core's pub/sub emits JSON notifications, so a binary event

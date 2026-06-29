@@ -12,17 +12,20 @@ messages, selects a protocol per connection with `$/negotiate`, and pumps the di
     the peer (defaults to `None`).
   - `.message_limit(usize)` — inbound frame cap (default 4 MiB).
   - `.allow_unauthenticated_network()` — opt a server out of the network-auth guard (below).
-  - `serve_unix(UnixConfig)` / `serve_tcp(addr)` — bind + accept loop. Split forms
-    (`bind_unix` + `serve_unix_listener`, `bind_tcp` + `serve_tcp_listener`) let a caller bind
-    before signalling readiness. The server is `Clone` (an `Arc` handle), so a clone moves into
-    each transport's task.
+  - `serve_unix(UnixConfig, wire)` / `serve_tcp(addr, wire)` — bind + accept loop, serving a typed
+    **`Wire`** value: `JsonRpc` (the default engine), or `OncRpc::protocol("…")` for RFC 5531 over
+    AF_UNIX. Split forms (`bind_unix` + `serve_unix_listener`, `bind_tcp` + `serve_tcp_listener`) let a
+    caller bind before signalling readiness. `serve_unix_listener` is trusted-local;
+    `serve_proxied_unix_listener` and the TCP/TLS methods are network-facing (bound `W: NetworkWire`, so
+    the AF_UNIX-only `OncRpc` is a compile error there). The server is `Clone` (an `Arc` handle), so a
+    clone moves into each transport's task.
 - `Peer` { `transport`, `ucred: Option<Ucred>`, `addr: Option<SocketAddr>` }, `Transport`,
   `Ucred` (pid/uid/gid from `SO_PEERCRED`).
 - `UnixConfig` (path + post-bind `mode`).
 - `framing` — the wire: a 4-byte big-endian length prefix over compact JSON (`frame`,
   `read_message`, `DEFAULT_LIMIT`).
 - *(feature `tls`)* `TlsConfig` (+ `TlsMode::{Kernel, Userspace}`) and
-  `serve_tls` / `serve_tls_listener` — encrypted TCP via system OpenSSL.
+  `serve_tls(addr, tls, wire)` / `serve_tls_listener` — encrypted TCP via system OpenSSL.
 - `FileTransferExt` — for a `transfer` callback: blocking `write_all` / `read_exact` on the
   fd, zero-copy `sendfile` / `recvfile` (`sendfile(2)` / `splice(2)`, staying zero-copy over
   kTLS), and `send_fds` / `recv_fds` (`SCM_RIGHTS`) for a `RpcFdPassMethod` over AF_UNIX.
@@ -66,7 +69,7 @@ let proto = JsonRpcProtocol::<()>::builder("conf", "1").method(/* … */).build(
 let server = TruenasRpcServer::<()>::builder("my-server")
     .protocol("main", proto)
     .build();
-server.serve_unix(UnixConfig::new("/run/my.sock")).await?;
+server.serve_unix(UnixConfig::new("/run/my.sock"), JsonRpc).await?;
 ```
 
 ## Dependencies / build
