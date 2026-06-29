@@ -16,7 +16,7 @@ use truenas_jsonrpc::JsonRpcProtocol;
 
 use crate::engine::{ConnContext, JsonRpcEngine, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
-use crate::oncrpc::{OncRpcEngine, DEFAULT_PROGRAM, DEFAULT_VERSION};
+use crate::oncrpc::{OncRpcProtocol, DEFAULT_PROGRAM, DEFAULT_VERSION};
 use crate::peer::{self, Peer, UnixTrust};
 #[cfg(feature = "websocket")]
 use crate::peer::ForwardedOrigin;
@@ -363,7 +363,7 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
                 ),
             )
         })?;
-        let engine = OncRpcEngine::new(proto.service().clone(), config.program, config.version);
+        let engine = OncRpcProtocol::new(proto.service().clone(), config.program, config.version);
         self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(engine)).await
     }
 

@@ -21,7 +21,8 @@
 //!
 //! The engine takes only the byte stream + size limit from its [`ConnContext`](crate::engine::ConnContext)
 //! (auth is the ONC RPC credential flavor, not the connection peer); the op-table it serves is the
-//! bound [`Service`] it captures at construction. ONC RPC has no `$/sessionSetup` handshake
+//! [`Service`] inside the bound [`OncRpcProtocol`] it captures at construction. ONC RPC has no
+//! `$/sessionSetup` handshake
 //! and this engine adds no server-push, so it serves a session with no server state and a no-op
 //! outbound — methods gated behind session setup are not reachable over this wire.
 
@@ -265,63 +266,60 @@ fn accept_stat_for(e: &JsonRpcError) -> u32 {
     }
 }
 
-/// The per-connection loop: read a record, answer it, write the reply, repeat until the peer closes
-/// or sends something unanswerable. Each non-`NULL` procedure is dispatched to the bound protocol's
-/// method whose XDR proc-id equals it. Sequential by design — this reference engine adds no
-/// pipelining or server-initiated push.
-async fn serve_oncrpc<S, IO>(
-    mut stream: IO,
-    limit: usize,
-    service: Arc<Service<S>>,
-    program: u32,
-    version: u32,
-) where
-    S: Send + Sync + 'static,
-    IO: AsyncRead + AsyncWrite + Unpin + Send,
-{
-    // One session per connection: no server state, no outbound (this wire has no session setup and
-    // no server-push). Closed at end of connection.
-    let session = service.new_session(None, Arc::new(NullOutbound));
-    let mut acc = BytesMut::with_capacity(8 * 1024);
-    while let Some(record) = read_record(&mut stream, &mut acc, limit).await {
-        let reply = match precheck(&record, program, version) {
-            Action::Close => break,
-            Action::Reply(bytes) => bytes,
-            // The ONC RPC procedure number IS the registered method's XDR proc-id; on success the
-            // result bytes are the method's XDR-encoded result, wrapped in the accepted reply.
-            Action::Dispatch { xid, procedure, args } => {
-                match service.run_proc(procedure, None, args, &session).await {
-                    Ok(result) => reply_accepted(xid, ACCEPT_SUCCESS, &result),
-                    Err(e) => reply_accepted(xid, accept_stat_for(&e), &[]),
-                }
-            }
-        };
-        if write_record(&mut stream, &reply).await.is_err() {
-            break;
-        }
-    }
-    service.close_session(&session);
-}
-
-/// The ONC RPC engine, bound to one registered [`Service`] op-table. Each connection serves the demo
-/// program: the `NULL` probe plus the service's methods, keyed by their XDR proc-ids.
-pub(crate) struct OncRpcEngine<S> {
+/// The dispatch core's **ONC RPC wire-view** (RFC 5531): a [`Service`] op-table projected onto an
+/// ONC RPC `(program, version)`. The peer of [`JsonRpcProtocol`](truenas_jsonrpc::JsonRpcProtocol)
+/// for the record-marking binary wire — it owns no methods of its own, serving the *same* registered
+/// methods by their XDR proc-ids (one service, two wires). Where `JsonRpcProtocol` lives in the
+/// transport-free core and is adapted to the seam by [`JsonRpcEngine`](crate::engine), this view
+/// lives in the server crate, so it *is* its own [`ProtocolEngine`] — bind it to a listener directly.
+pub(crate) struct OncRpcProtocol<S> {
     service: Arc<Service<S>>,
     program: u32,
     version: u32,
 }
 
-impl<S> OncRpcEngine<S> {
-    /// Bind the engine to the op-table whose methods it serves, answering ONC RPC `program` /
-    /// `version`.
+impl<S: Send + Sync + 'static> OncRpcProtocol<S> {
+    /// Project a [`Service`] op-table onto the ONC RPC `program` / `version` this view answers to.
     pub(crate) fn new(service: Arc<Service<S>>, program: u32, version: u32) -> Self {
-        OncRpcEngine { service, program, version }
+        OncRpcProtocol { service, program, version }
+    }
+
+    /// The per-connection loop: read a record, answer it, write the reply, repeat until the peer
+    /// closes or sends something unanswerable. Each non-`NULL` procedure is dispatched to the
+    /// service's method whose XDR proc-id equals it. Sequential by design — this reference engine
+    /// adds no pipelining or server-initiated push.
+    async fn serve_connection<IO>(&self, mut stream: IO, limit: usize)
+    where
+        IO: AsyncRead + AsyncWrite + Unpin + Send,
+    {
+        // One session per connection: no server state, no outbound (this wire has no session setup
+        // and no server-push). Closed at end of connection.
+        let session = self.service.new_session(None, Arc::new(NullOutbound));
+        let mut acc = BytesMut::with_capacity(8 * 1024);
+        while let Some(record) = read_record(&mut stream, &mut acc, limit).await {
+            let reply = match precheck(&record, self.program, self.version) {
+                Action::Close => break,
+                Action::Reply(bytes) => bytes,
+                // The ONC RPC procedure number IS the registered method's XDR proc-id; on success
+                // the result bytes are the method's XDR-encoded result, wrapped in the accepted reply.
+                Action::Dispatch { xid, procedure, args } => {
+                    match self.service.run_proc(procedure, None, args, &session).await {
+                        Ok(result) => reply_accepted(xid, ACCEPT_SUCCESS, &result),
+                        Err(e) => reply_accepted(xid, accept_stat_for(&e), &[]),
+                    }
+                }
+            };
+            if write_record(&mut stream, &reply).await.is_err() {
+                break;
+            }
+        }
+        self.service.close_session(&session);
     }
 }
 
-impl<S: Send + Sync + 'static> ProtocolEngine for OncRpcEngine<S> {
+impl<S: Send + Sync + 'static> ProtocolEngine for OncRpcProtocol<S> {
     fn serve<'a>(&'a self, ctx: ConnContext) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
-        Box::pin(serve_oncrpc(ctx.stream, ctx.limit, self.service.clone(), self.program, self.version))
+        Box::pin(self.serve_connection(ctx.stream, ctx.limit))
     }
 }
 
@@ -535,8 +533,8 @@ mod tests {
     #[tokio::test]
     async fn serve_loop_dispatches_a_registered_method() {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let task =
-            tokio::spawn(serve_oncrpc(server, 4 * 1024 * 1024, add_proto().service().clone(), PROG, VERS));
+        let proto = Arc::new(OncRpcProtocol::new(add_proto().service().clone(), PROG, VERS));
+        let task = tokio::spawn(async move { proto.serve_connection(server, 4 * 1024 * 1024).await });
         let mut acc = BytesMut::new();
 
         // NULL probe (self-contained) → SUCCESS, empty.
