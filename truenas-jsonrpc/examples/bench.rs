@@ -1,13 +1,15 @@
 //! Micro-benchmark: `JsonRpcProtocol::dispatch` throughput.
 //!
-//! Three numbers:
-//!   1. **dispatch overhead** — a no-op handler, 1 thread, async (awaited inline, no
-//!      `spawn_blocking`). The pure parse→decode→encode cost.
+//! Numbers (each one a perf-gate cell — see PERF.md):
+//!   1a. **JSON dispatch overhead** — a no-op handler, 1 thread, async (awaited inline, no
+//!      `spawn_blocking`). The pure JSON parse→decode→encode cost.
+//!   1b. **XDR dispatch overhead** — the same no-op handler over the TXDR binary wire. The pure
+//!      XDR decode→encode cost; isolates the codec path from the handler.
 //!   2. **realistic handler, 1 thread** — a sync handler doing real per-request CPU work
 //!      (a stand-in for a checksum / light crypto / building a larger response), driven
 //!      sequentially on the `spawn_blocking` path.
 //!   3. **realistic handler, N threads** — the same, driven concurrently. Shows the
-//!      multi-core speedup (Rust has no GIL, so blocking handlers scale across cores).
+//!      multi-core speedup (blocking handlers scale across cores).
 //!
 //! Run release:  `cargo run --release --example bench [noop_iters]`
 
@@ -71,7 +73,82 @@ async fn main() {
         for _ in 0..noop_iters {
             let _ = proto.dispatch(WIRE, &session).await;
         }
-        report("dispatch overhead, no-op handler (1 thread)", noop_iters, t0.elapsed());
+        report("dispatch overhead, no-op handler, JSON wire (1 thread)", noop_iters, t0.elapsed());
+    }
+
+    // 1b) Pure dispatch overhead over the TXDR binary wire — same no-op handler, async, 1 thread.
+    {
+        use truenas_xdr::frame::build_request;
+        use truenas_xdr::to_bytes;
+        const XID: [u8; 16] =
+            [0xf8, 0x1d, 0x4f, 0xae, 0x7d, 0xec, 0x11, 0xd0, 0xa7, 0x65, 0x00, 0xa0, 0xc9, 0x1e, 0x6b, 0xf6];
+        let proto = JsonRpcProtocol::<()>::builder("bench", "1.0")
+            .async_method(AsyncJsonRpcMethod::new(
+                MethodDef::new("bench").xdr(1001),
+                |a: Args, _c: RequestCtx<()>| async move { Ok(Res { n: a.n + 1 }) },
+            ))
+            .unwrap()
+            .build();
+        let session = proto.new_session(Some(()), Arc::new(NullOutbound));
+        let xdr_wire = build_request(1001, Some(XID), &to_bytes(&Args { n: 41 }).unwrap()).unwrap();
+        for _ in 0..50_000 {
+            let _ = proto.dispatch(&xdr_wire, &session).await;
+        }
+        let t0 = Instant::now();
+        for _ in 0..noop_iters {
+            let _ = proto.dispatch(&xdr_wire, &session).await;
+        }
+        report("dispatch overhead, no-op handler, XDR wire (1 thread)", noop_iters, t0.elapsed());
+    }
+
+    // 1c) **Most sensitive cell.** Concurrent async dispatch throughput — no-op handler, inline (no
+    //     `spawn_blocking`), N tasks, JSON + XDR. The async/inline path has no thread hop to mask a
+    //     per-request regression (a boxed future, an extra alloc, lost inlining), so a "fuckup" shows
+    //     here first — gate hardest on these two numbers.
+    {
+        use truenas_xdr::frame::build_request;
+        use truenas_xdr::to_bytes;
+        const XID: [u8; 16] =
+            [0xf8, 0x1d, 0x4f, 0xae, 0x7d, 0xec, 0x11, 0xd0, 0xa7, 0x65, 0x00, 0xa0, 0xc9, 0x1e, 0x6b, 0xf6];
+        let proto = Arc::new(
+            JsonRpcProtocol::<()>::builder("bench", "1.0")
+                .async_method(AsyncJsonRpcMethod::new(
+                    MethodDef::new("bench").xdr(1001),
+                    |a: Args, _c: RequestCtx<()>| async move { Ok(Res { n: a.n + 1 }) },
+                ))
+                .unwrap()
+                .build(),
+        );
+        let session = proto.new_session(Some(()), Arc::new(NullOutbound));
+        let workers = par;
+        let per = noop_iters / workers as u64;
+        let wires: [(&str, Vec<u8>); 2] = [
+            ("JSON", WIRE.to_vec()),
+            ("XDR", build_request(1001, Some(XID), &to_bytes(&Args { n: 41 }).unwrap()).unwrap()),
+        ];
+        for (wlabel, wire) in wires {
+            for _ in 0..20_000 {
+                let _ = proto.dispatch(&wire, &session).await;
+            }
+            let t0 = Instant::now();
+            let mut handles = Vec::with_capacity(workers);
+            for _ in 0..workers {
+                let (p, s, w) = (proto.clone(), session.clone(), wire.clone());
+                handles.push(tokio::spawn(async move {
+                    for _ in 0..per {
+                        let _ = p.dispatch(&w, &s).await;
+                    }
+                }));
+            }
+            for h in handles {
+                h.await.unwrap();
+            }
+            report(
+                &format!("async dispatch, no-op, {wlabel} wire ({workers} tasks, concurrent)"),
+                per * workers as u64,
+                t0.elapsed(),
+            );
+        }
     }
 
     // A realistic sync handler (real CPU work) on the spawn_blocking path.
