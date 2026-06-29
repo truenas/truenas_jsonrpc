@@ -1,246 +1,153 @@
-# truenas_jsonrpc
+# truenas_jsonrpc — Rust implementation
 
-A JSON-RPC 2.0 **server/client protocol stack** for TrueNAS — a transport-agnostic
-dispatch core, a few transports, and a matching client — with one reference
-implementation per language. The **Python** implementation lives in [`python/`](python/);
-**Rust** (and possibly **Go**) implementations of the same protocol are planned.
+A Rust port of the TrueNAS JSON-RPC 2.0 stack (the Python reference lives in
+[`../python/`](../python/)). This is a Cargo workspace; the language-agnostic wire contract is
+in [`../ARCHITECTURE.md`](../ARCHITECTURE.md) and the project overview in
+[`../README.md`](../README.md).
 
-This repository is the home for those implementations and the shared protocol contract.
+## Crates
 
-## What it implements
+This is a workspace of focused crates, but **a consumer depends on only one of them at
+runtime.** The split mirrors the [layer stack](../ARCHITECTURE.md#layers) (and, for two of them, is
+a hard requirement — see below), not a per-crate dependency you take on. What actually goes in your `Cargo.toml`:
 
-A refinement of JSON-RPC 2.0 designed for long-lived, authenticated, multiplexed
-connections: a transport-agnostic **dispatch core** (`bytes` in → `bytes`/`None` out)
-with pluggable transports and a back channel for server→client messages.
+- **`truenas-jsonrpc`** — *your only runtime dependency.* The transport-agnostic **dispatch
+  core** (Python's `JSONRPCProtocol`): envelope parse/validation, the session lifecycle +
+  gate, the authorize → handler → audit pipeline, the `$/` control messages, pub/sub
+  (`SERVER_CLIENT` subscriptions), and filterable (query) methods. Sync handlers run on
+  `spawn_blocking`; async handlers are awaited (a Rust-only addition — Python has no async
+  methods). It **re-exports the filter API** (`tnfilter`, `Filtered`, `CompiledFilters`, …),
+  so you `use truenas_jsonrpc::…` for filtering too.
+- **`truenas-jsonrpc-codegen`** — a **build-dependency** (never a runtime one): the `json-idl/`
+  → Rust generator, run from `build.rs` (see [Code generation](#code-generation-truenas-jsonrpc-codegen)).
+- **`truenas-jsonrpc-pyo3`** — **optional**, only if you run `python:true` handler bodies in an
+  embedded CPython interpreter. It is excluded from the workspace's default members, so a
+  default `cargo build` links **zero** libpython.
 
-### The protocol
+The remaining crates are **internal** — pulled in transitively by `truenas-jsonrpc`, so you
+don't name them. Each is self-contained with a smaller dependency set, so it's *also* usable
+standalone if you want just that piece:
 
-Every message is a single JSON-RPC 2.0 object; the transport frames each one (a 4-byte
-length prefix on AF_UNIX/TCP, or one WebSocket message — see [Transports](#transports)).
-There are four envelope shapes:
+- **`truenas-filter`** — the `query-filters` / `query-options` **engine**, a port of the
+  `truenas_pyfilter` C extension (deps: `serde` + `serde_json`). Re-exported through
+  `truenas-jsonrpc`.
+- **`truenas-xdr`** — a serde **XDR (RFC 4506) codec** + the TXDR binary frame (deps: `serde` +
+  `thiserror`), driving the binary wire inside the core's dispatch. Its `derive` feature adds
+  `#[derive(XdrEnum/XdrUnion)]`.
+- **`truenas-xdr-derive`** — the proc-macro crate behind that `derive` feature. A proc-macro
+  *must* be its own crate (a language rule), so you never depend on it directly — you enable
+  `truenas-xdr`'s `derive` feature and the macros are re-exported for you.
 
-```jsonc
-// request — `id` is a UUID string; `params` is a by-name object
-{"jsonrpc": "2.0", "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6", "method": "pool.create", "params": {"name": "tank"}}
+## Dependency graph
 
-// success response — correlated by the same `id`
-{"jsonrpc": "2.0", "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6", "result": {"id": 7, "name": "tank"}}
+Arrows are Cargo dependencies (`A --> B` means A depends on B). `[opt]` marks an optional
+add-on, pulled only for that capability. A typical consumer names only `truenas-jsonrpc`
+(runtime) and `truenas-jsonrpc-codegen` (build-dependency); the rest are transitive or opt-in.
 
-// error response — same `id`
-{"jsonrpc": "2.0", "id": "f81d4fae-7dec-11d0-a765-00a0c91e6bf6", "error": {"code": -32000, "message": "Not authorized", "data": null}}
-
-// notification — no `id`, no reply (the server→client back channel)
-{"jsonrpc": "2.0", "method": "pool.events", "params": {"name": "tank", "state": "ONLINE"}}
+```text
+                          consumer service crate
+                    (generated Handlers, json-idl/ spec)
+                       |                          |
+              build-dep|                          | runtime
+                       v                          |
+       +------------------------------+           |
+       | truenas-jsonrpc-codegen      |           |
+       | json-idl -> Rust (build time;|           |
+       | output uses truenas-jsonrpc) |           |
+       +------------------------------+           |
+                                                  v
+    +------------------------+ [opt]   +-----------------------+
+    | truenas-jsonrpc-server |-------->|    truenas-jsonrpc    |
+    | (AF_UNIX / TCP)        |         |    (dispatch core)    |
+    +------------------------+         |                       |
+    +------------------------+ [opt]   |                       |
+    | truenas-jsonrpc-pyo3   |-------->|                       |
+    | (embedded CPython)     |         +-----+-----------+-----+
+    +------------------------+               |           |
+                                            v           v
+                                  +----------------+  +--------------------+
+                                  | truenas-filter |  |     truenas-xdr    |
+                                  | (query engine) |  |  (XDR codec+frame) |
+                                  +----------------+  +---------+----------+
+                                                                |
+                                                       "derive" | feature
+                                                                v
+                                                      +---------------------+
+                                                      | truenas-xdr-derive  |
+                                                      | (proc-macro)        |
+                                                      +---------------------+
 ```
 
-Deliberate refinements of JSON-RPC 2.0: **UUID-only ids** (a present `id` must be a canonical UUID
-string), **by-name params only** (`params` must be an object — no positional arrays), and the
-**reserved `$/` and `rpc.` prefixes** (only the control messages below may use `$/`). JSON-RPC 2.0
-**batch** (a top-level array) is supported on the JSON wire — an *empty* array is `INVALID_REQUEST`
-per spec.
+`truenas-jsonrpc-codegen` runs at build time only; it is never linked into the runtime — its
+*generated code* uses `truenas-jsonrpc`. `truenas-jsonrpc` re-exports the `truenas-filter` API,
+so a filterable handler needs only the core crate.
 
-**Control messages** (`$/` namespace, handled by the server/runtime — not application
-methods):
+## Parity & proof
 
-| message | dir | params → result |
-|---|---|---|
-| `$/negotiate` | C→S | `{protocol}` → `{protocol, server, available[]}` — bind one of the server's named protocols (unauthenticated) |
-| `$/sessionSetup`, `$/sessionSetupContinue` | C→S | `{credentials…}` → the auth result; advances the session lifecycle (the *Continue* step is multi-step / 2FA) |
-| `$/sessionClose` | C→S | — → end the session (`CLOSED`) |
-| `$/serverInfo` | C→S | — → server identity (unauthenticated, opt-in) |
-| `$/progress` | S→C | `{id, percent?, description?, extra?}` — progress for the in-flight request `id` (a notification) |
-| `$/cancelRequest` | C→S | `{target_id}` → `true` — cancel an in-flight request **or** drop a subscription, by id |
-| `$/transferReady` → `$/transferGo` | S→C, C→S | `{id, direction, result}` / `{id}` — handshake for the raw socket operations below |
+A/B **differential conformance** against the Python reference is the gating proof: Python
+generators (`conformance/generate.py` and `truenas-filter/conformance/generate.py`) run a
+fixed corpus through the reference implementation / C oracle and emit golden JSON; the Rust
+tests replay it and assert **byte-identical** results. Line coverage is gated at 100%
+(`./coverage.sh`).
 
-**Session lifecycle.** A connection sends `$/negotiate` to pick a protocol, then
-`$/sessionSetup` (+ `$/sessionSetupContinue` for multi-step / 2FA) to authenticate, then
-issues calls. The session advances `NONE → INIT → ESTABLISHED → CLOSED`; once session setup
-is configured, a normal method before `ESTABLISHED` is rejected `SESSION_NOT_ESTABLISHED`.
-Each call also runs an **authorization** check and an opt-in **audit** record (fields
-marked secret are redacted in the audit view).
+## Filter-engine deviations
 
-**Pub/sub** reuses the request/notification shapes: a *topic* is a server→client method;
-**subscribing** is a normal request to it (the `result` is a subscription UUID), and each
-**publish** is a notification `{"method": "<topic>", "params": <payload>}` delivered to
-that connection. `$/cancelRequest` with the subscription id unsubscribes.
+`truenas-filter` matches the C engine (`truenas_pyfilter`) byte-for-byte for `query-filters`
+and `query-options` — **with two deliberate exceptions:**
 
-**Query methods.** A method may declare its result a filterable list. Such a method takes
-two optional by-name params — `query-filters` (a condition list, e.g.
-`[["name", "=", "tank"], ["OR", [...]]]`) and `query-options` (`select`, `order_by`,
-`offset`, `limit`, plus `count` → an integer and `get` → a single record) — that narrow
-the result *at the source*. Omitting them returns the full list, so it is additive. The
-filter/option grammar is the same middleware `query` syntax every binding must implement;
-the full operator and option tables are in
-**[ARCHITECTURE.md → Query methods](ARCHITECTURE.md#7-query-methods-filtering)**.
+- **`query-options.select` is not supported.** `select` is the only option that *reshapes* a
+  row (project / rename / sub-select fields). Omitting it keeps every returned row's shape
+  stable — equal to the method's declared `entry` type — and lets the engine stay
+  **read-only**: it filters, orders, and slices, then passes rows through **unchanged**.
+  Concretely, `tnfilter` takes `IntoIterator<Item = Value>` and *moves* a matched row into the
+  result; it never re-serializes a row per item or builds a projected object, which a
+  `select`-capable dynamic engine would force. Clients that need column projection do it
+  client-side.
 
-> **Rust note:** the Rust port intentionally omits `query-options.select` (column projection)
-> and the `~` regex operator; all other filter/option behavior is byte-identical. See
-> [rust/README.md → Filter-engine deviations](rust/README.md#filter-engine-deviations).
+- **The `~` regex operator is not supported.** It is the only operator whose semantics can't
+  be guaranteed byte-identical — Rust's `regex` crate is not Python's `re` (no
+  backreferences/lookaround, a different dialect) — and the only one that would pull in a
+  regex dependency. Use `^` / `!^` / `$` / `!$` (starts/ends-with) or `in` / `rin`
+  (containment) instead, or filter client-side.
 
-**Raw socket operations.** Two operations step *outside* JSON-RPC framing to do raw I/O
-directly on the established socket, coordinated by the `$/transferReady`/`$/transferGo`
-handshake (the reader pauses, the operation runs, then normal JSON-RPC resumes). They are
-distinct:
+Both are parity gaps vs. the Python/middleware `filter_list`. Everything else is identical to
+the oracle: the remaining filter operators (`=` `!=` `>` `>=` `<` `<=` `in` `nin` `rin` `rnin`
+`^` `!^` `$` `!$`, incl. the `C` case-insensitive prefix), `OR`/`AND` nesting, dotted /
+indexed / `*`-wildcard / escaped-dot path traversal, `order_by` (`-` / `nulls_first:` /
+`nulls_last:`, multi-key, stable), `get`, `count`, `offset`, `limit`, and the Python
+comparison semantics (numeric tower; `==`/`!=` total; `<`/`>`/… raise on incomparable operands).
 
-- **Byte-stream transfer** — a method's handler is handed the **connection's own socket
-  fd** to read or write a self-delimiting byte stream directly on the wire (e.g. a
-  `zfs send`/`recv` stream, via `sendfile`/`recvfile`). Requires a plaintext fd → a
-  **plain or kernel-TLS** connection (AF_UNIX **or** TCP); rejected over userspace TLS or
-  WebSocket.
-- **File-descriptor passing** — a handler passes **other open file descriptors** to the
-  peer as `SCM_RIGHTS` ancillary data; the peer receives new fds for the same open files
-  (the privilege-broker pattern). **AF_UNIX only** (`SCM_RIGHTS` does not exist elsewhere).
-
-**Error object** — `{"code", "message", "data"?}`. Codes (JSON-RPC standard + LSP-derived):
-
-| code | meaning |
-|------|---------|
-| `-32700` | parse error — malformed JSON |
-| `-32600` | invalid request — bad envelope (non-object, non-UUID id, empty array) |
-| `-32601` | method not found |
-| `-32602` | invalid params — failed by-name decode/validation |
-| `-32603` | internal error — unexpected fault |
-| `-32000` | not authorized — the authorizer denied the call |
-| `-32002` | session not established — a normal method before `ESTABLISHED`, or on `CLOSED` |
-| `-32800` | request cancelled — via `$/cancelRequest` |
-| `-32803` | request failed — a valid, authorized request failed for an expected reason |
-
-The per-message dispatch order and full semantics are in the language-agnostic
-**[ARCHITECTURE.md](ARCHITECTURE.md)**.
-
-### Transports
-
-| Transport | Framing | Notes |
-|-----------|---------|-------|
-| AF_UNIX   | 4-byte big-endian length + JSON | peer credentials (uid/gid/pid) |
-| TCP       | 4-byte big-endian length + JSON | optional TLS; **kernel-TLS** keeps the fd plaintext for zero-copy transfers |
-| WebSocket | one JSON-RPC message per frame  | `ws://` / `wss://`; optional dependency; no raw-fd transfers |
-
-## Architecture
-
-The stack splits into a transport-agnostic **dispatch core** and a **transport layer**
-around it. The core is a single seam — a request message in, a response message out (or
-nothing, for a notification) — plus an outbound queue for server→client messages. It
-owns no sockets, event loop, or threads; everything around it is the transport's job.
-
-| Dispatch core — shared by every implementation | Transport layer — per implementation |
-|------------------------------------------------|--------------------------------------|
-| envelope parse + validation; the dispatch state machine | connection accept; framing; the event / read loop |
-| method routing; the authorize → handler → audit pipeline | the `session → connection` registry and message routing |
-| session lifecycle + gate; response/notification construction | draining the outbound queue to the wire; backpressure |
-
-Two channels move messages over a connection:
-
-- **Request channel** — a request is dispatched to a handler and a response comes back.
-  Every request carries a UUID `id`, and responses correlate by it, so many requests can
-  be in flight on one connection at once.
-- **Back channel** — server→client messages that aren't responses: `$/progress` for an
-  in-flight request, and pub/sub topic events. The core enqueues them; the transport
-  drains that queue and routes each message to the right connection by its session id.
-
-```
-  request channel  (client -> server -> reply)
-
-     client --frame-->  transport  -->  dispatch core  -->  handler
-                                                              |
-     client <--frame--  transport  <--  outbound queue  <--  response
-
-  back channel  (server -> client:  $/progress, pub/sub)
-
-     handler progress / topic publish
-          |  enqueue
-          v
-     outbound queue  -->  transport  -->  client     (routed to a connection
-                                                       by its session id)
-```
-
-A connection is **stateful**: it selects a protocol, authenticates, then issues calls,
-walking the session lifecycle `NONE → INIT → ESTABLISHED → CLOSED` (non-pre-auth methods
-are gated until `ESTABLISHED`). A typical client↔server exchange:
-
-```
-   client                                    server
-     |  $/negotiate {protocol}         -----> bind a named protocol
-     |  {protocol, server, available}  <-----
-     |  $/sessionSetup {credentials}   -----> authenticate
-     |  result (-> ESTABLISHED | INIT) <-----
-     |  example.method {params}        -----> authorize -> handler -> audit
-     |  $/progress {...}               <-----    (back channel, live)
-     |  result                         <-----
-     |  events  (subscribe)            -----> register a subscription
-     |  sub_id                         <-----
-     |  events {payload}               <-----    (back channel, per publish)
-     |  $/cancelRequest {sub_id}       -----> drop the subscription
-     |  true                           <-----
-```
-
-The full per-request pipeline (parse → resolve id → control-message intercept → method
-lookup → session gate → params → **authorize → handler → audit** → response), the
-control-message semantics, the concurrency contract, and the raw-fd transfer handshake
-are specified in the language-agnostic
-[ARCHITECTURE.md](ARCHITECTURE.md) — the contract every implementation follows.
-
-## Implementations
-
-- **[`python/`](python/)** — the reference implementation:
-  - `truenas_pyjsonrpc` — the transport-agnostic dispatch core (pure Python, on
-    [msgspec](https://jcristharif.com/msgspec/)).
-  - `truenas_pyjsonrpc_server` — a turnkey asyncio AF_UNIX/TCP/WebSocket server.
-  - `truenas_pyjsonrpc_client` — a thread-safe client + a typed-client generator.
-  - Quickstart, full API docs, examples, and the Python integration guide
-    ([python/truenas_pyjsonrpc/ARCHITECTURE.md](python/truenas_pyjsonrpc/ARCHITECTURE.md))
-    all live there.
-- **[`rust/`](rust/)** — *in progress*: the dispatch core (`truenas-jsonrpc`) plus the
-  query-filter engine (`truenas-filter`), A/B-verified byte-for-byte against the Python
-  reference. Two deliberate deviations — `query-options.select` and the `~` regex operator
-  are unsupported (see [rust/README.md](rust/README.md#filter-engine-deviations)).
-- **`go/`** — *planned* (not yet present).
-
-New language implementations target the same wire contract above, so they interoperate
-with the Python server and client.
-
-## Repository layout
-
-```
-.
-├── README.md                       # this file — language-agnostic overview
-└── python/                         # the Python reference implementation
-    ├── README.md                   # Python library docs + quickstart
-    ├── ROADMAP.md                  # implementation / feature roadmap
-    ├── pyproject.toml
-    ├── debian/                     # Debian packaging (python3-truenas-pyjsonrpc)
-    ├── truenas_pyjsonrpc/          # dispatch core (+ ARCHITECTURE.md)
-    ├── truenas_pyjsonrpc_server/   # asyncio server
-    ├── truenas_pyjsonrpc_client/   # thread-safe client
-    ├── codegen.py                  # typed-client generator
-    ├── examples/
-    └── tests/
-```
-
-## Packaging
-
-The Python implementation builds a single Debian binary package
-`python3-truenas-pyjsonrpc` (all three importable packages) from `python/debian/`:
+## Build & test
 
 ```sh
-cd python && dpkg-buildpackage -us -uc -b
+cargo test --all-features --locked          # spine + pub/sub + filterable + both A/B goldens
+cargo clippy --all-targets --all-features -- -D warnings
+./coverage.sh 100                            # native source-based coverage, gated at 100%
 ```
 
-`python3-msgspec` is a hard dependency; `python3-websockets` is **`Suggests`** (only
-needed for the WebSocket transport — everything else runs on msgspec alone).
+Regenerating the golden corpora (requires the Python reference + the installed
+`truenas_pyfilter`):
 
-## References
+```sh
+python3 conformance/generate.py                  # protocol A/B golden
+python3 truenas-filter/conformance/generate.py   # filter-engine A/B golden
+```
 
-- [JSON-RPC 2.0 specification](https://www.jsonrpc.org/specification) — the base protocol
-  this stack refines.
-- [Language Server Protocol 3.18 specification](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/)
-  — inspiration for the `$/` control-message namespace, progress, cancellation, and the
-  extended error-code ranges.
-- This stack's protocol architecture — component boundary, dispatch flow, control
-  messages, the transfer handshake, error codes: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
-- The Python implementation's API mapping:
-  [python/truenas_pyjsonrpc/ARCHITECTURE.md](python/truenas_pyjsonrpc/ARCHITECTURE.md).
+## Code generation (`truenas-jsonrpc-codegen`)
 
-## License
+A consumer defines a `json-idl/` directory of JSON-Schema specs and generates typed server
+bindings (structs + a `Handlers` trait + `register()`), a typed client, and an OpenRPC
+document — via a `build.rs` build-dependency (prost/tonic-build style):
 
-MIT — see [LICENSE](LICENSE).
+```rust
+// server-gen/build.rs
+truenas_jsonrpc_codegen::Build::new().json_idl("../json-idl").emit_server().unwrap();
+```
+
+The generated server **audits on by default** — every `audit: true` method (and the `$/` control
+ops) emits to the Linux kernel audit subsystem via `truenas-audit`; a top-level `audit` block in
+the spec configures the service / queue bound or turns it off (`audit.enabled = false`).
+
+See `truenas-jsonrpc-codegen/README.md` for the dialect, the consumer crate layout
+(`json-idl/` + `server-gen` + `client-gen` + your own crate), and the packaging caveat. The
+generated OpenRPC is byte-for-byte equivalent (A/B-tested) to `api-specs/gen.py`'s output.
