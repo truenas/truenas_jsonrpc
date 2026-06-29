@@ -2,7 +2,8 @@
 //! (RFC 5531 — "RPC: Remote Procedure Call Protocol Specification Version 2", the canonical
 //! XDR record-marking RPC), served over the *same* per-connection seam as the default JSON-RPC
 //! engine. It exists to prove the boundary is genuinely protocol-agnostic — a **peer** wire, not a
-//! reframing of JSON-RPC.
+//! reframing of JSON-RPC. The wire format is validated against FreeBSD's in-tree ONC RPC
+//! (`include/rpc/rpc_msg.h`, `include/rpc/auth.h`, `lib/libc/xdr/xdr_rec.c`, `lib/libc/rpc`).
 //!
 //! It shares exactly two things with the rest of the crate: the **Codec** (layer 3, `truenas-xdr`)
 //! and the per-connection seam. Everything else is its own stack:
@@ -10,7 +11,8 @@
 //!     more fragments, each a 4-byte header (high bit = last-fragment, low 31 bits = fragment
 //!     length) over that many bytes. (The JSON-RPC engine frames with a plain 4-byte length prefix;
 //!     this is a deliberately *different* framing, so the seam can't be silently coupled to one.)
-//!   * **Envelope (layer 4):** the ONC RPC `rpc_msg` call/reply union, with the `AUTH_NONE` flavor.
+//!   * **Envelope (layer 4):** the ONC RPC `rpc_msg` call/reply union; the server accepts the
+//!     `AUTH_NONE` and `AUTH_SYS` credential flavors and rejects others with `AUTH_REJECTEDCRED`.
 //!   * **Dispatch (layer 5):** its own tiny program — a `NULL` probe plus one demo procedure —
 //!     routed on `(program, version, procedure)`, independent of the JSON-RPC method registry.
 //!
@@ -40,16 +42,22 @@ const MSG_REPLY: u32 = 1;
 /// `reply_stat` discriminants.
 const MSG_ACCEPTED: u32 = 0;
 const MSG_DENIED: u32 = 1;
-/// `reject_stat::RPC_MISMATCH` (the only rejection this engine emits).
+/// `reject_stat` discriminants.
 const REJECT_RPC_MISMATCH: u32 = 0;
+const REJECT_AUTH_ERROR: u32 = 1;
 /// `accept_stat` discriminants.
 const ACCEPT_SUCCESS: u32 = 0;
 const ACCEPT_PROG_UNAVAIL: u32 = 1;
 const ACCEPT_PROG_MISMATCH: u32 = 2;
 const ACCEPT_PROC_UNAVAIL: u32 = 3;
 const ACCEPT_GARBAGE_ARGS: u32 = 4;
-/// `auth_flavor::AUTH_NONE` — the credential/verifier flavor this demo program accepts and emits.
+/// `auth_flavor`: this demo accepts `AUTH_NONE` and `AUTH_SYS` (whose uid/gid it does not use) and
+/// rejects other flavors — mirroring FreeBSD's `_authenticate` (`lib/libc/rpc/svc_auth.c`). Replies
+/// always carry an `AUTH_NONE` verifier (as a real server does for these flavors).
 const AUTH_NONE: u32 = 0;
+const AUTH_SYS: u32 = 1;
+/// `auth_stat::AUTH_REJECTEDCRED` — the reason returned for an unsupported credential flavor.
+const AUTH_REJECTEDCRED: u32 = 2;
 
 // --- The demo program -------------------------------------------------------
 
@@ -107,6 +115,11 @@ async fn read_record<R: AsyncRead + Unpin>(
             }
         }
         let header = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]);
+        // A zero header (length 0, not last-fragment) is malformed — FreeBSD's set_input_fragment
+        // (lib/libc/xdr/xdr_rec.c) rejects it outright rather than spin on empty fragments.
+        if header == 0 {
+            return None;
+        }
         let last = header & RM_LAST != 0;
         let frag_len = (header & RM_LEN_MASK) as usize;
         if record.len().saturating_add(frag_len) > limit {
@@ -146,6 +159,7 @@ struct Call<'a> {
     prog: u32,
     vers: u32,
     procedure: u32,
+    cred_flavor: u32,
     args: &'a [u8],
 }
 
@@ -153,9 +167,18 @@ struct Call<'a> {
 /// there is nothing to reply to, so the caller closes the connection.
 fn parse_call(wire: &[u8]) -> Option<Call<'_>> {
     let (p, args) = from_bytes_with::<CallPrefix>(wire, Strictness::Lenient).ok()?;
-    // p = (xid, mtype, rpcvers, prog, vers, proc, cred.flavor, cred.body, verf.flavor, verf.body);
-    // the AUTH_NONE creds are accepted and ignored by this demo program.
-    Some(Call { xid: p.0, mtype: p.1, rpcvers: p.2, prog: p.3, vers: p.4, procedure: p.5, args })
+    // p = (xid, mtype, rpcvers, prog, vers, proc, cred.flavor, cred.body, verf.flavor, verf.body).
+    // The credential/verifier bodies are not used by this demo's accepted flavors.
+    Some(Call {
+        xid: p.0,
+        mtype: p.1,
+        rpcvers: p.2,
+        prog: p.3,
+        vers: p.4,
+        procedure: p.5,
+        cred_flavor: p.6,
+        args,
+    })
 }
 
 /// Build an `accepted_reply` with the `AUTH_NONE` verifier: `xid · REPLY · MSG_ACCEPTED ·
@@ -178,6 +201,12 @@ fn reply_prog_mismatch(xid: u32, low: u32, high: u32) -> Vec<u8> {
 fn reply_rpc_mismatch(xid: u32, low: u32, high: u32) -> Vec<u8> {
     let env = (xid, MSG_REPLY, MSG_DENIED, REJECT_RPC_MISMATCH, low, high);
     to_bytes(&env).expect("rpc-mismatch reply encodes")
+}
+
+/// Build a `MSG_DENIED` / `AUTH_ERROR` reply carrying the `auth_stat` reason.
+fn reply_auth_error(xid: u32, why: u32) -> Vec<u8> {
+    let env = (xid, MSG_REPLY, MSG_DENIED, REJECT_AUTH_ERROR, why);
+    to_bytes(&env).expect("auth-error reply encodes")
 }
 
 /// Route a well-formed call to the demo program and build its reply.
@@ -211,6 +240,11 @@ fn handle_record(wire: &[u8]) -> Option<Vec<u8>> {
     }
     if call.rpcvers != RPC_VERSION {
         return Some(reply_rpc_mismatch(call.xid, RPC_VERSION, RPC_VERSION));
+    }
+    // Authentication precedes program/version matching (cf. FreeBSD svc_getreq_common): accept the
+    // AUTH_NONE / AUTH_SYS flavors, reject others with AUTH_REJECTEDCRED.
+    if call.cred_flavor != AUTH_NONE && call.cred_flavor != AUTH_SYS {
+        return Some(reply_auth_error(call.xid, AUTH_REJECTEDCRED));
     }
     Some(route(call.xid, call.prog, call.vers, call.procedure, call.args))
 }
@@ -371,6 +405,38 @@ mod tests {
             parse_reply(&handle_record(&to_bytes(&prefix).unwrap()).unwrap());
         assert_eq!((reply_stat, reject_stat), (MSG_DENIED, REJECT_RPC_MISMATCH));
         assert_eq!(from_bytes::<(u32, u32)>(&body).unwrap(), (RPC_VERSION, RPC_VERSION));
+    }
+
+    #[test]
+    fn unsupported_auth_flavor_is_denied() {
+        // AUTH_DH (3) credentials are rejected: MSG_DENIED / AUTH_ERROR / AUTH_REJECTEDCRED.
+        let prefix: CallPrefix = (
+            1, MSG_CALL, RPC_VERSION, PROG, VERS, PROC_NULL, 3, VarOpaque(Vec::new()), AUTH_NONE,
+            VarOpaque(Vec::new()),
+        );
+        let (reply_stat, reject_stat, body) =
+            parse_reply(&handle_record(&to_bytes(&prefix).unwrap()).unwrap());
+        assert_eq!((reply_stat, reject_stat), (MSG_DENIED, REJECT_AUTH_ERROR));
+        assert_eq!(from_bytes::<u32>(&body).unwrap(), AUTH_REJECTEDCRED);
+    }
+
+    #[test]
+    fn auth_sys_credentials_are_accepted() {
+        // AUTH_SYS (1) is accepted (its uid/gid is unused) — the NULL probe still succeeds.
+        let prefix: CallPrefix = (
+            1, MSG_CALL, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_SYS, VarOpaque(vec![0, 0, 0, 0]),
+            AUTH_NONE, VarOpaque(Vec::new()),
+        );
+        let (_, accept_stat, _) = parse_reply(&handle_record(&to_bytes(&prefix).unwrap()).unwrap());
+        assert_eq!(accept_stat, ACCEPT_SUCCESS);
+    }
+
+    #[tokio::test]
+    async fn zero_fragment_header_is_rejected() {
+        // header == 0 (length 0, not last-fragment) is malformed → the record read closes.
+        let mut r: &[u8] = &[0, 0, 0, 0];
+        let mut acc = BytesMut::new();
+        assert!(read_record(&mut r, &mut acc, 4096).await.is_none());
     }
 
     #[test]

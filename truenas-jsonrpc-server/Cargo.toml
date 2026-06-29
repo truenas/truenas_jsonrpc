@@ -64,9 +64,6 @@ passthrough = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
-# The `tests/oncrpc.rs` client encodes/decodes ONC RPC frames directly (already a normal dep above;
-# repeated here so the separate integration-test crate can name it).
-truenas-xdr = { path = "../truenas-xdr" }
 
 # This crate makes syscalls (SO_PEERCRED now; kTLS / SCM_RIGHTS in later phases), so it cannot
 # use the workspace's `unsafe_code = "forbid"`. It denies unsafe by default and allows it only
