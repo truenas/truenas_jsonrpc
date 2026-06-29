@@ -1,5 +1,5 @@
-# `truenas-jsonrpc-server` — the optional async server transport for `truenas-jsonrpc`
-# (mirrors Python's `truenas_pyjsonrpc_server`). Length-prefixed JSON framing + `$/negotiate`
+# `truenas-jsonrpc-server` — the optional async server transport for `truenas-jsonrpc`.
+# Length-prefixed JSON framing + `$/negotiate`
 # over AF_UNIX and plain TCP; TLS/kTLS and WebSocket arrive behind opt-in features. It is NOT
 # in the workspace `default-members` (a plain `cargo build`/`coverage.sh` skips it, like the
 # pyo3 bridge) — the dispatch core stays transport-free; depend on this crate to run a server.
@@ -42,7 +42,7 @@ foreign-types = { version = "0.3", optional = true } # ForeignType::as_ptr for t
 # upgrade request. Gated on `websocket` (its only use), so a non-WS build pulls no http.
 http = { version = "1", optional = true }
 # WebSocket transport: JSON-RPC framed as WebSocket messages (the library owns the framing, so
-# no raw-fd transfer). Mirrors Python's optional `websockets` extra.
+# no raw-fd transfer).
 tokio-tungstenite = { version = "0.24", optional = true }
 # `FuturesUnordered` drives a connection's in-flight dispatches on its own task (no per-request
 # spawn); also Stream/Sink + `.split()` for the WS stream (the `websocket` feature).

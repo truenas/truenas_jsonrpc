@@ -1,9 +1,8 @@
 //! Port of FreeBSD's XDR conformance test — `contrib/netbsd-tests/lib/libc/rpc/t_xdr.c`
 //! plus its `h_testbits.x` IDL (NetBSD-derived; built in FreeBSD as the `xdr_test` ATF
-//! test). This is an **independent, canonical Sun-RPC XDR** vector — not generated from
-//! this project's Zig/Python pipeline — so it cross-validates the codec against the
-//! reference implementation. The C test decodes `xdrdata[]`, then re-encodes and
-//! `memcmp`s against it; we assert both directions byte-for-byte.
+//! test). This is an **independent, canonical Sun-RPC XDR** vector, so it cross-validates
+//! the codec against the reference implementation. The C test decodes `xdrdata[]`, then
+//! re-encodes and `memcmp`s against it; we assert both directions byte-for-byte.
 //!
 //! The interesting case is `medenum ME_NEG = -1234`: XDR enums are signed 32-bit, so a
 //! negative discriminant must encode as `0xfffffb2e` (two's complement) — which exercises

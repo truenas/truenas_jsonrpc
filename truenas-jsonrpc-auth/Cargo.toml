@@ -1,6 +1,6 @@
 # `truenas-jsonrpc-auth` — the optional authentication layer for `truenas-jsonrpc`.
 #
-# Models the TrueNAS middleware auth mixin (`truenas_pyjsonrpc/mixins/auth/`) without PAM: an
+# Models the TrueNAS middleware auth mixin without PAM: an
 # `AuthStack` of pluggable challenge-response `Mechanism`s wired onto the core's
 # `$/sessionSetup` / `$/sessionSetupContinue` seam. AF_UNIX peer-cred is the default; TCP
 # mechanisms (mTLS, SCRAM-SHA-512-PLUS, GSSAPI, passthrough) are user-declared. Crypto goes
@@ -29,7 +29,7 @@ serde_json = { workspace = true }
 # and GSSAPI (token base64). Off by default; peercred/mTLS pull no openssl.
 openssl = { version = "0.10", optional = true }
 # The keyring-backed `CredentialSource` (the `keyring` feature): looks SCRAM verifiers up in the
-# kernel keyring written by `truenas-keyring` / Python `truenas_keyring`. Optional — an embedder
+# kernel keyring written by `truenas-keyring` or the `truenas_keyring` extension. Optional — an embedder
 # may supply its own `CredentialSource` (in-memory, an RPC to middleware, …) instead. The same
 # crate also backs the `server_roles` (uid → roles) lookup for authorization.
 truenas-keyring = { path = "../truenas-keyring", optional = true }

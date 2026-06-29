@@ -1,8 +1,7 @@
 # truenas-filter
 
-The TrueNAS middlewared `query-filters` / `query-options` engine. A Rust port of the
-`truenas_pyfilter` C extension. Used by `truenas-jsonrpc`'s filterable methods; also usable
-standalone.
+The TrueNAS middlewared `query-filters` / `query-options` engine, matching the `truenas_pyfilter`
+C engine byte-for-byte. Used by `truenas-jsonrpc`'s filterable methods; also usable standalone.
 
 ## Public API
 
@@ -20,7 +19,7 @@ standalone.
 ## Semantics
 
 Byte-for-byte with the C engine (gated by a differential corpus in `tests/conformance/`):
-Python comparison rules (`==`/`!=` total with a `bool ⊂ int ⊂ float` numeric tower;
+the middleware's comparison rules (`==`/`!=` total with a `bool ⊂ int ⊂ float` numeric tower;
 `<`/`>`/… raise on incomparable operands), the operator set (`= != > >= < <= in nin rin rnin
 ^ !^ $ !$`, plus the `C` case-insensitive prefix), `OR`/`AND` nesting, dotted / indexed /
 `*`-wildcard / escaped-dot paths, and `order_by` (`-` / `nulls_first:` / `nulls_last:`,
@@ -33,7 +32,8 @@ The engine builds a `serde_json::Value` view of each row only for the fields a q
 
 - `query-options.select` is not supported (it is the only option that reshapes a row; omitting
   it keeps the row shape stable and the engine read-only).
-- The `~` regex operator is not supported (no byte-identical guarantee vs Python's `re`, and it
+- The `~` regex operator is not supported (no byte-identical guarantee against the middleware's
+  regex dialect, and it
   would pull in a regex dependency). Use `^`/`!^`/`$`/`!$` or `in`/`rin`.
 
 ## Dependencies

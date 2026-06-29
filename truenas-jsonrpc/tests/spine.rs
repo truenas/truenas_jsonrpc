@@ -143,7 +143,7 @@ async fn parse_and_structural_errors() {
 #[tokio::test]
 async fn invalid_params_precedes_not_authorized() {
     // `echo` requires a role the session lacks; a request with bad params must still get
-    // INVALID_PARAMS (decode runs before the authorization gate, matching Python).
+    // INVALID_PARAMS (decode runs before the authorization gate).
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
         .roles(Roles::new(["AUTH"]))
         .method(

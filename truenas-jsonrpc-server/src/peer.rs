@@ -1,7 +1,7 @@
 //! The connected peer's identity — the **Transport** layer (layer 1): the [`Transport`] kind,
 //! [`Peer`], and [`TransportPosture`]. Handed to the server's state-from-peer builder so the
 //! per-connection session state (the protocol's `S`) can carry the caller's credentials /
-//! address. Mirrors how Python's server sets `server_state` to the peer.
+//! address.
 
 use std::net::SocketAddr;
 

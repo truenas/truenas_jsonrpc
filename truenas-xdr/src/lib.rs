@@ -1,6 +1,5 @@
 //! `truenas-xdr` — a byte-exact, dependency-light **serde XDR (RFC 4506)** codec (the **Codec**
-//! layer, layer 3, of the `ARCHITECTURE.md` layer stack — the binary TXDR wire), the Rust peer of
-//! the Zig `xdr/xdr.zig` codec and Python's `truenas_pyjsonrpc.xdr`.
+//! layer, layer 3, of the `ARCHITECTURE.md` layer stack — the binary TXDR wire).
 //!
 //! XDR is **not** self-describing, so this is a bincode-style codec: encode walks any
 //! `Serialize` value to canonical big-endian bytes; decode is driven entirely by the

@@ -1,5 +1,5 @@
 //! JSON-Schema node → Rust type. A string-enum becomes a named generated `enum` (Rust has
-//! no anonymous enums); those definitions accumulate in [`TypeCtx`]. Ports `gen.py::zig_type`.
+//! no anonymous enums); those definitions accumulate in [`TypeCtx`].
 
 use serde_json::Value;
 

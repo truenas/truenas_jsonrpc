@@ -7,9 +7,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::wire::AuthResponse;
 
-/// An authenticated identity — opaque to the framework (the application decides its shape, as in
-/// the Python implementation where `server_state_internal` is untyped). Conventionally a JSON object such
-/// as `{ "username": …, "uid": …, "api_key_id": … }`.
+/// An authenticated identity — opaque to the framework (the application decides its shape).
+/// Conventionally a JSON object such as `{ "username": …, "uid": …, "api_key_id": … }`.
 pub type Identity = serde_json::Value;
 
 /// What a mechanism produced this round.

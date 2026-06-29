@@ -16,7 +16,7 @@ env:
 
 jobs:
   # Build + lint + test gate. clippy runs with `-D warnings`, so the workspace lint
-  # policy (rust/Cargo.toml: `unsafe_code = "forbid"`, `missing_docs = "warn"`) is
+  # policy (Cargo.toml: `unsafe_code = "forbid"`, `missing_docs = "warn"`) is
   # enforced — a missing doc or any clippy lint fails the build.
   clippy-and-test:
     name: Rust core — build, clippy, A/B conformance
@@ -32,15 +32,10 @@ jobs:
       - name: Clippy (all targets, deny warnings)
         run: cargo clippy --all-targets --all-features --locked -- -D warnings
 
-      # Runs the unit/integration tests, including tests/conformance.rs — the A/B
-      # differential check that replays the committed golden corpus
-      # (truenas-jsonrpc/tests/conformance/golden.json) through the Rust dispatch core
-      # and asserts it matches the Python reference's recorded responses + audits.
-      #
-      # This is the fast pre-check. The golden is (re)generated from the repo's *real*
-      # Python — with the full truenas_pyfilter/SCRAM/PAM stack — and drift-checked in the
-      # QEMU VM pipeline (qemu-test.yml, scripts/qemu-4b-rust.sh), which is also where
-      # Rust<->Python client/server conformance will run. No Python is needed here.
+      # Runs the unit/integration tests, including tests/conformance.rs — the differential
+      # check that replays the committed frozen golden corpus
+      # (truenas-jsonrpc/tests/conformance/golden.json) through the Rust dispatch core and
+      # asserts byte-stable responses + audit records. No external dependency.
       - name: Test
         run: cargo test --all-features --locked
 

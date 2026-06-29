@@ -1,5 +1,5 @@
 //! TLS transport (the **Transport** layer, layer 1) over the **system** OpenSSL (the opt-in `tls`
-//! feature), in two configurable modes (see [`TlsMode`]) — a port of Python's `_ktls` plus the
+//! feature), in two configurable modes (see [`TlsMode`]) — kernel TLS plus the
 //! ordinary userspace-TLS path.
 //!
 //! - **Kernel TLS** ([`TlsMode::Kernel`]): only the *handshake* touches userspace OpenSSL

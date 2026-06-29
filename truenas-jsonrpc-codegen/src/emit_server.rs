@@ -1,4 +1,4 @@
-//! Server emit — the Rust analogue of `rpc_gen.zig`: typed `$def` structs, a `Handlers<S>`
+//! Server emit — typed `$def` structs, a `Handlers<S>`
 //! trait (the consumer's binding point; a missing/mistyped method is a compile error), and
 //! a `register()` that wires each method onto the core's builder. Fully-qualified paths
 //! (`truenas_jsonrpc::…`, `serde::…`) so the `include!`d output needs no `use`.

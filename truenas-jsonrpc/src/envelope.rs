@@ -1,7 +1,7 @@
 //! The **Envelope** layer (layer 4) — permissive inbound envelope parsing + response construction.
 //!
-//! Mirrors Python's `JSONRPCEnvelope` (every field decoded permissively, then validated
-//! in code) and `protocol.py::_dispatch_one` steps 1–3: malformed JSON → `INVALID_JSON`;
+//! Every field is decoded permissively, then validated in code (steps 1–3 of the dispatch
+//! flow): malformed JSON → `INVALID_JSON`;
 //! a valid non-object → `INVALID_REQUEST`; a present `id` must be a canonical UUID string;
 //! `jsonrpc == "2.0"`; `method` a non-empty string. `parse` validates a single request object —
 //! used both for a lone request and for each element of a batch. A top-level **array** is a
@@ -21,7 +21,7 @@ pub(crate) struct ParsedRequest {
     pub params: Option<Box<RawValue>>,
 }
 
-/// A structural parse failure. Python **always** replies to these (parse/id/jsonrpc/
+/// A structural parse failure. These are **always** replied to (parse/id/jsonrpc/
 /// method errors are never suppressed, even for an id-less message), so a `ParseError`
 /// is always turned into a wire reply.
 pub(crate) struct ParseError {
@@ -47,11 +47,9 @@ fn as_json_string(raw: &RawValue) -> Option<String> {
     serde_json::from_str::<String>(raw.get()).ok()
 }
 
-/// True if `value` is a canonical hyphenated UUID string (case-insensitive) — the exact
-/// rule Python's `_is_uuid` enforces (`str(uuid.UUID(value)) == value.lower()`).
+/// True if `value` is a canonical hyphenated UUID string (case-insensitive).
 pub(crate) fn is_canonical_uuid(value: &str) -> bool {
-    // Canonical hyphenated UUID (case-insensitive) — equivalent to Python's `_is_uuid`
-    // (`str(uuid.UUID(value)) == value.lower()`) but allocation-free and parse-free.
+    // Canonical hyphenated UUID (case-insensitive), checked allocation-free and parse-free.
     let b = value.as_bytes();
     if b.len() != 36 {
         return false;

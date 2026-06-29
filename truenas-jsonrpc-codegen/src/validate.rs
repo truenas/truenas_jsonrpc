@@ -1,7 +1,6 @@
-//! Spec validation — ports the cross-cutting rules from `gen.py::validate` /
-//! `API_SPEC_SCHEMA` (the structural `additionalProperties:false` / required-field rules are
-//! enforced by serde `deny_unknown_fields` at parse time; type-mappability is checked at
-//! generation by [`crate::typemap`]).
+//! Spec validation — the cross-cutting rules (the structural `additionalProperties:false` /
+//! required-field rules are enforced by serde `deny_unknown_fields` at parse time;
+//! type-mappability is checked at generation by [`crate::typemap`]).
 
 use std::collections::HashMap;
 

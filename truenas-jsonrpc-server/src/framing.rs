@@ -1,16 +1,13 @@
-//! The **Framing** layer (layer 2) — length-prefixed framing over a byte stream, a port of Python's
-//! `truenas_pyjsonrpc_server.framing`.
+//! The **Framing** layer (layer 2) — length-prefixed framing over a byte stream.
 //!
 //! Each message is a **4-byte big-endian unsigned length** followed by exactly that many
 //! bytes of (compact) JSON. This is self-delimiting regardless of the payload bytes, so —
-//! unlike newline framing — it places no constraint on the JSON content. The 4-byte length
-//! prefix is byte-identical to the Python framing, so a Rust server and a Python client
-//! interoperate on the wire.
+//! unlike newline framing — it places no constraint on the JSON content.
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 /// Maximum bytes for a single inbound message payload; a larger declared length is rejected
-/// with [`FrameError::TooLarge`] before any payload is read. Matches Python's default.
+/// with [`FrameError::TooLarge`] before any payload is read.
 pub const DEFAULT_LIMIT: usize = 4 * 1024 * 1024; // 4 MiB
 
 const HEADER_SIZE: usize = 4;
@@ -66,8 +63,8 @@ pub fn frame(payload: &[u8]) -> Vec<u8> {
 }
 
 /// Read one length-prefixed message from `reader` and return its payload bytes, or `None` at
-/// EOF (a clean close between messages, or a truncated frame — treated as closed, like
-/// Python). Returns [`FrameError::TooLarge`] if the declared length exceeds `limit`.
+/// EOF (a clean close between messages, or a truncated frame — treated as closed).
+/// Returns [`FrameError::TooLarge`] if the declared length exceeds `limit`.
 pub async fn read_message<R: AsyncRead + Unpin>(
     reader: &mut R,
     limit: usize,

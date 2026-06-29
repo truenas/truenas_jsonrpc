@@ -6,8 +6,7 @@
 //! The actual PyO3 implementation (acquire the GIL, call the Python callable, convert) lives
 //! in a separate opt-in crate (`truenas-jsonrpc-pyo3`); this trait is what it implements,
 //! and a closure `impl` lets the core's python pipeline be unit-tested with a mock — with no
-//! libpython linked. Mirrors the Zig `PyDispatcher` seam + `api-specs/gen.py`'s
-//! `dispatch(name, params_json, session_json) -> (status, payload, audit)` contract.
+//! libpython linked.
 
 use serde_json::value::RawValue;
 

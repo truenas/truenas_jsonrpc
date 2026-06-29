@@ -1,18 +1,18 @@
-//! A/B differential conformance test — the gating proof of wire-compatibility.
+//! Differential conformance test — the gating proof of wire-stability.
 //!
-//! `rust/conformance/generate.py` runs a fixed request corpus through the **Python**
-//! reference implementation and records responses + audit records in
-//! `conformance/golden.json`. This test builds the **same** two reference protocols
-//! (`open` and `gated`) in Rust, replays each corpus request through `dispatch`, and
-//! asserts the result matches Python's, structurally.
+//! Replays a committed, frozen request corpus (`conformance/golden.json`) through the Rust
+//! dispatch core: it builds two reference protocols (`open` and `gated`), runs each corpus
+//! request through `dispatch`, and asserts the response + audit records match the recorded
+//! golden, structurally.
 //!
 //! Comparison rule: success responses must match in full; error responses must match
-//! on `{jsonrpc, id, error.code, error.message}` — `error.data` (the implementation's
-//! free-form decode/validation detail) is stripped before comparison, since msgspec and
-//! serde phrase it differently. Audit records (method, redacted params, message) must match
-//! too — the response is validated via the per-step comparison, not re-checked in the record.
+//! on `{jsonrpc, id, error.code, error.message}` — `error.data` (the free-form
+//! decode/validation detail) is stripped before comparison. Audit records (method, redacted
+//! params, message) must match too — the response is validated via the per-step comparison,
+//! not re-checked in the record.
 //!
-//! Keep `build_open`/`build_gated` here in sync with the factories in `generate.py`.
+//! `build_open`/`build_gated` are the reference factories the golden was recorded against; the
+//! golden is now a frozen committed fixture.
 
 use std::sync::{Arc, Mutex};
 
@@ -87,7 +87,7 @@ impl Outbound for VecSink {
     }
 }
 
-/// Id generator pinned to match `generate.py`'s pinned `uuid4`, so a server-minted
+/// Id generator pinned to the same `uuid4` the golden was recorded with, so a server-minted
 /// subscription id is the same constant on both sides.
 #[derive(Clone, Copy)]
 struct FixedId(SessionId);
@@ -100,7 +100,7 @@ fn pinned() -> SessionId {
     "00000000-0000-4000-8000-000000000000".parse().unwrap()
 }
 
-/// The fixed source the `x.query` filterable reference method streams (matches `generate.py`).
+/// The fixed source the `x.query` filterable reference method streams (matches the golden).
 fn query_data() -> Vec<Value> {
     vec![json!({"id": 1, "name": "a"}), json!({"id": 2, "name": "b"}), json!({"id": 3, "name": "a"})]
 }
@@ -251,7 +251,7 @@ async fn run_steps(
         }
         dispatched += 1;
     }
-    // Server→client notifications the publishes fanned out (FIFO — same order Python drains).
+    // Server→client notifications the publishes fanned out (FIFO).
     let got = notifs.lock().unwrap();
     assert_eq!(expected_notifs.len(), got.len(), "{name}: notification count");
     for (i, (e, g)) in expected_notifs.iter().zip(got.iter()).enumerate() {
@@ -261,10 +261,10 @@ async fn run_steps(
 }
 
 #[tokio::test]
-async fn differential_against_python_reference() {
+async fn differential_against_frozen_golden() {
     let golden: Value = serde_json::from_str(GOLDEN).expect("golden.json parses");
     let cases = golden["cases"].as_array().expect("cases array");
-    assert!(!cases.is_empty(), "golden corpus is empty — run rust/conformance/generate.py");
+    assert!(!cases.is_empty(), "golden corpus is empty");
 
     // Guards against a silently-vacuous run (empty corpus / audits never exercised).
     let mut total_steps = 0usize;

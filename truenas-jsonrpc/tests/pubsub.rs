@@ -1,7 +1,6 @@
 //! Pub/Sub (SERVER_CLIENT) mechanics: registering a topic, subscribe → sub-id ack,
 //! `send_notification` fan-out via the per-connection [`Outbound`] sink, unsubscribe via
 //! `$/cancelRequest`, `unsubscribe_all`/`close_session`, and the publish/authz error paths.
-//! Mirrors Python `tests/test_pubsub.py`.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -298,7 +297,7 @@ async fn close_session_drops_only_that_sessions_subs() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_subscribe_then_publish() {
     // N connections subscribe concurrently (contending on the registry mutex); one publish
-    // must then reach all N. Mirrors Python's test_concurrent_subscribe_then_publish — here
+    // must then reach all N. Here
     // every connection shares one sink, so the delivered count is the observable proxy for
     // "all N registered". (Default UuidGen → distinct sub-ids; pinning would collide.)
     let proto = Arc::new(events_proto());

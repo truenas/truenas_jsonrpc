@@ -1,5 +1,4 @@
-//! OpenRPC 1.3.2 emit — ports `gen.py::generate_openrpc` (+ `python/openrpc_gen.py`). The
-//! cross-implementation A/B compares the parsed `serde_json::Value`s (order-insensitive for
+//! OpenRPC 1.3.2 emit. The A/B compares the parsed `serde_json::Value`s (order-insensitive for
 //! object keys), so this builds a semantically-equal document; method/param/required arrays
 //! preserve order (they are order-significant).
 
@@ -203,7 +202,7 @@ fn query_param_descriptors() -> Vec<Value> {
 }
 
 fn error_components() -> Value {
-    // The protocol-wide error taxonomy (mirrors `gen.py::_ERROR_CODES`, Title-cased). Fixed
+    // The protocol-wide error taxonomy (Title-cased). Fixed
     // constants, so the messages are spelled out rather than computed.
     const CODES: &[(&str, i32, &str)] = &[
         ("INVALID_JSON", -32700, "Invalid Json"),

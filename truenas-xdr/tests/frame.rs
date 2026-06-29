@@ -1,6 +1,5 @@
 //! TXDR frame tests, including byte-exact validation against the `xdr_add` golden vector
-//! from `truenas_jsonrpc/zig/conformance/golden.json` (proving the frame + codec match the
-//! cross-language wire). The full 7-case sweep lives in `conformance.rs`.
+//! (proving the frame + codec match the wire). The full 7-case sweep lives in `conformance.rs`.
 
 use serde::{Deserialize, Serialize};
 use truenas_xdr::frame::{

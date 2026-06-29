@@ -1,14 +1,12 @@
 # truenas_jsonrpc — protocol architecture
 
-The **language-agnostic protocol reference** for this stack: the dispatch-core/transport
-boundary, the session state machine, the per-request dispatch flow, the `$/` control
-messages, the server-integration contract, the raw-fd bulk-transfer handshake, and the
-error taxonomy. Every implementation — the [Python reference implementation](python/),
-and future Rust/Go ports — targets this contract, so they interoperate on the wire.
+The **protocol reference** for this stack: the dispatch-core/transport boundary, the session
+state machine, the per-request dispatch flow, the `$/` control messages, the server-integration
+contract, the raw-fd bulk-transfer handshake, and the error taxonomy — the wire contract the Rust
+implementation targets.
 
-For the Python implementation's concrete API mapping (the `dispatch()` /
-`poll_notification()` seam, handler signatures, the encoder, kTLS setup) see
-[python/truenas_pyjsonrpc/ARCHITECTURE.md](python/truenas_pyjsonrpc/ARCHITECTURE.md).
+For the Rust implementation's concrete API mapping (the `dispatch()` seam, handler signatures, the
+encoder, kTLS setup) see [truenas-jsonrpc/ARCHITECTURE.md](truenas-jsonrpc/ARCHITECTURE.md).
 
 It is JSON-RPC 2.0 ([spec](https://www.jsonrpc.org/specification)) with deliberate
 refinements (§9), and borrows its control-message namespace, progress, cancellation, and
@@ -362,7 +360,7 @@ needs no protocol support.
 
 A protocol-level data channel *bound* to the command session — to skip re-auth, tie a
 transfer to session state, or cancel an in-flight transfer from the command channel — is a
-possible future extension (see [ROADMAP](python/ROADMAP.md)); it would share one
+possible future extension; it would share one
 connection-binding primitive with a separate back channel.
 
 ## 7. Query methods (filtering)
@@ -466,9 +464,9 @@ omits them (or sends `"params": {}`) gets the full, unfiltered list.
 
 - **Batch is a per-wire Envelope concern, on by default for JSON.** A top-level array is a JSON-RPC
   2.0 batch on the JSON wire (always-on — it is part of the protocol, not a toggle); an *empty*
-  array stays `INVALID_REQUEST` per spec, and a batch of only notifications draws no reply. This
-  **diverges from the Python reference** (which rejects all arrays) toward the standard — additive
-  and interop-safe (existing Python clients never send batches). Batching is not mandated by the
+  array stays `INVALID_REQUEST` per spec, and a batch of only notifications draws no reply. This is
+  additive toward the JSON-RPC 2.0 standard (an empty array still rejects, and no client relied on
+  non-empty arrays being rejected). Batching is not mandated by the
   dispatch core: a binary wire compounds differently, and the **wire-selection seam** (`is_xdr`
   today; a `dyn ProtocolEngine` in [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md),
   Gaps 3–4) keeps a future non-JSON framing unaffected.

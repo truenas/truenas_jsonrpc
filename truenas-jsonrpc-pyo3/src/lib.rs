@@ -6,7 +6,7 @@
 //! body's audit detail (`b""` for none).
 //!
 //! It speaks the raw CPython C-API directly through [`pyo3_ffi`] (no pyo3 framework, no
-//! proc-macros) — the Rust analogue of Zig's hand-declared `pybridge`. The Rust spine still does
+//! proc-macros). The Rust spine still does
 //! routing / the session gate / authorization / audit — only the body crosses the FFI. The body
 //! runs on the core's blocking pool (the GIL is held only inside a [`Gil`] guard, never across
 //! an `.await`), so GIL contention can't stall the async runtime. This crate is **opt-in**: the
@@ -22,9 +22,8 @@ use truenas_jsonrpc::{ErrorCode, JsonRpcError, PyDispatcher, PyOutcome, PyResult
 
 /// Bring up the embedded interpreter exactly once. After `Py_InitializeEx` the calling thread
 /// holds the GIL; `PyEval_SaveThread` releases it (and arms the per-thread GIL-state machinery)
-/// so any blocking-pool worker can later acquire it via [`Gil`]. Process-global, like Zig's
-/// single `Py_Initialize`; we never finalize (a long-running server), matching pyo3's
-/// `auto-initialize`.
+/// so any blocking-pool worker can later acquire it via [`Gil`]. Process-global; we never
+/// finalize (a long-running server), matching pyo3's `auto-initialize`.
 #[allow(unsafe_code)]
 fn ensure_initialized() {
     static INIT: Once = Once::new();
@@ -123,7 +122,7 @@ impl PyBridge {
     }
 
     /// Build the `(name, params, session)` argument tuple, call the Python `dispatch`, and map
-    /// its `(status, payload, audit)` return onto a [`PyResult`]. Mirrors Zig's `callLocked`.
+    /// its `(status, payload, audit)` return onto a [`PyResult`].
     /// Must run with the GIL held.
     #[allow(unsafe_code)]
     unsafe fn call_locked(&self, name: &str, params: &[u8], session: &[u8]) -> PyResult {
@@ -220,7 +219,7 @@ fn to_ssize(len: usize) -> ffi::Py_ssize_t {
 
 /// Copy a Python `bytes` object's contents into an owned `Vec` (so the result is independent of
 /// the Python object's lifetime). `None` if `obj` is null / not a `bytes`. Must run with the GIL
-/// held. Mirrors Zig's `extractBytes`.
+/// held.
 #[allow(unsafe_code)]
 unsafe fn extract_bytes(obj: *mut ffi::PyObject) -> Option<Vec<u8>> {
     if obj.is_null() {
@@ -237,7 +236,6 @@ unsafe fn extract_bytes(obj: *mut ffi::PyObject) -> Option<Vec<u8>> {
 
 /// Clear any pending Python error (printing the traceback to stderr — a bridge fault is a server
 /// bug, not a client one) and return the canonical INTERNAL_ERROR. Must run with the GIL held.
-/// Mirrors Zig's `clearAndInternal`.
 #[allow(unsafe_code)]
 unsafe fn clear_and_internal() -> PyResult {
     if !ffi::PyErr_Occurred().is_null() {

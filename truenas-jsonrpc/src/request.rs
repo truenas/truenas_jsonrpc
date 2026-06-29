@@ -1,6 +1,5 @@
 //! [`RequestCtx`] — the per-request handle a handler receives: progress emission,
-//! audit-detail accumulation, and cooperative cancellation. Mirrors Python's
-//! `RequestState`.
+//! audit-detail accumulation, and cooperative cancellation.
 
 use std::any::Any;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -250,7 +249,7 @@ impl<S> RequestCtx<S> {
     }
 
     /// Emit a `$/progress` notification for this request. A no-op for a notification
-    /// (no id) — mirrors Python.
+    /// (no id).
     pub fn update_progress(
         &self,
         percent: Option<f64>,

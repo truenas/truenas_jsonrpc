@@ -1,5 +1,4 @@
-//! Optional async **server transport** for [`truenas-jsonrpc`](truenas_jsonrpc) — the Rust
-//! peer of Python's `truenas_pyjsonrpc_server`.
+//! Optional async **server transport** for [`truenas-jsonrpc`](truenas_jsonrpc).
 //!
 //! The dispatch core is deliberately transport-free (you hand it bytes, it hands you bytes).
 //! This crate is the **Transport** (layer 1) and **Framing** (layer 2) of the `ARCHITECTURE.md`
@@ -8,8 +7,8 @@
 //! `$/cancelRequest` is read while a long handler runs, and pushing pub/sub notifications out
 //! through each session's [`Outbound`](truenas_jsonrpc::Outbound).
 //!
-//! The wire is **byte-compatible with the Python server**: a 4-byte big-endian length prefix
-//! framing compact JSON (see [`framing`]). AF_UNIX and plain TCP need no dependency beyond
+//! The wire is a 4-byte big-endian length prefix framing compact JSON (see [`framing`]).
+//! AF_UNIX and plain TCP need no dependency beyond
 //! tokio's networking; TLS/kTLS and WebSocket arrive behind opt-in features in later phases.
 //!
 //! This crate is excluded from the workspace default members (its socket / kTLS / SCM_RIGHTS

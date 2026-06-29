@@ -6,11 +6,9 @@ machine, the per-request dispatch flow, the `$/` control messages, the back-chan
 configuration points, and the contract a transport must satisfy — expressed against the
 Rust API (`JsonRpcProtocol::dispatch`, the `Outbound` sink, handler closures, …).
 
-> The **language-agnostic protocol contract** — the wire spec every implementation
-> follows — is the repo-root [ARCHITECTURE.md](../../ARCHITECTURE.md). The **Python**
-> implementation's equivalent of this document is
-> [python/truenas_pyjsonrpc/ARCHITECTURE.md](../../python/truenas_pyjsonrpc/ARCHITECTURE.md).
-> Read the root for the wire; read this for the Rust mapping.
+> The **protocol contract** — the wire spec this crate implements — is the repo-root
+> [ARCHITECTURE.md](../ARCHITECTURE.md). Read the root for the wire; read this for the
+> Rust mapping.
 
 It is JSON-RPC 2.0 with the deliberate refinements in the root doc (§9): UUID-only ids, by-name
 params only, reserved `rpc.`/`$/` namespaces, and JSON-RPC 2.0 batch on the JSON wire (an *empty*
@@ -18,7 +16,7 @@ array → `INVALID_REQUEST`).
 
 **Status.** This crate is the transport-agnostic **dispatch core**. The required spine —
 `$/sessionSetup` authentication and the normal method-call pipeline — is implemented and
-proven wire-compatible with the Python reference via a differential test (see §12).
+proven by a differential conformance test against a committed golden corpus (§12).
 Filterable/query methods, pub/sub fan-out, raw-fd transfers, the audit queue, and the
 transport/server/client crates are **planned** (§13).
 
@@ -60,7 +58,7 @@ thread. So the core offers **two method kinds**, and the author picks per method
 - **`JsonRpcMethod` (sync handler) — the default.** Covers the bulk of TrueNAS handlers,
   which block: ZFS `ioctl`s / `lzc_send`, file reads/writes, subprocess, and auth-stack
   crypto. Its whole per-request pipeline runs on a **`tokio::task::spawn_blocking`**
-  worker — the analogue of the Python server's `ThreadPoolExecutor`.
+  blocking-pool worker.
 - **`AsyncJsonRpcMethod` (async handler) — the niche.** For handlers that genuinely
   `.await` non-blocking work (an async service call, an async DB driver). It is **awaited
   inline** on the runtime; it must not block (offload any blocking/CPU work via its own
@@ -121,8 +119,7 @@ held across an `.await`); a setup handler writes it via `session.set_internal(s)
 
 ## 4. Per-request dispatch flow
 
-`dispatch(wire, &session)` runs, per message (mirrors the root §3 and the Python flow,
-so the two produce identical wire results — verified in §12):
+`dispatch(wire, &session)` runs, per message (follows the root §3 dispatch flow):
 
 1. **Parse** the envelope. Malformed JSON → `INVALID_JSON`; a valid non-object → `INVALID_REQUEST`
    (a top-level **array** is a JSON-RPC 2.0 batch — each element runs this flow; an *empty* array →
@@ -138,7 +135,7 @@ so the two produce identical wire results — verified in §12):
 8. **Session gate** (§3) — only when session setup is configured.
 9. **Decode + validate params** into the handler's `Accepts` (serde) → `INVALID_PARAMS`.
    This runs **before** authorization, so `INVALID_PARAMS` correctly precedes
-   `NOT_AUTHORIZED` (matching Python).
+   `NOT_AUTHORIZED`.
 10. **Authorize → run handler → encode result.** A handler returns
     `Err(JsonRpcError)` to choose a code; the result type guarantees a valid `Returns`.
 11. **Audit** when the method opts in (`audit`) and an audit sink is registered (secret
@@ -193,33 +190,31 @@ The transport hands each session an `Outbound` at `new_session`; emission is a
 **non-blocking enqueue** (so a sync handler on the blocking pool can emit progress without
 `.await`).
 
-**Deliberate divergence from Python.** Python uses a per-protocol queue drained by a
-separate thread (`poll_notification`) and keeps an in-flight registry so it can **drop**
-progress that would otherwise be delivered *after* the response. Rust does not need that:
-the transport funnels a connection's replies **and** its back-channel messages through one
-**ordered** writer, and a handler emits all its progress **before** it returns (so the
-reply is enqueued after). Per request, progress therefore precedes its reply on the wire
-with no purge and no membership check. This is why the Rust in-flight registry is
-**cancellation-only**, whereas Python's is also progress-correlation. (Replies for
-concurrent requests still interleave on the connection; the client correlates by `id`, as
-in any multiplexed JSON-RPC connection — root §3.)
+**Ordering.** The transport funnels a connection's replies **and** its back-channel
+messages through one **ordered** writer, and a handler emits all its progress **before** it
+returns (so the reply is enqueued after). Per request, progress therefore precedes its
+reply on the wire with no purge and no membership check — which is why the in-flight
+registry is **cancellation-only**, not also progress-correlation. (Replies for concurrent
+requests still interleave on the connection; the client correlates by `id`, as in any
+multiplexed JSON-RPC connection — root §3.)
 
 ## 7. Configuration points (the builder)
 
-`JsonRpcProtocolBuilder<S>` mirrors Python's `JSONRPCProtocol(...)` + `register_*`:
+`JsonRpcProtocolBuilder<S>` assembles a protocol from its methods, the session-setup
+steps, and the authz/audit/cancellation hooks:
 
-| Python | Rust builder |
+| call / mechanism | role |
 |---|---|
-| `JSONRPCProtocol(methods, *, name, version, authorization_handler, audit_handler, cancellation_handler, use_audit_queue)` | `JsonRpcProtocol::builder(name, version)` + `.authorizer(..)` `.audit_sink(..)` `.cancellation(..)` |
-| `register(method)` | `.method(JsonRpcMethod::new(def, handler))?` / `.async_method(AsyncJsonRpcMethod::new(def, handler))?` |
-| `add_session_setup(setup, continue_)` | `.session_setup(def, handler)` / `.session_setup_continue(def, handler)` |
-| `register_server_info(handler, returns)` | `.server_info(handler)` |
-| `new_session` / `close_session` / `has_session_setup` | same names on `JsonRpcProtocol<S>` |
-| `send_notification` | `send_notification` *(planned — pub/sub fan-out, §13)* |
-| `poll_notification` / `poll_audit` | replaced by the `Outbound` sink (§6) / inline audit |
-| — (hard-coded `uuid4`/clock) | `.id_gen(..)` / `.clock(..)` — injectable for deterministic tests (§12) |
+| `JsonRpcProtocol::builder(name, version)` + `.authorizer(..)` `.audit_sink(..)` `.cancellation(..)` | the protocol + its authz / audit / cancellation hooks |
+| `.method(JsonRpcMethod::new(def, handler))?` / `.async_method(AsyncJsonRpcMethod::new(def, handler))?` | register a sync / async method |
+| `.session_setup(def, handler)` / `.session_setup_continue(def, handler)` | the two auth setup steps |
+| `.server_info(handler)` | the `$/serverInfo` handler |
+| `new_session` / `close_session` / `has_session_setup` (on `JsonRpcProtocol<S>`) | per-connection session lifecycle |
+| `send_notification` | pub/sub fan-out *(planned — §13)* |
+| the `Outbound` sink (§6) + inline audit | the back-channel + audit drain (no poll loop) |
+| `.id_gen(..)` / `.clock(..)` | injectable id / clock for deterministic tests (§12) |
 
-Per-method flags on `MethodDef` mirror `JSONRPCMethod`: `pre_auth`, `audit` /
+Per-method flags on `MethodDef`: `pre_auth`, `audit` /
 `audit_message`, `cancellable`, `roles`, `doc`, `secret_fields` (the wire-names redacted
 in the audit view). `build()` freezes the method table; the result is safe for concurrent
 `dispatch` by many tasks.
@@ -241,8 +236,8 @@ problem (E0207):
 an internal `dyn` object behind a **two-phase** seam — `decode(params)` (typed param
 validation; runs before authz so `INVALID_PARAMS` precedes `NOT_AUTHORIZED`) and `run`
 (invoke the handler, encode the result) — so the protocol authorizes *between* decode and
-run. Python's imperative `accepts_validator`/`returns_validator` fold into the
-`Deserialize` impl / `#[serde(try_from)]` / construction.
+run. Typed param/result validation lives in the `Deserialize` impl /
+`#[serde(try_from)]` / the type's construction.
 
 `RequestCtx<S>` is the per-request handle: `update_progress(...)`, `set_audit(detail)`
 (joined with the static `audit_message` as `"{base} {detail}"`), and cooperative
@@ -267,8 +262,7 @@ only when an authorizer or an audited method will actually read it.
 ## 9. Error taxonomy
 
 `ErrorCode` is the wire code set (root §8); `JsonRpcError { code: i32, message, data }` is
-what a handler returns (an `i32` code allows custom server-range codes, like Python's
-`int(code)`). Mapping:
+what a handler returns (an `i32` code allows custom server-range codes). Mapping:
 
 - serde param-decode failure → `INVALID_PARAMS` (short message + the detail in `data`).
 - handler `Err(JsonRpcError)` → that code (e.g. `REQUEST_FAILED` for expected failures).
@@ -276,8 +270,8 @@ what a handler returns (an `i32` code allows custom server-range codes, like Pyt
 - authorizer denial → `NOT_AUTHORIZED`.
 - gate / closed → `SESSION_NOT_ESTABLISHED`; unknown method → `METHOD_NOT_FOUND`.
 
-Error messages match the Python reference exactly (`Invalid params`, `Method not found`,
-`Session not established`, `Session is closed`, `Request failed`, …); `error.data` is
+Error messages are stable: `Invalid params`, `Method not found`,
+`Session not established`, `Session is closed`, `Request failed`, …; `error.data` is
 implementation-specific detail.
 
 ## 10. The transport-integration contract
@@ -316,22 +310,15 @@ concerns, not the core's.
   **cooperative**: a handler observes `cx.is_cancelled()` and stops; a `Canceller` can do
   active abort (e.g. close an fd) for work a flag can't interrupt.
 
-## 12. Determinism & differential testing
+## 12. Determinism & conformance testing
 
 The core is deterministic given an injected `IdGen`/`Clock`, and `dispatch` is
-transport-free, so the same request corpus runs through the Rust core and the Python
-reference with no sockets. `rust/conformance/generate.py` records the Python reference's
-responses + audit records into a golden corpus; `tests/conformance.rs` replays it through
-the Rust core and asserts a **structural** match (success bodies in full; errors on
-`{code, message}`, since `error.data` differs between msgspec and serde; audit records on
-method/redacted-params/redacted-response/message). This is the gating proof of
-wire-compatibility, and it is mutation-tested (deliberately breaking the core must fail
-it). The fast Rust CI (`.github/workflows/rust.yml`) runs the conformance test against the
-committed golden; the **QEMU VM pipeline** (`qemu-test.yml`, `scripts/qemu-4b-rust.sh`)
-regenerates the golden from the repo's **real** Python — the full `truenas_pyfilter`/SCRAM/
-PAM stack — runs the conformance test against it, and drift-checks the committed copy. The
-VM is the authoritative source as conformance grows to cover filterable/auth methods and,
-eventually, Rust↔Python client/server interop (the Python server already runs there).
+transport-free, so a fixed request corpus runs through it with no sockets. The conformance
+test (`tests/conformance.rs`) replays the committed `tests/conformance/golden.json` corpus
+through the Rust dispatch core and asserts **byte-stable** responses **and** audit records
+against the frozen golden — the gating proof of wire-stability. It is mutation-tested
+(deliberately breaking the core must fail it) and runs in CI
+(`.github/workflows/rust.yml`); line coverage is gated at **100%**.
 
 ## 13. Not yet implemented (planned)
 
@@ -349,18 +336,18 @@ Tracked against the full-parity plan; the wire contract for each is in the root 
 - **Codegen** — a proc-macro for method definition and an OpenRPC-driven typed-client
   generator.
 
-## 14. Deliberate divergences from Python (summary)
+## 14. Notable design choices
 
-1. **Two method kinds** (`JsonRpcMethod` sync on the blocking pool, `AsyncJsonRpcMethod`
-   awaited). Python is sync-only; the sync kind is the faithful default that keeps A/B
-   parity.
-2. **`Outbound` sink + one ordered per-connection writer** instead of the per-protocol
-   queue + `poll_notification` drain thread — so the progress-after-reply purge is
-   unnecessary and the in-flight registry is cancellation-only (§6).
+1. **Two method kinds.** `JsonRpcMethod` (sync, on the blocking pool) is the default and
+   covers the bulk of handlers; `AsyncJsonRpcMethod` (awaited on the runtime) is the niche
+   for genuinely non-blocking work (§2).
+2. **`Outbound` sink + one ordered per-connection writer.** A handler emits all its
+   progress before it returns, so progress precedes its reply on the wire with no purge,
+   and the in-flight registry is cancellation-only (§6).
 3. **Closures, not a handler trait**; **two-phase erasure** (decode-before-authz);
    **`Arc<AtomicBool>`** cancel flag; **`RwLock`** session-internal (not write-once);
    **atomic** lifecycle.
-4. The **client** (planned) is async-native rather than Python's sync-API-over-a-thread.
+4. The **client** (planned) is **async-native** (§13).
 
 ## 15. Error codes (reference)
 

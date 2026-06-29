@@ -1,7 +1,7 @@
 //! End-to-end XDR binary-wire dispatch through `JsonRpcProtocol::dispatch`. The happy
-//! paths are validated **byte-for-byte** against the cross-language `xdr_add` /
-//! `xdr_unknown_proc` golden frames (`truenas_jsonrpc/zig/conformance/golden.json`); the
-//! rest exercise the gate / authz / error / registration branches.
+//! paths are validated **byte-for-byte** against the committed `xdr_add` /
+//! `xdr_unknown_proc` golden frames; the rest exercise the gate / authz / error /
+//! registration branches.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};

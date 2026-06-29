@@ -2,7 +2,7 @@
 //! dispatch core — emitting a `$/transferReady` envelope — and yields a [`Dispatched::Transfer`]
 //! directive whose `complete` runs the `transfer` callback over a [`FileTransfer`]. Exercised
 //! end-to-end through the public API with a **fake** fd; no sockets (the server crate owns the
-//! real fd handoff). Mirrors Python's `_begin_transfer` / `_run_transfer`.
+//! real fd handoff).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;

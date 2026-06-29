@@ -7,12 +7,11 @@
 //! [`tnfilter`]: items are pulled lazily and only matches are retained (never the full
 //! unfiltered source), mirroring the C engine's `filter_list_run` iterator loop.
 //!
-//! Semantics match the C engine byte-for-byte (proven by the conformance corpus derived
-//! from `truens_pos/tests/test_filter_list.py`): Python object comparison rules (`==`/`!=`
-//! total with a numeric tower; `<`/`>`/… raise on incomparable operands) and
-//! dotted/indexed/`*`-wildcard/escaped path traversal.
+//! Semantics match the C engine byte-for-byte (proven by the committed conformance corpus):
+//! Python object comparison rules (`==`/`!=` total with a numeric tower; `<`/`>`/… raise on
+//! incomparable operands) and dotted/indexed/`*`-wildcard/escaped path traversal.
 //!
-//! ## Deviations from the Python/middleware filter_list
+//! ## Deviations from the TrueNAS middleware filter_list
 //!
 //! Two features are **deliberately not supported**:
 //!
@@ -69,7 +68,7 @@ pub enum Filtered<E> {
 /// *syntax* (unknown operator, malformed node, invalid option) and should become
 /// `INVALID_PARAMS`; [`FilterError::Eval`] is a runtime evaluation failure (comparing
 /// incomparable types, a non-string `startswith`/`endswith` source, an un-orderable sort
-/// column) and should become `INTERNAL_ERROR` — mirroring Python, where the former is raised
+/// column) and should become `INTERNAL_ERROR` — mirroring the TrueNAS middleware, where the former is raised
 /// by `compile_*` and the latter propagates uncaught out of `tnfilter`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FilterError {

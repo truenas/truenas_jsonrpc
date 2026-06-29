@@ -1,9 +1,8 @@
 # truenas-jsonrpc-codegen
 
 Generate Rust **server bindings**, a typed **client**, and an **OpenRPC** document from a
-`json-idl/` directory — the spec-first codegen for the TrueNAS JSON-RPC stack. It is the
-Rust analogue of the cross-language `api-specs/gen.py`: the json-idl is the source of truth,
-and this crate emits the boilerplate. It emits source **text** (it is not a proc-macro), so
+`json-idl/` directory — the spec-first codegen for the TrueNAS JSON-RPC stack. The
+json-idl is the source of truth, and this crate emits the boilerplate. It emits source **text** (it is not a proc-macro), so
 its only dependencies are `serde` + `serde_json`.
 
 ## The json-idl dialect
@@ -33,8 +32,8 @@ Top-level keys: `name`, `version`, `$defs`, `methods`, and an optional `audit` b
 Per-method keys: `handler` (the Rust handler symbol — required), `params` (required `$ref`),
 `result` / `entry` / `notifies` (`$ref`s), `summary`, `audit` / `auditMessage`, `preAuth`,
 `cancellable`, `roles`, `direction` (`client_server` | `server_client`), `filterable`, `xdr`
-+ `xdr_id` (> 1000), `python`. Per-field: `secret`, `enum` (string), `default`. Validation
-mirrors `gen.py`: `filterable ⇒ entry` (and no `result`); `xdr ⇒ xdr_id` (unique, > 1000);
++ `xdr_id` (> 1000), `python`. Per-field: `secret`, `enum` (string), `default`. Validation:
+`filterable ⇒ entry` (and no `result`); `xdr ⇒ xdr_id` (unique, > 1000);
 `python ⇒ result` (and not combinable with filterable/xdr/server_client); every `$ref` must
 be `#/$defs/<Name>` and resolve. Type mapping: object→struct, `$ref`→named, string→`String`,
 integer→`i64`, number→`f64`, boolean→`bool`, array→`Vec<T>`, string-enum→a generated `enum`,
@@ -132,7 +131,7 @@ include!(concat!(env!("OUT_DIR"), "/server_gen.rs"));
 ```
 
 `server/src/main.rs` — the generated `Handlers<S>` trait is your binding point (a
-missing/mistyped handler is a **compile error**, the Rust analogue of Zig's `H.<handler>`):
+missing/mistyped handler is a **compile error**):
 
 ```rust
 use std::sync::Arc;

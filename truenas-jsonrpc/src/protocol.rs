@@ -1,11 +1,11 @@
-//! [`JsonRpcProtocol`] — the dispatch core (Python's `JSONRPCProtocol`), its
+//! [`JsonRpcProtocol`] — the dispatch core, its
 //! [`JsonRpcProtocolBuilder`], the async [`JsonRpcProtocol::dispatch`] seam, and the `$/`
 //! control messages — the **Envelope** (4), **Dispatch** (5), **Authorization** gate, and
 //! **Control-plane** of the `ARCHITECTURE.md` layer stack.
 //!
 //! `dispatch` is `async` and **branches on the method kind**: a sync [`JsonRpcMethod`]
 //! runs its whole pipeline (decode → authorize → handler → audit) on a `spawn_blocking`
-//! worker (Python's `ThreadPoolExecutor`); an [`AsyncJsonRpcMethod`] is awaited.
+//! worker; an [`AsyncJsonRpcMethod`] is awaited.
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -104,7 +104,7 @@ pub enum CancelTarget {
     },
 }
 
-// --- configurable hooks (mirroring Python's register_* handlers) -------------
+// --- configurable hooks ------------------------------------------------------
 
 /// The structured result of an audited dispatch, handed to an [`AuditSink`] in place of a
 /// re-parsed response envelope.
@@ -295,10 +295,10 @@ struct Inflight {
 
 /// A registered subscription to a SERVER_CLIENT topic: the owning session (for fan-out via
 /// its [`Outbound`] sink and for session-scoped cancel) plus a snapshot of the subscribe
-/// params. Mirrors Python's `Subscription`.
+/// params.
 struct Subscription<S> {
     session: Arc<Session<S>>,
-    #[allow(dead_code)] // forward-compat (per-subscription filtering); mirrors Python's stored params
+    #[allow(dead_code)] // forward-compat (per-subscription filtering)
     params: Value,
 }
 
@@ -307,7 +307,7 @@ type Subscriptions<S> = HashMap<Arc<str>, HashMap<String, Subscription<S>>>;
 
 // --- builder -----------------------------------------------------------------
 
-/// Builds a [`JsonRpcProtocol`] (Python's `JSONRPCProtocol(...)` + `register_*`). Frozen
+/// Builds a [`JsonRpcProtocol`]. Frozen
 /// by [`build`](Self::build); the result is safe for concurrent dispatch.
 pub struct JsonRpcProtocolBuilder<S> {
     name: Arc<str>,
@@ -464,7 +464,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     /// Register a raw-fd transfer method (e.g. `zfs send`/`recv` via libzfs). After
     /// authorization the `negotiate` callback runs and a [`Transfer`] directive is handed back
     /// for the server to drive the wire handshake + fd handoff; the `transfer` callback then
-    /// streams over the connection's raw fd. Mirrors Python's `JSONRPCFdTransferMethod`.
+    /// streams over the connection's raw fd.
     pub fn fd_transfer_method<A, N, R, FN, FT>(
         mut self,
         method: JsonRpcFdTransferMethod<A, N, R, FN, FT>,
@@ -482,7 +482,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
 
     /// Register an `SCM_RIGHTS` file-descriptor-passing method (**AF_UNIX only**). Like
     /// [`fd_transfer_method`](Self::fd_transfer_method), but the `transfer` callback passes /
-    /// receives open fds rather than streaming bytes. Mirrors Python's `JSONRPCFdPassMethod`.
+    /// receives open fds rather than streaming bytes.
     pub fn fd_pass_method<A, N, R, FN, FT>(
         mut self,
         method: JsonRpcFdPassMethod<A, N, R, FN, FT>,
@@ -552,7 +552,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     }
 
     /// Set the [`PyDispatcher`] that runs `python:true` method bodies. Without it, a python
-    /// method dispatches to `INTERNAL_ERROR` (degrading safely, like the Zig spine).
+    /// method dispatches to `INTERNAL_ERROR` (degrading safely).
     pub fn python_dispatcher(mut self, dispatcher: impl PyDispatcher + 'static) -> Self {
         self.py_dispatcher = Some(Arc::new(dispatcher));
         self
@@ -662,7 +662,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
 
 // --- protocol ----------------------------------------------------------------
 
-/// The dispatch core — Python's `JSONRPCProtocol`. Build once; drive
+/// The dispatch core. Build once; drive
 /// [`dispatch`](Self::dispatch) with framed bytes + a per-connection [`Session`].
 pub struct JsonRpcProtocol<S> {
     name: Arc<str>,
@@ -1192,8 +1192,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
     /// Handle a subscribe request to a SERVER_CLIENT topic: validate params, authorize,
     /// register a [`Subscription`] (capturing the session for routing), and ack with its id.
-    /// No handler runs; audited iff the topic opted in. Mirrors Python's subscribe branch in
-    /// `_authorize_and_dispatch`.
+    /// No handler runs; audited iff the topic opted in.
     fn handle_subscribe(
         &self,
         method: &Method<S>,
@@ -1255,8 +1254,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     /// directive (or an error envelope). The server drives the wire handshake and fd handoff
     /// from there, then calls [`Transfer::complete`]. An authorization denial or a `negotiate`
     /// failure is audited here (as a normal method's denial/error is); a transfer that
-    /// proceeds is audited inside the directive's `complete` closure. Mirrors Python's
-    /// `_begin_transfer`.
+    /// proceeds is audited inside the directive's `complete` closure.
     fn begin_transfer(
         &self,
         method: &Arc<Method<S>>,
@@ -1324,7 +1322,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let ready = build_transfer_ready(&rid, direction, &interim);
 
         // The deferred completion: after the server's handshake hands over the fd, run
-        // `transfer`, build the final reply, and audit (mirrors Python's `_run_transfer`).
+        // `transfer`, build the final reply, and audit.
         let audit = method.meta.audit;
         let audit_sink = self.audit_sink.clone();
         let meta = method.meta.clone();
@@ -1426,7 +1424,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             .values()
             .filter_map(Weak::upgrade)
             .collect();
-        live.sort_by_key(|s| s.created()); // stable output, oldest first (mirrors the middleware)
+        live.sort_by_key(|s| s.created()); // stable output, oldest first (matches the TrueNAS middleware ordering)
         let now_unix = unix_now();
         live.iter().map(|s| self.render_session(s, current, now_unix)).collect()
     }
@@ -1750,7 +1748,7 @@ fn finish(note: bool, bytes: Vec<u8>) -> Dispatched {
 
 /// Build the `$/transferReady` notification envelope the server sends before the fd handoff:
 /// `{"jsonrpc":"2.0","method":"$/transferReady","params":{"id":<rid>,"direction":<dir>,"result":<interim>}}`
-/// (`result` embeds the `negotiate` interim verbatim). Byte-compatible with Python's.
+/// (`result` embeds the `negotiate` interim verbatim).
 fn build_transfer_ready(rid: &str, direction: TransferDirection, interim: &RawValue) -> Vec<u8> {
     #[derive(Serialize)]
     struct Params<'a> {
@@ -2015,8 +2013,8 @@ fn default_session_entry<S>(session: &Session<S>, now_unix: f64) -> serde_json::
     let mut entry = serde_json::Map::new();
     entry.insert("session_id".to_string(), json!(session.id().to_string()));
     entry.insert("age_seconds".to_string(), json!(age));
-    // Wall-clock creation time derived from the monotonic `created` instant (mirrors the
-    // middleware: store monotonic, present absolute) — unix epoch seconds.
+    // Wall-clock creation time derived from the monotonic `created` instant (matches the
+    // TrueNAS middleware: store monotonic, present absolute) — unix epoch seconds.
     entry.insert("created_at".to_string(), json!(now_unix - age));
     entry.insert("lifecycle".to_string(), json!(session.lifecycle() as u8));
     entry.insert("protocol".to_string(), json!(session.protocol_name()));
@@ -2092,7 +2090,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
 
     /// Python pipeline (blocking pool): authorize (a denial is still audited), then run the
     /// body via the `PyDispatcher` seam. There is no Rust-side param decode — Python
-    /// validates, so an INVALID_PARAMS comes back from the body *after* authz (matching Zig).
+    /// validates, so an INVALID_PARAMS comes back from the body *after* authz.
     fn run_python(self, params: Option<&RawValue>, cx: RequestCtx<S>) -> Vec<u8> {
         let audit_detail = cx.audit_handle();
         let outcome = match role_gate(self.method.meta.required, &self.session) {

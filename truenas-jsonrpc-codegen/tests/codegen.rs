@@ -1,4 +1,4 @@
-//! Codegen tests: golden server/client output, the OpenRPC A/B vs the cross-language
+//! Codegen tests: golden server/client output, the OpenRPC A/B vs the committed
 //! `openrpc.json`, branch coverage via the `full`/`python` fixtures, a bad-spec validation
 //! corpus (one case per error path), determinism, the `Build` helper, and `run_cli`.
 
@@ -36,7 +36,7 @@ fn openrpc_matches_cross_language_golden() {
     let mut golden: serde_json::Value = serde_json::from_str(include_str!("fixtures/openrpc.json")).unwrap();
     got.as_object_mut().unwrap().remove("x-generated");
     golden.as_object_mut().unwrap().remove("x-generated");
-    assert_eq!(got, golden, "generated OpenRPC must equal the gen.py/Zig golden");
+    assert_eq!(got, golden, "generated OpenRPC must equal the committed golden");
 }
 
 #[test]

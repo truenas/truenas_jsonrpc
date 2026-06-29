@@ -1,8 +1,8 @@
 # truenas-xdr
 
 A serde-based XDR (RFC 4506) codec plus the TXDR binary frame — the **Codec** layer (layer 3) of the
-[layer stack](../../ARCHITECTURE.md#layers) — for the TrueNAS JSON-RPC binary wire. Byte-exact against
-the cross-language golden vectors.
+[layer stack](../ARCHITECTURE.md#layers) — for the TrueNAS JSON-RPC binary wire. Byte-exact against
+the committed golden vectors.
 
 ## Public API
 
@@ -20,7 +20,7 @@ the cross-language golden vectors.
 
 bincode-style and **non-self-describing**: the `Deserializer` is type-driven, so
 `deserialize_any` / `deserialize_ignored_any` are unsupported — `#[serde(flatten)]` and
-`serde_json::Value` cannot be decoded from XDR (matches the Zig/Python design; dynamic data
+`serde_json::Value` cannot be decoded from XDR (dynamic data
 rides as a JSON-text `string<>`). `is_human_readable()` is `false`. XDR has no map type;
 model dictionaries as `Vec<(K, V)>`. Range checks are always on; `Strict` additionally rejects
 nonzero opaque padding and embedded NULs (the ZFS rules).

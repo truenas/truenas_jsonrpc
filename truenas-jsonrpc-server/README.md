@@ -1,8 +1,7 @@
 # truenas-jsonrpc-server
 
-The optional async server transport for `truenas-jsonrpc`. A Rust port of Python's
-`truenas_pyjsonrpc_server`. It accepts connections, frames messages, selects a protocol per
-connection with `$/negotiate`, and pumps the dispatch loop.
+The optional async server transport for `truenas-jsonrpc`. It accepts connections, frames
+messages, selects a protocol per connection with `$/negotiate`, and pumps the dispatch loop.
 
 ## Public API
 
@@ -21,7 +20,7 @@ connection with `$/negotiate`, and pumps the dispatch loop.
   `Ucred` (pid/uid/gid from `SO_PEERCRED`).
 - `UnixConfig` (path + post-bind `mode`).
 - `framing` — the wire: a 4-byte big-endian length prefix over compact JSON (`frame`,
-  `read_message`, `DEFAULT_LIMIT`), byte-identical to the Python server.
+  `read_message`, `DEFAULT_LIMIT`).
 - *(feature `tls`)* `TlsConfig` (+ `TlsMode::{Kernel, Userspace}`) and
   `serve_tls` / `serve_tls_listener` — encrypted TCP via system OpenSSL.
 - `FileTransferExt` — for a `transfer` callback: blocking `write_all` / `read_exact` on the
@@ -37,12 +36,12 @@ connection with `$/negotiate`, and pumps the dispatch loop.
   spawned) so a `$/cancelRequest` is read while a handler runs. All outbound bytes — replies
   plus pub/sub notifications pushed through the session's `Outbound` — funnel through one
   unbounded channel drained by a writer task (single ordered writer).
-- Notifications are push-based via the session's `Outbound` (no drain threads, unlike Python).
+- Notifications are push-based via the session's `Outbound` (no drain threads).
 - **Network-auth guard**: `serve_tcp` / `serve_tls` / `serve_websocket` / `serve_wss` (and their
   `*_listener` forms) refuse — returning `io::ErrorKind::InvalidInput` before accepting — to serve
   a registered protocol that has no `$/sessionSetup`, so an unauthenticated remote client can't
-  reach gated methods. **AF_UNIX is exempt** (local peer-credential / filesystem trust). Mirrors
-  `server.py`'s constructor check, but at serve time (the transport is chosen per `serve_*` call).
+  reach gated methods. **AF_UNIX is exempt** (local peer-credential / filesystem trust). The check
+  runs at serve time (the transport is chosen per `serve_*` call).
   Opt out with `.allow_unauthenticated_network()` when a protocol is deliberately unauthenticated.
 
 ## Status
@@ -82,9 +81,7 @@ of these. The crate sets `unsafe_code = "deny"` (not the workspace
 BIO + `getsockopt`); the cmsg/SCM_RIGHTS construction is `nix`'s.
 
 Not in the workspace `default-members` (its socket / kTLS / `SCM_RIGHTS` I/O can't be
-unit-tested deterministically): it is covered behaviorally (`tests/{roundtrip,transfer,tls,ws,
-cross_lang}.rs`, real sockets) and excluded from the line-coverage gate. `cross_lang` drives
-the Rust server with the canonical **Python** client (`truenas_pyjsonrpc_client`) to prove
-on-wire interop, and is skipped when Python isn't available. Build/test it with
+unit-tested deterministically): it is covered behaviorally (`tests/{roundtrip,transfer,tls,ws}.rs`,
+real sockets) and excluded from the line-coverage gate. Build/test it with
 `cargo {build,test,clippy} -p truenas-jsonrpc-server` (add `--features "tls websocket"` for the
 TLS / WebSocket paths).

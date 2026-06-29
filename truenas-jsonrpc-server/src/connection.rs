@@ -1,6 +1,6 @@
 //! Per-connection handling — the **Transport** + **Framing** layers (1–2): the `$/negotiate` →
 //! bound-dispatch state machine, the async I/O
-//! pump, and the raw-fd transfer takeover (port of `connection.py`).
+//! pump, and the raw-fd transfer takeover.
 //!
 //! Inbound bytes accumulate in a buffer fed by the cancel-safe [`AsyncReadExt::read_buf`];
 //! complete length-prefixed frames are extracted from it. The loop `select!`s between reading
@@ -49,9 +49,8 @@ const TRANSFER_GO_METHOD: &str = "$/transferGo";
 const HEADER: usize = 4;
 
 /// The per-connection [`Outbound`]: pub/sub + `$/progress` messages the core pushes are
-/// enqueued (non-blocking) onto the connection's writer channel. Replaces Python's
-/// poll-and-route drain threads — the core is push-based, so the session's sink *is* the
-/// connection's queue.
+/// enqueued (non-blocking) onto the connection's writer channel. The core is push-based, so
+/// the session's sink *is* the connection's queue.
 struct ConnOutbound {
     tx: UnboundedSender<Vec<u8>>,
 }
@@ -290,7 +289,7 @@ pub(crate) async fn serve<S, IO>(
 
 /// Drive the raw-fd transfer: gate the writer, run the `$/transferReady` (+ `$/transferGo` for
 /// a download) handshake, hand the blocking fd to the `transfer` callback, then write the
-/// final response. Mirrors Python's `_run_transfer`.
+/// final response.
 async fn run_transfer<IO>(
     t: Transfer,
     reader: &mut ReadHalf<IO>,

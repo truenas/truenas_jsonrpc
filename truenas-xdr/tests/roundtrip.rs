@@ -1,6 +1,6 @@
 //! Round-trip + byte-exact tests for the XDR codec's full type surface.
 //!
-//! (Conformance against the cross-language `xdr_cases` golden vectors and the FreeBSD
+//! (Conformance against the committed `xdr_cases` golden vectors and the FreeBSD
 //! `sctrl` union goldens live in `conformance.rs` / `golden_sctrl.rs`.)
 
 use serde::{Deserialize, Serialize};

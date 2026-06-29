@@ -1,10 +1,8 @@
-//! Micro-benchmark: `JsonRpcProtocol::dispatch` throughput (Rust), to A/B against
-//! `python3 rust/bench/python_dispatch.py`.
+//! Micro-benchmark: `JsonRpcProtocol::dispatch` throughput.
 //!
 //! Three numbers:
 //!   1. **dispatch overhead** — a no-op handler, 1 thread, async (awaited inline, no
-//!      `spawn_blocking`). The pure parse→decode→encode cost; the apples-to-apples match
-//!      for Python's single-threaded synchronous `dispatch`.
+//!      `spawn_blocking`). The pure parse→decode→encode cost.
 //!   2. **realistic handler, 1 thread** — a sync handler doing real per-request CPU work
 //!      (a stand-in for a checksum / light crypto / building a larger response), driven
 //!      sequentially on the `spawn_blocking` path.

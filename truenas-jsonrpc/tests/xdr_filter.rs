@@ -1,9 +1,8 @@
 //! Byte-exact conformance for **filterable methods over the XDR binary wire**, against the
-//! `xdr_filter_*` golden vectors (`truenas_jsonrpc/zig/conformance/golden.json`). The golden
-//! request bytes are fed straight through `dispatch`; the reply must match the golden
-//! byte-for-byte — proving the request decode (base + XdrQueryOptions + query-filters JSON
-//! string), the filter engine, and the result encoding (count → hyper, rows → count+entries)
-//! are all wire-compatible with the Python/Zig implementations.
+//! `xdr_filter_*` committed golden vectors. The golden request bytes are fed straight through
+//! `dispatch`; the reply must match the golden byte-for-byte — proving the request decode
+//! (base + XdrQueryOptions + query-filters JSON string), the filter engine, and the result
+//! encoding (count → hyper, rows → count+entries) all produce the canonical XDR wire bytes.
 
 use std::sync::{Arc, Mutex};
 

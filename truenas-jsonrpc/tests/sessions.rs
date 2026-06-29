@@ -159,7 +159,7 @@ async fn sessions_custom_renderer_merges_onto_the_core_base() {
 
     let entries = proto.render_sessions(a.id());
     assert_eq!(entries.len(), 2);
-    // Sorted oldest-first (mirrors the middleware) → `a` before `b`.
+    // Sorted oldest-first (matches the TrueNAS middleware) → `a` before `b`.
     assert_eq!(entries[0]["session_id"], a.id().to_string());
     assert_eq!(entries[1]["session_id"], b.id().to_string());
     // The core base survives the merge (protocol / created_at present) AND the extra is folded in.

@@ -183,7 +183,7 @@ impl<T: FileTransfer + ?Sized> FileTransferExt for T {
 /// *before consuming anything* — when the first `splice` is rejected, so the caller can fall
 /// back to a buffered copy: non-Linux, or a kTLS socket whose next record is a control message
 /// (`splice` returns `EINVAL` for non-data records). A failure after partial progress is a real
-/// I/O error. Mirrors Python's `_splice_socket_to_fd`.
+/// I/O error.
 fn splice_to_fd(src: RawFd, dst: RawFd, count: usize) -> std::io::Result<Option<usize>> {
     let mut pipe = [0 as libc::c_int; 2];
     // SAFETY: `pipe` is a 2-element array `pipe(2)` fills with the read/write ends.

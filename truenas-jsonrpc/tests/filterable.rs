@@ -21,7 +21,7 @@ const RID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
 #[derive(Deserialize, Serialize)]
 struct NoArgs {}
 
-/// The fixed source a query streams through `tnfilter` (mirrors `test_filterable.py`'s `_DATA`).
+/// The fixed source a query streams through `tnfilter`.
 fn data() -> Vec<Value> {
     vec![
         json!({"id": 1, "name": "a"}),
@@ -124,7 +124,7 @@ async fn invalid_operator_is_invalid_params() {
 
 #[tokio::test]
 async fn incomparable_is_internal_error() {
-    // "a" > 5 → Python TypeError → engine Eval → INTERNAL_ERROR (handler's tnfilter `?`).
+    // "a" > 5 → incomparable types → engine Eval → INTERNAL_ERROR (handler's tnfilter `?`).
     let r = call(&proto(), json!({"query-filters": [["name", ">", 5]]})).await;
     assert_eq!(err_code(&r), -32603); // INTERNAL_ERROR
 }

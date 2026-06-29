@@ -1,7 +1,6 @@
 //! Tests for the `XdrEnum` / `XdrUnion` derives, including the FreeBSD `sctrl` union
 //! golden (the `grab = 4` discriminant gap that proves a declaration-index encoding would
-//! be wrong). The byte sequences are the FreeBSD `sys/xdr`-emitted values ported from the
-//! Zig codec's unit tests (`zig/xdr/xdr.zig`).
+//! be wrong). The byte sequences are the FreeBSD `sys/xdr`-emitted values.
 
 use serde::{Deserialize, Serialize};
 use truenas_xdr::{from_bytes, serialized_size, to_bytes, XdrEnum, XdrUnion};

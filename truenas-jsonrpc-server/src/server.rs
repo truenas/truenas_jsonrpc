@@ -1,8 +1,7 @@
 //! [`JsonRpcServer`] — the **Transport** layer (layer 1) entry point: binds one or more transports,
-//! selects a named protocol per connection with `$/negotiate`, and serves the dispatch loop. Port
-//! of `server.py` (the notification
-//! routing is push-based via each session's [`Outbound`](truenas_jsonrpc::Outbound), so the
-//! per-protocol drain threads Python needs don't exist here).
+//! selects a named protocol per connection with `$/negotiate`, and serves the dispatch loop. The
+//! notification routing is push-based via each session's [`Outbound`](truenas_jsonrpc::Outbound), so
+//! there are no per-protocol drain threads.
 
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
@@ -23,7 +22,7 @@ use crate::peer::ForwardedOrigin;
 
 /// Listen on an AF_UNIX socket. `mode` is applied to the socket file after bind (`None`
 /// leaves the umask default). The path must not already exist (the caller manages stale
-/// sockets — binding an existing path errors, mirroring `asyncio.start_unix_server`).
+/// sockets — binding an existing path errors).
 pub struct UnixConfig {
     /// Filesystem path to bind.
     pub path: PathBuf,
@@ -129,9 +128,8 @@ impl<S: Send + Sync + 'static> JsonRpcServerBuilder<S> {
 
     /// Allow serving protocols that have **no** `$/sessionSetup` over a **network** transport
     /// (TCP / TLS / WebSocket). By default that is refused at serve time, because an
-    /// unauthenticated remote client could otherwise reach gated methods — mirroring
-    /// `server.py`, which raises when a network transport exposes an unauthenticated protocol.
-    /// AF_UNIX is always exempt (local peer-credential / filesystem trust). Opt in only when a
+    /// unauthenticated remote client could otherwise reach gated methods. AF_UNIX is always
+    /// exempt (local peer-credential / filesystem trust). Opt in only when a
     /// protocol is deliberately unauthenticated or authenticates by another means.
     #[must_use]
     pub fn allow_unauthenticated_network(mut self) -> Self {
@@ -204,8 +202,8 @@ impl<S: Send + Sync + 'static> JsonRpcServer<S> {
     /// registered protocol has no `$/sessionSetup` (so an unauthenticated remote client can't
     /// reach gated methods), unless the server opted in via
     /// [`allow_unauthenticated_network`](JsonRpcServerBuilder::allow_unauthenticated_network).
-    /// AF_UNIX is exempt and never calls this. Mirrors `server.py`'s constructor check, but at
-    /// serve time — the transport is chosen per `serve_*` call, not at build.
+    /// AF_UNIX is exempt and never calls this. This runs at serve time — the transport is chosen
+    /// per `serve_*` call, not at build.
     pub(crate) fn require_network_auth(&self) -> std::io::Result<()> {
         if self.shared.allow_unauthenticated {
             return Ok(());

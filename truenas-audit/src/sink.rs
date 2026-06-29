@@ -4,8 +4,7 @@
 //! blocking pool for sync ones), so it must not block: it only extracts the principal, formats the
 //! record (cheap, pure string work), and does a **non-blocking** channel push. A dedicated drain
 //! thread owns the `NETLINK_AUDIT` socket and performs the (blocking) `sendmsg` + ack off the
-//! dispatch path — the Rust analogue of Python's `use_audit_queue` drain thread (which the core
-//! spine otherwise lacks). Auditing must never break or block dispatch, so overflow is dropped and
+//! dispatch path. Auditing must never break or block dispatch, so overflow is dropped and
 //! counted, and the sink never panics.
 //!
 //! **Why a dedicated thread and not an async send?** The kernel audit subsystem applies

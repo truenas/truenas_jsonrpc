@@ -1,9 +1,8 @@
 //! Error model: wire error codes ([`ErrorCode`]), the handler-facing [`JsonRpcError`],
-//! and the construction-time crate [`Error`]. Mirrors Python `truenas_pyjsonrpc.errors`
-//! + `types.JSONRPCError`.
+//! and the construction-time crate [`Error`].
 
 /// Wire error codes — the JSON-RPC 2.0 standard set plus the library/LSP-derived
-/// extensions. Serializes as its `i32`. Mirrors Python's `JSONRPCError(IntEnum)`.
+/// extensions. Serializes as its `i32`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(i32)]
 pub enum ErrorCode {
@@ -34,10 +33,9 @@ impl ErrorCode {
     }
 }
 
-/// The error a handler returns to choose a wire error code (mirrors Python's
-/// `JsonRpcError` exception). `code` is an `i32` (not the enum) so a handler may return
-/// a custom code in the implementation-defined server range (-32000..-32099), exactly
-/// like Python's `int(code)`.
+/// The error a handler returns to choose a wire error code. `code` is an `i32` (not the
+/// enum) so a handler may return a custom code in the implementation-defined server range
+/// (-32000..-32099).
 #[derive(Clone, Debug, thiserror::Error)]
 #[error("[{code}] {message}")]
 pub struct JsonRpcError {

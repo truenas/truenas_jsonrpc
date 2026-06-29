@@ -1,5 +1,5 @@
 //! Shared protocol vocabulary: enums and the data types handed to the authz/audit
-//! hooks. Mirrors Python `truenas_pyjsonrpc.types`.
+//! hooks.
 
 use serde::{Deserialize, Serialize};
 

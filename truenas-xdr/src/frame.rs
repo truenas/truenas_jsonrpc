@@ -1,5 +1,4 @@
-//! The TXDR binary-wire frame — the Rust peer of Zig's `xdr_frame.zig` and Python's
-//! `truenas_pyjsonrpc.xdr` frames. A frame is `magic · XDR<envelope> · payload`:
+//! The TXDR binary-wire frame. A frame is `magic · XDR<envelope> · payload`:
 //!
 //! ```text
 //! Request: magic · XDR<(version, proc_id, id:opaque[16]?)>          · params:XDR<Accepts>

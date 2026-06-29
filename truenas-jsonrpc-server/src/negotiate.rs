@@ -1,5 +1,4 @@
-//! `$/negotiate` — the server-level, unauthenticated protocol selector (port of
-//! `negotiate.py`).
+//! `$/negotiate` — the server-level, unauthenticated protocol selector.
 //!
 //! A connection begins by sending `$/negotiate` naming the protocol it wants; the server
 //! binds one of its named [`JsonRpcProtocol`](truenas_jsonrpc::JsonRpcProtocol)s to the

@@ -1,10 +1,9 @@
-//! A/B differential conformance — the gating proof that the Rust engine matches the
-//! `truenas_pyfilter` C engine byte-for-byte.
+//! Differential conformance — the gating proof that the Rust engine matches the TrueNAS
+//! middleware's `truenas_pyfilter` C engine byte-for-byte.
 //!
-//! `conformance/generate.py` runs a case matrix (derived from the upstream engine's own
-//! `test_filter_list.py`) through the **C** engine and records the result in
-//! `conformance/golden.json`. This test replays each case through the **Rust** engine and
-//! asserts the rows / count / error-kind are identical.
+//! Replays a committed, frozen case matrix (`conformance/golden.json`, derived from the upstream
+//! engine's own `test_filter_list.py` and recorded against the C engine) through the **Rust**
+//! engine and asserts the rows / count / error-kind are identical.
 
 use serde_json::Value;
 use truenas_filter::{

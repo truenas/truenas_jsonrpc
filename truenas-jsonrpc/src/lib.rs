@@ -1,6 +1,5 @@
 //! `truenas-jsonrpc` — the transport-agnostic JSON-RPC 2.0 **dispatch core** for
-//! TrueNAS, a Rust port of Python's `truenas_pyjsonrpc` (`JSONRPCProtocol` /
-//! `JSONRPCMethod`).
+//! TrueNAS.
 //!
 //! It is a refinement of JSON-RPC 2.0 designed for long-lived, authenticated,
 //! multiplexed connections; the language-agnostic wire contract lives in the
@@ -16,9 +15,8 @@
 //!
 //! [`JsonRpcProtocol::dispatch`] is `async` and **branches on the method kind**: a
 //! sync [`JsonRpcMethod`] (the default — covers blocking work like ZFS ioctls,
-//! file I/O, and auth-stack crypto) runs its pipeline on a `spawn_blocking` worker
-//! (the analogue of Python's `ThreadPoolExecutor`); an [`AsyncJsonRpcMethod`] (for
-//! genuinely awaitable work) is awaited on the runtime.
+//! file I/O, and auth-stack crypto) runs its pipeline on a `spawn_blocking` worker;
+//! an [`AsyncJsonRpcMethod`] (for genuinely awaitable work) is awaited on the runtime.
 
 mod envelope;
 mod error;

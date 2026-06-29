@@ -1,4 +1,4 @@
-//! Client emit — ports `python/codegen.py`: a transport-agnostic `Transport` trait plus a
+//! Client emit — a transport-agnostic `Transport` trait plus a
 //! typed client with one `async fn` per request method (filterable → `QueryResult<Entry>`,
 //! subscriptions → `subscribe_*` + a `TOPICS` table). The emitted code depends on
 //! `truenas-jsonrpc` + serde/serde_json + `async-trait` (NOT on this codegen crate).

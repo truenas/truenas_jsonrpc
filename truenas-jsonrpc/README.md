@@ -1,9 +1,8 @@
 # truenas-jsonrpc
 
-Transport-agnostic JSON-RPC 2.0 dispatch core for TrueNAS. A Rust port of the Python
-`truenas_pyjsonrpc.JSONRPCProtocol`. It takes inbound bytes plus a session and returns the
-reply bytes (or a directive); it owns no socket. For a runnable transport see
-`truenas-jsonrpc-server`.
+Transport-agnostic JSON-RPC 2.0 dispatch core for TrueNAS. It takes inbound bytes plus a
+session and returns the reply bytes (or a directive); it owns no socket. For a runnable
+transport see `truenas-jsonrpc-server`.
 
 ## Public API
 
@@ -12,7 +11,7 @@ reply bytes (or a directive); it owns no socket. For a runnable transport see
 - `dispatch` returns `Dispatched::{Reply(Vec<u8>), Nothing, Transfer(Transfer)}`.
 - Method kinds:
   - `JsonRpcMethod` — synchronous handler (run on `spawn_blocking`).
-  - `AsyncJsonRpcMethod` — async handler (awaited). Rust-only; Python has no async methods.
+  - `AsyncJsonRpcMethod` — async handler (awaited).
   - `FilterableJsonRpcMethod` — query method (`query-filters` / `query-options`); returns
     `Filtered<E>`.
   - `SubscriptionDef` — a `SERVER_CLIENT` pub/sub topic; publish via
@@ -57,7 +56,7 @@ handlers.
 
 - `#![forbid(unsafe_code)]`.
 - Gated at 100% line coverage (`../coverage.sh`).
-- A/B differential conformance against the Python reference (`tests/conformance.rs` + golden
-  vectors).
+- Differential conformance against a committed frozen golden corpus (`tests/conformance.rs` +
+  golden vectors).
 - Deliberate parity gaps live in `truenas-filter` (no `select`, no `~` regex).
 - Wire contract: `ARCHITECTURE.md`.

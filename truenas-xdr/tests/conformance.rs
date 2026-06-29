@@ -1,10 +1,9 @@
-//! Conformance against the cross-language golden `xdr_cases`
-//! (`truenas_jsonrpc/zig/conformance/golden.json`), generated normatively by the Python
-//! `truenas_pyjsonrpc.xdr` codec. The `add` and `unknown_proc` (error) cases are validated
-//! in `frame.rs`; here are the `echo`/`echo_empty` cases, which exercise list + optional +
-//! bool + string together. (The three `xdr_filter_*` cases exercise the dispatch layer's
-//! filterable encoding — base + `XdrQueryOptions` + filters-JSON-string + `Vec<entry>` — and
-//! are validated with the XDR dispatch integration, where those types are defined.)
+//! Conformance against the committed golden `xdr_cases` (inline byte vectors). The `add` and
+//! `unknown_proc` (error) cases are validated in `frame.rs`; here are the `echo`/`echo_empty`
+//! cases, which exercise list + optional + bool + string together. (The three `xdr_filter_*`
+//! cases exercise the dispatch layer's filterable encoding — base + `XdrQueryOptions` +
+//! filters-JSON-string + `Vec<entry>` — and are validated with the XDR dispatch integration,
+//! where those types are defined.)
 
 use serde::{Deserialize, Serialize};
 use truenas_xdr::frame::{build_reply_ok, build_request, parse_reply, parse_request};

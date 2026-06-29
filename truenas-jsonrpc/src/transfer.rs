@@ -3,7 +3,7 @@
 //! **self-delimiting** bulk stream (e.g. libzfs `lzc_send`/`lzc_receive` for `zfs send`/`recv`),
 //! then resume normal JSON-RPC.
 //!
-//! A transfer method runs in two steps (mirroring Python's `JSONRPCFdTransferMethod`): a
+//! A transfer method runs in two steps: a
 //! `negotiate` callback validates the request and returns an interim "ready" result, and —
 //! after the server's wire handshake — a `transfer` callback receives a [`FileTransfer`] and
 //! does the bulk stream. [`crate::JsonRpcProtocol::dispatch`] produces a [`Transfer`]

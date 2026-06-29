@@ -1,7 +1,7 @@
 [package]
 name = "truenas-jsonrpc"
 version = "0.1.0"
-description = "Transport-agnostic JSON-RPC 2.0 dispatch core for TrueNAS (Rust port of truenas_pyjsonrpc)"
+description = "Transport-agnostic JSON-RPC 2.0 dispatch core for TrueNAS"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true

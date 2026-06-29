@@ -3,7 +3,7 @@
 //! A setup/continue request carries a `mechanism` object whose own `"mechanism"` tag selects the
 //! [`Mechanism`](crate::Mechanism); the rest of the object is that mechanism's payload (kept as a
 //! `serde_json::Value` so each mechanism owns its shape). Every reply is an [`AuthResult`] wrapping
-//! a tagged [`AuthResponse`]. This is intentionally *not* a copy of the Python message structs.
+//! a tagged [`AuthResponse`].
 
 use serde::{Deserialize, Serialize};
 

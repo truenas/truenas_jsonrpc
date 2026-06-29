@@ -5,8 +5,7 @@ use std::ops::Deref;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-/// A value that must not appear in logs or audit output (the Rust analogue of the Zig
-/// `Secret(T)` / Python `Annotated[T, SECRET]` marker).
+/// A value that must not appear in logs or audit output.
 ///
 /// `Secret<T>` is **wire-transparent**: it serializes and deserializes exactly as the
 /// inner `T` on both the JSON and XDR wires (it adds no framing — the XDR codec passes

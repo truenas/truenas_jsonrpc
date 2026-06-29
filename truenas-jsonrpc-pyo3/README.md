@@ -2,7 +2,7 @@
 
 The optional embedded-CPython bridge that runs `truenas-jsonrpc` `python:true` method bodies in
 an embedded CPython interpreter, speaking the raw CPython C-API directly through `pyo3-ffi` (no
-pyo3 framework, no proc-macros). The Rust analogue of the Zig `pybridge`.
+pyo3 framework, no proc-macros).
 
 ## What it provides
 
@@ -26,7 +26,7 @@ linking (via its `pyo3-build-config` build dependency); **no** pyo3 framework an
 proc-macros. We call `Py_InitializeEx` ourselves, lazily on first use.
 
 This crate is **not** in the workspace `default-members`: a plain `cargo build` / `cargo test`
-links zero libpython. Opt in by depending on it (the consumer's choice, like Zig's `-Dpython`).
+links zero libpython. Opt in by depending on it — off by default, the consumer's choice.
 The core's python *pipeline* is covered by a mock `PyDispatcher` in `truenas-jsonrpc`'s tests;
 this crate is excluded from the line-coverage gate and tested with
 `cargo test -p truenas-jsonrpc-pyo3` (needs libpython + `msgspec`).
