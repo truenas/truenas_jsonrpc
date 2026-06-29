@@ -14,81 +14,35 @@ use http::HeaderMap;
 use tokio::net::{TcpListener, ToSocketAddrs, UnixListener};
 use truenas_rpc::JsonRpcProtocol;
 
-use crate::engine::{ConnContext, JsonRpcEngine, ProtocolEngine};
+use crate::engine::{ConnContext, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
-use crate::oncrpc::{OncRpcProtocol, DEFAULT_PROGRAM, DEFAULT_VERSION};
 use crate::peer::{self, Peer, UnixTrust};
 #[cfg(feature = "websocket")]
 use crate::peer::ForwardedOrigin;
+use crate::wire::{NetworkWire, Wire, WireHost};
 
 /// Listen on an AF_UNIX socket. `mode` is applied to the socket file after bind (`None`
 /// leaves the umask default). The path must not already exist (the caller manages stale
-/// sockets — binding an existing path errors).
+/// sockets — binding an existing path errors). The trust posture is the `serve_*` method's concern:
+/// [`serve_unix_listener`](TruenasRpcServer::serve_unix_listener) is trusted-local,
+/// [`serve_proxied_unix_listener`](TruenasRpcServer::serve_proxied_unix_listener) is reverse-proxied.
 pub struct UnixConfig {
     /// Filesystem path to bind.
     pub path: PathBuf,
     /// Permission bits to `chmod` the socket file to after bind (default `0o660`).
     pub mode: Option<u32>,
-    /// The listener's trust posture (default [`UnixTrust::Local`] — peer-cred is the caller). Set
-    /// [`UnixTrust::Proxied`] when a reverse proxy forwards remote clients over this socket.
-    pub trust: UnixTrust,
 }
 
 impl UnixConfig {
-    /// An AF_UNIX config for `path`, defaulting the socket mode to `0o660` (owner+group rw) and the
-    /// trust to [`UnixTrust::Local`].
+    /// An AF_UNIX config for `path`, defaulting the socket mode to `0o660` (owner+group rw).
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        UnixConfig { path: path.into(), mode: Some(0o660), trust: UnixTrust::Local }
+        UnixConfig { path: path.into(), mode: Some(0o660) }
     }
 
     /// Override the post-bind socket file mode (`None` leaves the umask default).
     #[must_use]
     pub fn mode(mut self, mode: Option<u32>) -> Self {
         self.mode = mode;
-        self
-    }
-
-    /// Declare the listener's trust posture (e.g. [`UnixTrust::Proxied`] for a reverse-proxied
-    /// socket where `SO_PEERCRED` is the proxy, not the end client).
-    #[must_use]
-    pub fn trust(mut self, trust: UnixTrust) -> Self {
-        self.trust = trust;
-        self
-    }
-}
-
-/// How to serve a registered protocol over the ONC RPC wire (see
-/// [`serve_oncrpc_unix_listener`](TruenasRpcServer::serve_oncrpc_unix_listener)): which protocol's
-/// methods to serve, and the ONC RPC program number + version they answer to. [`new`](Self::new)
-/// defaults the program/version to the reference engine's (`0x2000_0001` / `1`); override with
-/// [`program`](Self::program) / [`version`](Self::version).
-pub struct OncRpcConfig {
-    /// The registered protocol whose methods are served — each method's XDR proc-id is its procedure.
-    pub protocol: String,
-    /// The ONC RPC program number this listener answers to.
-    pub program: u32,
-    /// The ONC RPC program version.
-    pub version: u32,
-}
-
-impl OncRpcConfig {
-    /// Serve the registered protocol `protocol`, defaulting the ONC RPC program/version to the
-    /// reference engine's.
-    pub fn new(protocol: impl Into<String>) -> Self {
-        OncRpcConfig { protocol: protocol.into(), program: DEFAULT_PROGRAM, version: DEFAULT_VERSION }
-    }
-
-    /// Set the ONC RPC program number (e.g. in RFC 5531's user range `0x2000_0000..=0x3FFF_FFFF`).
-    #[must_use]
-    pub fn program(mut self, program: u32) -> Self {
-        self.program = program;
-        self
-    }
-
-    /// Set the ONC RPC program version.
-    #[must_use]
-    pub fn version(mut self, version: u32) -> Self {
-        self.version = version;
         self
     }
 }
@@ -121,6 +75,41 @@ impl<S> ServerShared<S> {
         let mut names: Vec<String> = self.protocols.keys().cloned().collect();
         names.sort();
         names
+    }
+
+    /// The network-auth guard, the one source of truth: refuse to serve if any registered protocol
+    /// has no `$/sessionSetup` (so an unauthenticated remote client can't reach gated methods),
+    /// unless the server opted in via
+    /// [`allow_unauthenticated_network`](TruenasRpcServerBuilder::allow_unauthenticated_network).
+    /// AF_UNIX (trusted-local) is exempt. Run at serve time by every network-facing transport —
+    /// the byte-stream wires via [`NetworkWire::admit_network`](crate::NetworkWire::admit_network),
+    /// the WebSocket transport directly.
+    pub(crate) fn require_session_auth(&self) -> std::io::Result<()>
+    where
+        S: Send + Sync + 'static,
+    {
+        if self.allow_unauthenticated {
+            return Ok(());
+        }
+        let mut unauth: Vec<&str> = self
+            .protocols
+            .iter()
+            .filter(|(_, p)| !p.has_session_setup())
+            .map(|(name, _)| name.as_str())
+            .collect();
+        if unauth.is_empty() {
+            return Ok(());
+        }
+        unauth.sort_unstable();
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "refusing to serve protocol(s) with no $/sessionSetup over a network transport: \
+                 [{}] — register session setup, serve only over AF_UNIX, or opt in with \
+                 .allow_unauthenticated_network()",
+                unauth.join(", ")
+            ),
+        ))
     }
 }
 
@@ -235,36 +224,10 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
         }
     }
 
-    /// Guard for the network transports (TCP / TLS / WebSocket): refuse to serve if any
-    /// registered protocol has no `$/sessionSetup` (so an unauthenticated remote client can't
-    /// reach gated methods), unless the server opted in via
-    /// [`allow_unauthenticated_network`](TruenasRpcServerBuilder::allow_unauthenticated_network).
-    /// AF_UNIX is exempt and never calls this. This runs at serve time — the transport is chosen
-    /// per `serve_*` call, not at build.
-    pub(crate) fn require_network_auth(&self) -> std::io::Result<()> {
-        if self.shared.allow_unauthenticated {
-            return Ok(());
-        }
-        let mut unauth: Vec<&str> = self
-            .shared
-            .protocols
-            .iter()
-            .filter(|(_, p)| !p.has_session_setup())
-            .map(|(name, _)| name.as_str())
-            .collect();
-        if unauth.is_empty() {
-            return Ok(());
-        }
-        unauth.sort_unstable();
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!(
-                "refusing to serve protocol(s) with no $/sessionSetup over a network transport: \
-                 [{}] — register session setup, serve only over AF_UNIX, or opt in with \
-                 .allow_unauthenticated_network()",
-                unauth.join(", ")
-            ),
-        ))
+    /// The [`WireHost`] view handed to a [`Wire`] when resolving it to its engine — wraps the
+    /// crate-private substrate so it never crosses the public seam.
+    pub(crate) fn host(&self) -> WireHost<'_, S> {
+        WireHost::new(&self.shared)
     }
 
     /// Bind an AF_UNIX socket (and `chmod` it per the config), returning the listener without
@@ -278,35 +241,32 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
         Ok(listener)
     }
 
-    /// Accept connections on a bound AF_UNIX `listener` until an accept error occurs. Each
-    /// connection carries the peer's `SO_PEERCRED` and the listener's declared `trust` posture
-    /// ([`UnixTrust::Local`] for a genuinely-local socket; [`UnixTrust::Proxied`] when a reverse
-    /// proxy forwards remote clients here, so `SO_PEERCRED` is the proxy's and must not be trusted).
-    pub async fn serve_unix_listener(
+    /// Serve a `wire` (e.g. [`JsonRpc`](crate::JsonRpc) or [`OncRpc`](crate::OncRpc)) on a bound,
+    /// **trusted-local** AF_UNIX `listener`: each connection carries the peer's `SO_PEERCRED`
+    /// ([`UnixTrust::Local`]). Trusted-local AF_UNIX is exempt from the network-auth guard. For a
+    /// reverse-proxied socket use [`serve_proxied_unix_listener`](Self::serve_proxied_unix_listener).
+    pub async fn serve_unix_listener<W: Wire<S>>(
         &self,
         listener: UnixListener,
-        trust: UnixTrust,
+        wire: W,
     ) -> std::io::Result<()> {
-        // A proxied AF_UNIX listener is network-facing (a reverse proxy forwards remote clients in),
-        // so — like a TCP/TLS listener — every protocol must authenticate (peer-cred is the proxy's).
-        if trust == UnixTrust::Proxied {
-            self.require_network_auth()?;
-        }
-        let engine: Arc<dyn ProtocolEngine> = Arc::new(JsonRpcEngine::new(self.shared.clone()));
-        self.accept_unix(listener, trust, engine).await
+        let engine = wire.into_engine(self.host())?;
+        self.accept_unix(listener, UnixTrust::Local, engine).await
     }
 
-    /// Like [`serve_unix_listener`](Self::serve_unix_listener), but serves a caller-supplied
-    /// [`ProtocolEngine`] in place of JSON-RPC — the per-listener extension point. The engine owns
-    /// its own authentication, so the JSON-RPC network-auth guard is not applied here; scope the
-    /// listener's exposure to match the engine's auth model.
-    pub async fn serve_unix_listener_with(
+    /// Serve a network-facing `wire` on a **reverse-proxied** AF_UNIX `listener` — `SO_PEERCRED` is
+    /// the proxy's and is not trusted ([`UnixTrust::Proxied`]), so the wire's
+    /// [`admit_network`](crate::NetworkWire::admit_network) guard runs (JSON-RPC refuses a protocol
+    /// with no `$/sessionSetup`). ONC RPC is not a [`NetworkWire`](crate::NetworkWire), so it cannot
+    /// be served here — a compile error, by design.
+    pub async fn serve_proxied_unix_listener<W: NetworkWire<S>>(
         &self,
         listener: UnixListener,
-        trust: UnixTrust,
-        engine: Arc<dyn ProtocolEngine>,
+        wire: W,
     ) -> std::io::Result<()> {
-        self.accept_unix(listener, trust, engine).await
+        wire.admit_network(self.host())?;
+        let engine = wire.into_engine(self.host())?;
+        self.accept_unix(listener, UnixTrust::Proxied, engine).await
     }
 
     /// The shared AF_UNIX accept loop: each accepted connection becomes a [`ConnContext`] handed to
@@ -334,46 +294,24 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
         }
     }
 
-    /// Bind and serve an AF_UNIX socket (bind + accept loop), with the config's [`trust`](UnixConfig::trust)
-    /// posture. Runs forever on the happy path — spawn it (or `tokio::join!` several transports).
-    pub async fn serve_unix(&self, config: UnixConfig) -> std::io::Result<()> {
-        let trust = config.trust;
+    /// Bind and serve a `wire` on a **trusted-local** AF_UNIX socket (bind + accept loop). Runs
+    /// forever on the happy path — spawn it (or `tokio::join!` several transports).
+    pub async fn serve_unix<W: Wire<S>>(&self, config: UnixConfig, wire: W) -> std::io::Result<()> {
         let listener = Self::bind_unix(&config)?;
-        self.serve_unix_listener(listener, trust).await
+        self.serve_unix_listener(listener, wire).await
     }
 
-    /// Accept ONC RPC connections (RFC 5531, record-marking framed) on a bound AF_UNIX `listener`,
-    /// serving the methods of `config`'s registered protocol over the binary wire under its ONC RPC
-    /// program/version — each method's XDR proc-id is its procedure number. So a method registered
-    /// once is reachable over *both* the JSON-RPC transports and this one (one service, two wires),
-    /// chosen per listener. The demo authenticates with `AUTH_NONE`/`AUTH_SYS`, so it is offered only
-    /// over AF_UNIX (local peer-credential trust), never a network transport. Errors before serving if
-    /// the named protocol is not registered. Runs forever on the happy path.
-    pub async fn serve_oncrpc_unix_listener(
+    /// Bind and serve a network-facing `wire` on a TCP `addr`. The wire's
+    /// [`admit_network`](crate::NetworkWire::admit_network) guard runs (JSON-RPC refuses, before
+    /// binding, a protocol with no `$/sessionSetup` unless opted in). Runs forever on the happy path.
+    pub async fn serve_tcp<W: NetworkWire<S>>(
         &self,
-        listener: UnixListener,
-        config: OncRpcConfig,
+        addr: impl ToSocketAddrs,
+        wire: W,
     ) -> std::io::Result<()> {
-        let proto = self.shared.protocols.get(&config.protocol).cloned().ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!(
-                    "serve_oncrpc_unix_listener: no protocol named '{}' is registered",
-                    config.protocol
-                ),
-            )
-        })?;
-        let engine = OncRpcProtocol::new(proto.service().clone(), config.program, config.version);
-        self.serve_unix_listener_with(listener, UnixTrust::Local, Arc::new(engine)).await
-    }
-
-    /// Bind and serve a TCP `addr` (length-prefixed JSON framing). Refuses (before binding) if a
-    /// registered protocol has no `$/sessionSetup` unless opted in (see
-    /// [`require_network_auth`](Self::require_network_auth)). Runs forever on the happy path.
-    pub async fn serve_tcp(&self, addr: impl ToSocketAddrs) -> std::io::Result<()> {
-        self.require_network_auth()?;
+        wire.admit_network(self.host())?;
         let listener = TcpListener::bind(addr).await?;
-        self.serve_tcp_listener(listener).await
+        self.serve_tcp_listener(listener, wire).await
     }
 
     /// The local address a bound TCP listener ended up on — convenience for binding port 0 in
@@ -384,22 +322,17 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
         Ok((listener, local))
     }
 
-    /// Serve a TCP listener already obtained from [`bind_tcp`](Self::bind_tcp). Refuses an
-    /// unauthenticated protocol over the network (see [`require_network_auth`](Self::require_network_auth)).
-    pub async fn serve_tcp_listener(&self, listener: TcpListener) -> std::io::Result<()> {
-        self.require_network_auth()?;
-        let engine: Arc<dyn ProtocolEngine> = Arc::new(JsonRpcEngine::new(self.shared.clone()));
-        self.accept_tcp(listener, engine).await
-    }
-
-    /// Like [`serve_tcp_listener`](Self::serve_tcp_listener), but serves a caller-supplied
-    /// [`ProtocolEngine`] in place of JSON-RPC — the per-listener extension point. The engine owns
-    /// its own authentication (the JSON-RPC network-auth guard is not applied).
-    pub async fn serve_tcp_listener_with(
+    /// Serve a network-facing `wire` on a TCP listener obtained from [`bind_tcp`](Self::bind_tcp).
+    /// The wire's [`admit_network`](crate::NetworkWire::admit_network) guard runs (JSON-RPC refuses a
+    /// protocol with no `$/sessionSetup`). A pre-built engine can be served via
+    /// [`CustomWire`](crate::CustomWire).
+    pub async fn serve_tcp_listener<W: NetworkWire<S>>(
         &self,
         listener: TcpListener,
-        engine: Arc<dyn ProtocolEngine>,
+        wire: W,
     ) -> std::io::Result<()> {
+        wire.admit_network(self.host())?;
+        let engine = wire.into_engine(self.host())?;
         self.accept_tcp(listener, engine).await
     }
 

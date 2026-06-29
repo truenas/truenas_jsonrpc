@@ -14,7 +14,7 @@ use truenas_rpc::{
     FileTransfer, JsonRpcError, RpcFdPassMethod, RpcFdTransferMethod, JsonRpcProtocol,
     MethodDef, RequestCtx, TransferDirection,
 };
-use truenas_rpc_server::{framing, FileTransferExt, TruenasRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, FileTransferExt, JsonRpc, TruenasRpcServer, UnixConfig};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 const N: usize = 4096;
@@ -166,7 +166,7 @@ async fn connect(tag: &str) -> (UnixStream, std::path::PathBuf, tokio::task::Joi
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await })
+        tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await })
     };
     let client = UnixStream::connect(&path).await.unwrap();
     (client, path, task)

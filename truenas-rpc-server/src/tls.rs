@@ -29,9 +29,10 @@ use openssl::x509::{X509Ref, X509};
 use tokio::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tokio_openssl::SslStream;
 
-use crate::engine::{ConnContext, JsonRpcEngine, ProtocolEngine};
+use crate::engine::ConnContext;
 use crate::peer::{Peer, TlsPeer, TransportPosture};
 use crate::server::TruenasRpcServer;
+use crate::wire::NetworkWire;
 
 // Linux kTLS confirmation: getsockopt(SOL_TLS, TLS_TX/TLS_RX) returns the 4-byte
 // `struct tls_crypto_info` header once that direction's crypto is installed, else errors.
@@ -107,19 +108,22 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// Accept TLS connections on a bound TCP `listener` until an accept error occurs, per the
     /// config's [`TlsMode`]. A handshake failure (or kTLS not engaging, in kernel mode) drops
     /// just that connection.
-    pub async fn serve_tls_listener(
+    pub async fn serve_tls_listener<W: NetworkWire<S>>(
         &self,
         listener: TcpListener,
         tls: TlsConfig,
+        wire: W,
     ) -> std::io::Result<()> {
-        self.require_network_auth()?;
+        wire.admit_network(self.host())?;
+        let engine = wire.into_engine(self.host())?;
+        let limit = self.shared.limit;
         let acceptor = tls.acceptor;
         let mode = tls.mode;
         loop {
             let (tcp, addr) = listener.accept().await?;
             let _ = tcp.set_nodelay(true);
             let acceptor = acceptor.clone();
-            let shared = self.shared.clone();
+            let engine = engine.clone();
             tokio::spawn(async move {
                 match mode {
                     TlsMode::Kernel => {
@@ -144,9 +148,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
                             stream: Box::new(stream),
                             transfer_fd: Some(fd),
                             peer: tls_peer(addr, cert, binding, Some(TransportPosture::KernelTls)),
-                            limit: shared.limit,
+                            limit,
                         };
-                        JsonRpcEngine::new(shared).serve(ctx).await;
+                        engine.serve(ctx).await;
                     }
                     TlsMode::Userspace => {
                         let Some(stream) = userspace_accept(&acceptor, tcp).await else { return };
@@ -156,20 +160,25 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
                             stream: Box::new(stream),
                             transfer_fd: None,
                             peer: tls_peer(addr, cert, binding, None),
-                            limit: shared.limit,
+                            limit,
                         };
-                        JsonRpcEngine::new(shared).serve(ctx).await;
+                        engine.serve(ctx).await;
                     }
                 }
             });
         }
     }
 
-    /// Bind a TCP `addr` and serve TLS on it (bind + accept loop). Runs forever on the happy
-    /// path — spawn it to run alongside other transports.
-    pub async fn serve_tls(&self, addr: impl ToSocketAddrs, tls: TlsConfig) -> std::io::Result<()> {
+    /// Bind a TCP `addr` and serve a network-facing `wire` over TLS on it (bind + accept loop). Runs
+    /// forever on the happy path — spawn it to run alongside other transports.
+    pub async fn serve_tls<W: NetworkWire<S>>(
+        &self,
+        addr: impl ToSocketAddrs,
+        tls: TlsConfig,
+        wire: W,
+    ) -> std::io::Result<()> {
         let listener = TcpListener::bind(addr).await?;
-        self.serve_tls_listener(listener, tls).await
+        self.serve_tls_listener(listener, tls, wire).await
     }
 }
 

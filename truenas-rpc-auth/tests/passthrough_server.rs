@@ -19,7 +19,7 @@ use truenas_rpc::JsonRpcProtocol;
 use truenas_rpc_auth::{
     install, AuthSession, AuthStack, BrokerContext, BrokerServer, BrokerVerdict, Principal,
 };
-use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, JsonRpc, TruenasRpcServer, UnixConfig};
 
 fn tmp(tag: &str) -> PathBuf {
     let p = std::env::temp_dir().join(format!("tn-pt-srv-{}-{tag}.sock", std::process::id()));
@@ -63,7 +63,7 @@ async fn passthrough_over_a_real_unix_server_hands_off_to_the_broker() {
         .protocol("main", proto)
         .build();
     let listener = TruenasRpcServer::<AuthSession>::bind_unix(&UnixConfig::new(&server_path)).unwrap();
-    let task = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
+    let task = tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await });
 
     let got = tokio::time::timeout(Duration::from_secs(5), async {
         let mut client = UnixStream::connect(&server_path).await.unwrap();

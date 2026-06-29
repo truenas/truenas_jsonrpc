@@ -8,7 +8,7 @@ use truenas_rpc::{
     JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx, RoleMask, Session,
     SessionLifecycle,
 };
-use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, JsonRpc, TruenasRpcServer, UnixConfig};
 
 // Bound requests must carry a UUID id (the core envelope parser enforces it; `$/negotiate` is
 // exempt, being server-handled). Reused across this connection's sequential, non-cancellable calls.
@@ -74,7 +74,7 @@ async fn sessions_lists_every_protocol_server_wide() {
 
     let srv = server();
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
-    let handle = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
+    let handle = tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await });
 
     // Connection 1: a live session on `other`.
     let mut c1 = UnixStream::connect(&path).await.unwrap();
@@ -121,7 +121,7 @@ async fn sessions_denied_for_non_admin() {
     let _ = std::fs::remove_file(&path);
     let srv = server();
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
-    let handle = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
+    let handle = tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await });
 
     // Negotiate `admin` but DON'T set up → no roles → `$/sessions` is Not authorized.
     let mut c = UnixStream::connect(&path).await.unwrap();

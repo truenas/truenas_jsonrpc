@@ -16,7 +16,7 @@ use truenas_rpc::{
     FileTransfer, JsonRpcError, RpcFdTransferMethod, RpcMethod, JsonRpcProtocol, MethodDef,
     RequestCtx, TransferDirection,
 };
-use truenas_rpc_server::{FileTransferExt, TruenasRpcServer, TlsConfig, TlsMode};
+use truenas_rpc_server::{FileTransferExt, JsonRpc, TruenasRpcServer, TlsConfig, TlsMode};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -164,7 +164,7 @@ async fn round_trip(mode: TlsMode) {
     let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
+        tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
     };
 
     let (neg, add) = tokio::task::spawn_blocking(move || client_roundtrip(addr)).await.unwrap();
@@ -198,7 +198,7 @@ async fn kernel_tls_transfer_is_encrypted() {
     let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
+        tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
     };
 
     let (matched, fin) = tokio::task::spawn_blocking(move || client_download(addr, N)).await.unwrap();
@@ -329,7 +329,7 @@ async fn mtls_surfaces_verified_client_cert() {
     let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
+        tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
     };
 
     // A CA-signed client cert is verified by the handshake and surfaces on the Peer.
@@ -412,7 +412,7 @@ async fn tls_surfaces_server_end_point_binding() {
         let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
         let task = {
             let srv = srv.clone();
-            tokio::spawn(async move { srv.serve_tls_listener(listener, tls).await })
+            tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
         };
 
         let (reported, client_derived) =

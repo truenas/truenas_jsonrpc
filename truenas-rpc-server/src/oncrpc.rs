@@ -36,6 +36,7 @@ use truenas_rpc::{ErrorCode, JsonRpcError, NullOutbound, Service};
 use truenas_xdr::{from_bytes_with, to_bytes, Strictness, VarOpaque};
 
 use crate::engine::{ConnContext, ProtocolEngine};
+use crate::wire::{Wire, WireHost};
 
 // --- ONC RPC message constants (RFC 5531 §9) --------------------------------
 
@@ -68,8 +69,8 @@ const AUTH_REJECTEDCRED: u32 = 2;
 // --- The demo program -------------------------------------------------------
 
 /// The default program number, in RFC 5531's user-defined range (`0x2000_0000..=0x3FFF_FFFF`). The
-/// program/version an engine answers to are configurable per listener — see
-/// [`OncRpcConfig`](crate::OncRpcConfig); these are the defaults.
+/// program/version an engine answers to are configurable per listener — see [`OncRpc`]; these are the
+/// defaults, re-exported as [`OncRpc::DEFAULT_PROGRAM`] / [`OncRpc::DEFAULT_VERSION`].
 pub(crate) const DEFAULT_PROGRAM: u32 = 0x2000_0001;
 /// The default program version.
 pub(crate) const DEFAULT_VERSION: u32 = 1;
@@ -321,6 +322,71 @@ impl<S: Send + Sync + 'static> ProtocolEngine for OncRpcProtocol<S> {
     fn serve<'a>(&'a self, ctx: ConnContext) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         Box::pin(self.serve_connection(ctx.stream, ctx.limit))
     }
+}
+
+/// The **ONC RPC (RFC 5531) wire** as a [`Wire`] value — pass it to a `serve_*` method to serve a
+/// registered protocol's methods over the record-marking binary wire (each method's XDR proc-id is
+/// its procedure number). AF_UNIX-only (`AUTH_NONE`/`AUTH_SYS`), so it is **not** a
+/// [`NetworkWire`](crate::NetworkWire): serving it over TCP/TLS is a compile error.
+pub struct OncRpc {
+    /// The registered protocol whose methods are served. `None` → the sole registered protocol.
+    protocol: Option<String>,
+    program: u32,
+    version: u32,
+}
+
+impl OncRpc {
+    /// The reference engine's default program number (RFC 5531 user range).
+    pub const DEFAULT_PROGRAM: u32 = DEFAULT_PROGRAM;
+    /// The reference engine's default program version.
+    pub const DEFAULT_VERSION: u32 = DEFAULT_VERSION;
+
+    /// Serve the registered protocol `name`, at the default program/version.
+    pub fn protocol(name: impl Into<String>) -> Self {
+        OncRpc { protocol: Some(name.into()), program: DEFAULT_PROGRAM, version: DEFAULT_VERSION }
+    }
+
+    /// Serve the **sole** registered protocol at an explicit program/version. Errors at serve time if
+    /// zero or more than one protocol is registered — use [`protocol`](Self::protocol) to name one.
+    pub fn program(program: u32, version: u32) -> Self {
+        OncRpc { protocol: None, program, version }
+    }
+
+    /// Name the registered protocol to serve (defaults to the sole one).
+    #[must_use]
+    pub fn with_protocol(mut self, name: impl Into<String>) -> Self {
+        self.protocol = Some(name.into());
+        self
+    }
+
+    /// Set the ONC RPC program number + version this listener answers to.
+    #[must_use]
+    pub fn at(mut self, program: u32, version: u32) -> Self {
+        self.program = program;
+        self.version = version;
+        self
+    }
+}
+
+impl<S: Send + Sync + 'static> Wire<S> for OncRpc {
+    fn into_engine(self, host: WireHost<'_, S>) -> std::io::Result<Arc<dyn ProtocolEngine>> {
+        let service = match &self.protocol {
+            Some(name) => host.service(name).ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("OncRpc: no protocol named '{name}' is registered"),
+                )
+            })?,
+            None => host.sole_service().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "OncRpc: no protocol named, and not exactly one is registered".to_string(),
+                )
+            })?,
+        };
+        Ok(Arc::new(OncRpcProtocol::new(service, self.program, self.version)))
+    }
+    // No `NetworkWire` impl → ONC-over-network (TCP/TLS) is a compile error.
 }
 
 #[cfg(test)]

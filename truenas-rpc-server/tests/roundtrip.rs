@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
 use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, JsonRpc, TruenasRpcServer, UnixConfig};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -83,7 +83,7 @@ async fn unix_round_trip() {
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await })
+        tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await })
     };
 
     let mut client = UnixStream::connect(&path).await.unwrap();
@@ -99,7 +99,7 @@ async fn tcp_round_trip() {
     let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_tcp_listener(listener).await })
+        tokio::spawn(async move { srv.serve_tcp_listener(listener, JsonRpc).await })
     };
 
     let mut client = TcpStream::connect(addr).await.unwrap();
@@ -114,7 +114,7 @@ async fn negotiate_errors() {
     let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_tcp_listener(listener).await })
+        tokio::spawn(async move { srv.serve_tcp_listener(listener, JsonRpc).await })
     };
 
     // A method call before `$/negotiate` → "negotiate a protocol first".
@@ -142,7 +142,7 @@ async fn network_auth_guard() {
     // (1) A network transport refuses it (an unauthenticated remote client must not reach gated
     //     methods) — the serve call returns immediately with InvalidInput, naming the protocol.
     let (listener, _addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
-    let err = unauth().serve_tcp_listener(listener).await.unwrap_err();
+    let err = unauth().serve_tcp_listener(listener, JsonRpc).await.unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     assert!(err.to_string().contains("main"), "error should name the protocol: {err}");
 
@@ -151,7 +151,7 @@ async fn network_auth_guard() {
     let _ = std::fs::remove_file(&path);
     let srv = unauth();
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
-    let task = tokio::spawn(async move { srv.serve_unix_listener(listener, UnixTrust::Local).await });
+    let task = tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await });
     let mut client = UnixStream::connect(&path).await.unwrap();
     negotiate_then_add(&mut client).await;
     task.abort();

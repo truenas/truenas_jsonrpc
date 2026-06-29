@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
-use truenas_rpc_server::{framing, TruenasRpcServer, UnixConfig, UnixTrust};
+use truenas_rpc_server::{framing, JsonRpc, TruenasRpcServer, UnixConfig};
 
 #[derive(Deserialize, Serialize)]
 struct AddArgs {
@@ -75,11 +75,12 @@ async fn main() -> std::io::Result<()> {
         .protocol("demo", demo_protocol())
         .build();
 
-    // 2. Bind a Unix socket and serve it in the background. `UnixTrust::Local` means the peer is a
-    //    genuinely-local process (its `SO_PEERCRED` is the caller, not a reverse proxy).
+    // 2. Bind a Unix socket and serve the `JsonRpc` wire on it in the background. `serve_unix_listener`
+    //    is trusted-local — the peer is a genuinely-local process (its `SO_PEERCRED` is the caller, not
+    //    a reverse proxy); a proxied socket would use `serve_proxied_unix_listener`.
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path))?;
     let server_task =
-        tokio::spawn(async move { server.serve_unix_listener(listener, UnixTrust::Local).await });
+        tokio::spawn(async move { server.serve_unix_listener(listener, JsonRpc).await });
 
     // 3. A client. Bind the protocol with `$/negotiate`, then call its methods.
     let mut client = UnixStream::connect(&path).await?;

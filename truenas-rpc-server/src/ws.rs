@@ -29,7 +29,7 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// Accept WebSocket connections on a bound TCP `listener` until an accept error occurs. A
     /// failed WebSocket handshake drops just that connection.
     pub async fn serve_websocket_listener(&self, listener: TcpListener) -> std::io::Result<()> {
-        self.require_network_auth()?;
+        self.shared.require_session_auth()?;
         loop {
             let (tcp, addr) = listener.accept().await?;
             let _ = tcp.set_nodelay(true);
@@ -62,7 +62,7 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
         // A proxied listener is network-facing (nginx forwards remote clients), so every protocol
         // must authenticate — peer-cred is the proxy's, not the end client's.
         if trust == UnixTrust::Proxied {
-            self.require_network_auth()?;
+            self.shared.require_session_auth()?;
         }
         loop {
             let (stream, _addr) = listener.accept().await?;
@@ -109,7 +109,7 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
         listener: TcpListener,
         tls: crate::tls::TlsConfig,
     ) -> std::io::Result<()> {
-        self.require_network_auth()?;
+        self.shared.require_session_auth()?;
         let acceptor = tls.acceptor();
         loop {
             let (tcp, addr) = listener.accept().await?;

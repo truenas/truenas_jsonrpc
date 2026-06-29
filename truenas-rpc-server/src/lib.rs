@@ -27,12 +27,15 @@ mod server;
 #[cfg(feature = "tls")]
 mod tls;
 mod transfer;
+mod wire;
 #[cfg(feature = "websocket")]
 mod ws;
 
 pub use engine::{AsyncStream, ConnContext, ProtocolEngine};
+pub use oncrpc::OncRpc;
 pub use peer::{ForwardedOrigin, Peer, TlsPeer, Transport, TransportPosture, Ucred, UnixTrust};
-pub use server::{TruenasRpcServer, TruenasRpcServerBuilder, OncRpcConfig, UnixConfig};
+pub use server::{TruenasRpcServer, TruenasRpcServerBuilder, UnixConfig};
 pub use transfer::FileTransferExt;
+pub use wire::{CustomWire, JsonRpc, NetworkWire, Wire, WireHost};
 #[cfg(feature = "tls")]
 pub use tls::{TlsConfig, TlsMode};
