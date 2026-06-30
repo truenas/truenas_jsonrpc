@@ -9,7 +9,10 @@
 // code, then re-exported at the crate root.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 mod generated {
+    // The server (structs + `Handlers` + `register`) and the typed client (`DemoClient`) are
+    // generated from the same `$defs`, so including both here shares one set of structs.
     include!(concat!(env!("OUT_DIR"), "/server_gen.rs"));
+    include!(concat!(env!("OUT_DIR"), "/client_gen.rs"));
 }
 pub use generated::*;
 
@@ -103,6 +106,43 @@ mod tests {
         assert_eq!(rows.len(), 2); // id 1 and 3
         assert_eq!(rows[0]["id"], 1);
         assert_eq!(rows[1]["id"], 3);
+    }
+
+    #[tokio::test]
+    async fn generated_client_over_a_live_server() {
+        // The full pipeline: json-idl → generated server (`register`) served over `JsonRpc`, and the
+        // json-idl → generated `DemoClient` driving it over a real AF_UNIX socket via the client engine.
+        use truenas_rpc_client::{ClientConfig, Endpoint, JsonRpcClient, QueryResult};
+        use truenas_rpc_server::{JsonRpc, TruenasRpcServer, UnixConfig};
+
+        let path = std::env::temp_dir().join(format!("demo-e2e-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let server = TruenasRpcServer::<()>::builder("demo").protocol("demo", proto()).build();
+        let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+        let task = tokio::spawn(async move { server.serve_unix_listener(listener, JsonRpc).await });
+
+        let (jc, negotiated, _notifs) =
+            JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "demo", ClientConfig::default())
+                .await
+                .unwrap();
+        assert_eq!(negotiated.protocol, "demo");
+        let client = DemoClient::new(jc);
+
+        // Plain typed call, then the dual-wire `add`, then a secret round-trip.
+        assert_eq!(client.greet(GreetArgs { name: "world".into() }).await.unwrap().message, "hi world");
+        assert_eq!(client.add(AddArgs { a: 20, b: 22 }).await.unwrap().sum, 42);
+        let login =
+            client.login(LoginArgs { user: "u".into(), password: "pw".to_string().into() }).await.unwrap();
+        assert!(login.ok);
+
+        // The filterable query: no filter → all three rows.
+        match client.query(QueryArgs {}, None, None).await.unwrap() {
+            QueryResult::Rows(rows) => assert_eq!(rows.len(), 3),
+            other => panic!("expected rows, got {other:?}"),
+        }
+
+        task.abort();
+        let _ = std::fs::remove_file(&path);
     }
 
     #[tokio::test]

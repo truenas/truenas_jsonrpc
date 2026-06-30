@@ -14,6 +14,8 @@ truenas-rpc = { path = "../../truenas-rpc" }
 # Audit is on by default in generated servers (demo.json has no `audit` block), so the
 # generated `register`/`make_audit_sink` reference the kernel-audit backend.
 truenas-audit = { path = "../../truenas-audit" }
+# The generated client (`client_gen.rs`, included in the lib) targets the client runtime crate.
+truenas-rpc-client = { path = "../../truenas-rpc-client" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
@@ -21,5 +23,7 @@ serde_json = { workspace = true }
 truenas-rpc-codegen = { path = "../../truenas-rpc-codegen" }
 
 [dev-dependencies]
-tokio = { version = "1", features = ["rt", "macros"] }
+# The end-to-end test stands up a live server and drives the generated client against it.
+truenas-rpc-server = { path = "../../truenas-rpc-server" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
 truenas-xdr = { path = "../../truenas-xdr" }

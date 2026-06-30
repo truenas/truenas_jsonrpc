@@ -114,7 +114,9 @@ dependencies = [
  "tokio",
  "truenas-audit",
  "truenas-rpc",
+ "truenas-rpc-client",
  "truenas-rpc-codegen",
+ "truenas-rpc-server",
  "truenas-xdr",
 ]
 

@@ -9,7 +9,7 @@
 
 use std::cmp::Ordering;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::path::{split_path, PathPart};
@@ -20,8 +20,9 @@ const NULL: Value = Value::Null;
 
 /// Wire model for `query-options` (the supported subset of the C `compile_options` kwargs;
 /// `select` is omitted — see the crate-level deviation note). All fields default off, so an
-/// absent `query-options` is the identity.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// absent `query-options` is the identity. `Serialize` lets a *client* build them outbound (the
+/// server only deserializes them).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct QueryOptions {
     /// Return only the first match (with no `order_by`, short-circuits the scan).
     #[serde(default)]

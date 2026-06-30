@@ -43,9 +43,9 @@ for b in "${BINS[@]}"; do [ -n "$b" ] && OBJ+=(--object "$b"); done
 # proc-macro crate (`truenas-xdr-derive` runs at compile time, not in the instrumented test
 # binaries; its generated output is covered behaviorally by `truenas-xdr`'s tests), and the
 # FFI / socket-I/O crates excluded by design (`truenas-rpc-server` does kTLS/SCM_RIGHTS I/O;
-# `truenas-audit` does NETLINK_AUDIT FFI — both are reachable from the default-member demo but
-# tested behaviorally, not held to the line gate). See the workspace Cargo.toml.
-IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-rpc-server/|truenas-audit/)'
+# `truenas-rpc-client` does socket I/O; `truenas-audit` does NETLINK_AUDIT FFI — all reachable from
+# the default-member demo but tested behaviorally, not held to the line gate). See the workspace Cargo.toml.
+IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-rpc-server/|truenas-rpc-client/|truenas-audit/)'
 
 # Merged line coverage, exported as lcov (the standard interchange format Codecov/Coveralls
 # consume): a source line is covered if ANY test executed it. We deliberately gate on this
