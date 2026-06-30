@@ -28,7 +28,7 @@ messages, selects a protocol per connection with `$/negotiate`, and pumps the di
   `serve_tls(addr, tls, wire)` / `serve_tls_listener` — encrypted TCP via system OpenSSL.
 - `FileTransferExt` — for a `transfer` callback: blocking `write_all` / `read_exact` on the
   fd, zero-copy `sendfile` / `recvfile` (`sendfile(2)` / `splice(2)`, staying zero-copy over
-  kTLS), and `send_fds` / `recv_fds` (`SCM_RIGHTS`) for a `RpcFdPassMethod` over AF_UNIX.
+  kTLS), and `send_fds` / `recv_fds` (`SCM_RIGHTS`) for an `RpcFdPassMethod` over AF_UNIX.
 - *(feature `websocket`)* `serve_websocket` / `serve_websocket_listener` — JSON-RPC over
   `ws://` (one frame per WebSocket message; raw-fd transfer is refused on these connections);
   with `tls` too, `serve_wss` / `serve_wss_listener` for `wss://` (WebSocket over userspace TLS).
