@@ -190,6 +190,29 @@ fn cross_cutting_errors() {
 }
 
 #[test]
+fn protocol_errors() {
+    // A spec with one plain method + an overridable `protocols` list.
+    let with = |protos: &str| format!(r##"{{"name":"t","version":"1","protocols":{protos},"$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"x":{{"handler":"x","params":{{"$ref":"#/$defs/A"}},"result":{{"$ref":"#/$defs/A"}}}}}}}}"##);
+    // Empty / unsupported / duplicate are rejected; the message names only the supported protocols.
+    assert!(parse_err(&with("[]")).contains("at least one wire protocol"));
+    let unsup = parse_err(&with(r##"["json-rpc","ftp"]"##));
+    assert!(unsup.contains("unsupported protocol \"ftp\"") && unsup.contains("json-rpc, onc-rpc"));
+    assert!(parse_err(&with(r##"["json-rpc","json-rpc"]"##)).contains("listed twice"));
+    // onc-rpc with no xdr-reachable method serves only the NULL probe → rejected.
+    assert!(parse_err(&with(r##"["onc-rpc"]"##)).contains("no method is xdr-reachable"));
+
+    // Omitting `protocols` defaults to json-rpc; xdr under json-rpc alone is valid (the TXDR
+    // sub-wire — NOT coupled to onc-rpc); json-rpc + onc-rpc with an xdr method is valid.
+    let xdr = |protos: &str| format!(r##"{{"name":"t","version":"1","protocols":{protos},"$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"x":{{"handler":"x","params":{{"$ref":"#/$defs/A"}},"result":{{"$ref":"#/$defs/A"}},"xdr":true,"xdr_id":1001}}}}}}"##);
+    assert!(Spec::parse(&xdr(r##"["json-rpc"]"##), "spec").is_ok());
+    assert!(Spec::parse(&xdr(r##"["json-rpc","onc-rpc"]"##), "spec").is_ok());
+
+    // A server_client subscription cannot be xdr (the binary wire has no server-push).
+    let sub_xdr = r##"{"name":"t","version":"1","$defs":{"A":{"type":"object","properties":{},"required":[]}},"methods":{"e":{"handler":"e","params":{"$ref":"#/$defs/A"},"direction":"server_client","notifies":{"$ref":"#/$defs/A"},"xdr":true,"xdr_id":1001}}}"##;
+    assert!(parse_err(sub_xdr).contains("server_client subscription cannot be xdr"));
+}
+
+#[test]
 fn type_mapping_errors() {
     assert!(gen_err(r#"{"A":{"type":"object","properties":{"f":{"enum":[1,2]}}}}"#).contains("must all be strings"));
     assert!(gen_err(r#"{"A":{"type":"object","properties":{"f":{"enum":[]}}}}"#).contains("at least one value"));

@@ -13,6 +13,7 @@ use crate::typemap::ref_name;
 pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
     let err = |m: String| CodegenError::at(origin, m);
     let mut seen_xdr_ids: HashMap<i64, String> = HashMap::new();
+    let mut any_xdr = false;
 
     for (wire, m) in spec.methods.iter() {
         if !is_ident(&m.handler) {
@@ -55,8 +56,11 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             }
         }
 
-        // xdr ⇒ xdr_id required, > 1000, unique.
+        // xdr ⇒ xdr_id required, > 1000, unique. `xdr` is the **TXDR binary sub-wire of JSON-RPC**,
+        // not exclusive to ONC RPC — a method may be `xdr` under `["json-rpc"]` alone. Do NOT couple
+        // `xdr` to the `onc-rpc` protocol; ONC RPC merely adds a second framing over these proc-ids.
         if m.xdr {
+            any_xdr = true;
             match m.xdr_id {
                 None => return Err(err(format!("method {wire:?}: xdr requires 'xdr_id'"))),
                 Some(id) => {
@@ -85,6 +89,41 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
                 )));
             }
         }
+
+        // A subscription (server→client) cannot ride the binary wire — the binary framing carries no
+        // server-push path (so it is never reachable over ONC RPC or the TXDR sub-wire).
+        if m.xdr && m.direction() == Direction::ServerClient {
+            return Err(err(format!(
+                "method {wire:?}: a server_client subscription cannot be xdr (the binary wire has no server-push)"
+            )));
+        }
+    }
+
+    // The declared wire protocols: non-empty, each supported, no duplicates.
+    if spec.protocols.is_empty() {
+        return Err(err("protocols must list at least one wire protocol".to_string()));
+    }
+    let mut seen_protocols: HashMap<&str, ()> = HashMap::new();
+    let mut has_onc = false;
+    for p in &spec.protocols {
+        match classify(p) {
+            ProtocolKind::JsonRpc => {}
+            ProtocolKind::OncRpc => has_onc = true,
+            ProtocolKind::Unsupported => {
+                return Err(err(format!("unsupported protocol {p:?} (supported: json-rpc, onc-rpc)")))
+            }
+        }
+        if seen_protocols.insert(p.as_str(), ()).is_some() {
+            return Err(err(format!("protocol {p:?} listed twice")));
+        }
+    }
+    // ONC RPC needs at least one binary-reachable method, else the engine serves only the NULL probe.
+    if has_onc && !any_xdr {
+        return Err(err(
+            "onc-rpc is declared but no method is xdr-reachable (set xdr + xdr_id on a method); \
+             ONC RPC would expose only the NULL probe"
+                .to_string(),
+        ));
     }
 
     // Top-level audit config: a given service must be non-empty; a given queue bound must be > 0.
@@ -97,4 +136,22 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// The wire protocols the codegen knows how to emit for. An IDL may *declare* any protocol string,
+/// but only these are supported — everything else is [`ProtocolKind::Unsupported`] (a validation
+/// error). Only `json-rpc` and `onc-rpc` are named here, so a future protocol never needs naming in
+/// committed code.
+enum ProtocolKind {
+    JsonRpc,
+    OncRpc,
+    Unsupported,
+}
+
+fn classify(name: &str) -> ProtocolKind {
+    match name {
+        "json-rpc" => ProtocolKind::JsonRpc,
+        "onc-rpc" => ProtocolKind::OncRpc,
+        _ => ProtocolKind::Unsupported,
+    }
 }

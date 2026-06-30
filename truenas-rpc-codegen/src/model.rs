@@ -67,6 +67,11 @@ pub struct Spec {
     pub name: String,
     /// The service version (OpenRPC `info.version`).
     pub version: String,
+    /// The wire protocol(s) this service is served over. Default `["json-rpc"]`. An open list: any
+    /// string parses, but validation rejects an unsupported one — only `json-rpc` and `onc-rpc` are
+    /// built in, so a future protocol need never be named here.
+    #[serde(default = "default_protocols")]
+    pub protocols: Vec<String>,
     /// Named request/result/entry types.
     #[serde(rename = "$defs", default)]
     pub defs: OrderedMap<SchemaNode>,
@@ -96,6 +101,11 @@ impl Spec {
             queue_bound: self.audit.as_ref().and_then(|a| a.queue_bound),
         })
     }
+}
+
+/// The default `protocols` when the IDL omits the key: JSON-RPC only.
+fn default_protocols() -> Vec<String> {
+    vec!["json-rpc".to_string()]
 }
 
 /// Top-level audit configuration. The generated server installs a Linux kernel-audit sink
