@@ -115,3 +115,6 @@ where
 {
     truenas_audit::LinuxAuditSink::<S>::builder("sample").identity(identity).build()
 }
+
+/// The wire protocols this service is served over (from the json-idl `protocols`).
+pub const PROTOCOLS: &[&str] = &["json-rpc"];

@@ -40,6 +40,7 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     out.push_str(&emit_register(spec)?);
     out.push_str(&emit_audit(spec));
     out.push_str(&emit_python_table(spec));
+    out.push_str(&emit_protocols(spec));
     Ok(out)
 }
 
@@ -305,6 +306,24 @@ fn emit_audit(spec: &Spec) -> String {
         "\n/// Build the spec-configured Linux kernel-audit sink with your identity extractor.\n/// `register` installs one with an empty extractor by default; pass an extractor that reads your\n/// session state and re-install via `.audit_sink(..)` to attribute records (`acct=`, uid, origin).\npub fn make_audit_sink<S, F>(identity: F) -> truenas_audit::LinuxAuditSink<S>\nwhere\n    S: Send + Sync + 'static,\n    F: Fn(&truenas_rpc::Session<S>) -> truenas_audit::AuditPrincipal + Send + Sync + 'static,\n{{\n    truenas_audit::LinuxAuditSink::<S>::builder({service}){queue}.identity(identity).build()\n}}\n",
         service = str_lit(&audit.service),
     )
+}
+
+/// The declared wire protocols as a const, plus — when `onc-rpc` is declared — the default ONC RPC
+/// program/version so a consumer can wire `OncRpc::protocol(name).at(ONC_PROGRAM, ONC_VERSION)`
+/// without magic numbers. The program/version are generic RFC 5531 user-range defaults (a server-wiring
+/// concern, kept out of the IDL); override them per listener.
+fn emit_protocols(spec: &Spec) -> String {
+    let lits: Vec<String> = spec.protocols.iter().map(|p| str_lit(p)).collect();
+    let mut out = format!(
+        "\n/// The wire protocols this service is served over (from the json-idl `protocols`).\npub const PROTOCOLS: &[&str] = &[{}];\n",
+        lits.join(", ")
+    );
+    if spec.protocols.iter().any(|p| p == "onc-rpc") {
+        out.push_str(
+            "\n/// Default ONC RPC program/version this service answers to (override per listener).\npub const ONC_PROGRAM: u32 = 0x2000_0001;\npub const ONC_VERSION: u32 = 1;\n",
+        );
+    }
+    out
 }
 
 fn emit_python_table(spec: &Spec) -> String {

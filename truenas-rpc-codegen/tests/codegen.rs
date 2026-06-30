@@ -121,6 +121,21 @@ fn audit_config() {
     assert!(parse_err(r##"{"name":"t","version":"1","audit":{"bogus":1},"methods":{}}"##).contains("unknown field"));
 }
 
+#[test]
+fn protocols_const() {
+    // Default: PROTOCOLS lists json-rpc; no ONC constants emitted.
+    let s = generate_server(&sample()).unwrap();
+    assert!(s.contains(r#"pub const PROTOCOLS: &[&str] = &["json-rpc"];"#));
+    assert!(!s.contains("ONC_PROGRAM"));
+
+    // onc-rpc declared (with an xdr method) → PROTOCOLS + the default ONC program/version.
+    let onc = r##"{"name":"svc","version":"1","protocols":["json-rpc","onc-rpc"],"$defs":{"A":{"type":"object","properties":{},"required":[]}},"methods":{"m":{"handler":"m","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"},"xdr":true,"xdr_id":1001}}}"##;
+    let s = generate_server(&Spec::parse(onc, "spec").unwrap()).unwrap();
+    assert!(s.contains(r#"pub const PROTOCOLS: &[&str] = &["json-rpc", "onc-rpc"];"#));
+    assert!(s.contains("pub const ONC_PROGRAM: u32 = 0x2000_0001;"));
+    assert!(s.contains("pub const ONC_VERSION: u32 = 1;"));
+}
+
 // --- load_dir / merge / sources ----------------------------------------------
 
 #[test]
