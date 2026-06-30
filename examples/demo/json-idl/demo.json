@@ -70,10 +70,11 @@
       "auditMessage": "user login"
     },
     "add": {
-      "summary": "Sum two integers; reachable over JSON and the XDR binary wire.",
+      "summary": "Sum two integers; reachable over JSON and the XDR binary wire. Async (inline).",
       "handler": "add",
       "params": { "$ref": "#/$defs/AddArgs" },
       "result": { "$ref": "#/$defs/AddResult" },
+      "async": true,
       "xdr": true,
       "xdr_id": 1001
     },

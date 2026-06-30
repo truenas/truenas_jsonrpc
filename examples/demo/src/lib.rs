@@ -41,7 +41,7 @@ mod tests {
             // `password` is a `Secret<String>` (deref to read); `token` is `Secret<String>`.
             Ok(LoginResult { token: format!("tok-{}", &*req.password).into(), ok: !req.user.is_empty() })
         }
-        fn add(&self, req: AddArgs, _cx: &RequestCtx<()>) -> Result<AddResult, JsonRpcError> {
+        async fn add(&self, req: AddArgs, _cx: RequestCtx<()>) -> Result<AddResult, JsonRpcError> {
             Ok(AddResult { sum: req.a + req.b })
         }
         fn query(
