@@ -1,5 +1,5 @@
-//! Method definitions + the type-erased registry entry. Home of the **Codec** seam (layer 3:
-//! `Codec`/`WireParams`/`WireReply`) and the **Dispatch** (layer 5) method erasure (`Method`/`MethodImpl`).
+//! Method definitions + the type-erased registry entry. Home of the **encode** seam (layer 3:
+//! `WireParams`/`Encode`) and the **Dispatch** (layer 5) method erasure (`Method`/`MethodImpl`).
 //!
 //! A consumer registers a [`RpcMethod`] (sync handler — the common case) or an
 //! [`AsyncRpcMethod`] (async handler). The handler is any closure / `fn`
@@ -46,24 +46,13 @@ pub(crate) fn encode_result<T: Serialize>(value: &T) -> Result<Box<RawValue>, Js
         .map_err(|e| JsonRpcError::new(ErrorCode::InternalError, format!("Invalid result: {e}")))
 }
 
-// --- the codec seam ----------------------------------------------------------
+// --- the encode seam ---------------------------------------------------------
 //
 // A request is decoded and a reply encoded over one of several serde-shaped *wires*. Rather than
 // open-code a `decode`/`run` + `xdr_decode`/`xdr_run` method-pair on every erased trait (the N×M
-// that grows with each wire), each erased method has ONE `decode`/`run` pair that delegates the
+// that grows with each wire), each erased method has ONE `decode`/`run_into` pair that delegates the
 // per-wire (de)serialization to this seam. Adding a serde-shaped wire is a new arm here (plus a
 // dispatch entry point), not a new method on every erasure.
-
-/// The wire a message is (de)serialized on — passed to [`run`](ErasedSync::run) so it encodes the
-/// reply for the right wire.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) enum Codec {
-    /// JSON-RPC text wire (`serde_json`; self-describing).
-    Json,
-    /// TXDR binary wire (`truenas_xdr`; not self-describing — params reflect to a `Value` for
-    /// authz/audit at decode time).
-    Xdr,
-}
 
 /// Wire-shaped request params handed to [`decode`](ErasedSync::decode): the JSON wire carries a
 /// borrowed `RawValue` (text, possibly absent), the XDR wire raw bytes.
@@ -72,38 +61,30 @@ pub(crate) enum WireParams<'a> {
     Xdr(&'a [u8]),
 }
 
-/// Wire-shaped reply produced by [`run`](ErasedSync::run): JSON → a re-encoded `RawValue` (the
-/// dispatcher envelopes it); XDR → raw bytes (the server frames them).
-pub(crate) enum WireReply {
-    Json(Box<RawValue>),
-    Xdr(Vec<u8>),
+/// How the run seam writes a handler result as the **final framed reply**, straight into the
+/// dispatcher's output buffer — one pass, no intermediate `RawValue`/`Vec` + copy. Carries the
+/// per-wire framing context (the JSON string id / the XDR binary rid).
+#[derive(Clone, Copy)]
+pub(crate) enum Encode<'a> {
+    /// Write the framed JSON reply `{"jsonrpc":"2.0","result":<R>,"id":<id>}`.
+    Json(Option<&'a str>),
+    /// Write the framed TXDR reply (envelope + result) for this rid.
+    Xdr(Option<[u8; 16]>),
+    /// Write the bare XDR-serialized result body, **unframed** — the in-process op-table path
+    /// ([`RequestCtx::call_op`] / `run_proc`), whose caller frames the result its own way.
+    XdrBody,
 }
 
-impl WireReply {
-    /// The JSON reply body. The JSON dispatch always runs with [`Codec::Json`], so a non-JSON
-    /// reply here is a dispatch bug.
-    pub(crate) fn into_json(self) -> Box<RawValue> {
-        let WireReply::Json(reply) = self else {
-            unreachable!("JSON dispatch produced an XDR reply")
-        };
-        reply
-    }
-    /// The XDR reply bytes. The XDR dispatch always runs with [`Codec::Xdr`].
-    pub(crate) fn into_xdr(self) -> Vec<u8> {
-        let WireReply::Xdr(bytes) = self else {
-            unreachable!("XDR dispatch produced a JSON reply")
-        };
-        bytes
-    }
-}
-
-impl Codec {
-    /// Encode a handler result `R` for this wire (the run-side half of the seam).
-    fn encode_result<R: Serialize>(self, value: &R) -> Result<WireReply, JsonRpcError> {
+impl Encode<'_> {
+    /// Serialize `value` as the framed reply (or, for [`Encode::XdrBody`], the bare result body),
+    /// appended to `out`. The run-side half of the seam.
+    fn write_result<R: ?Sized + Serialize>(self, value: &R, out: &mut Vec<u8>) -> Result<(), JsonRpcError> {
         match self {
-            Codec::Json => encode_result(value).map(WireReply::Json),
-            Codec::Xdr => truenas_xdr::to_bytes(value)
-                .map(WireReply::Xdr)
+            Encode::Json(id) => crate::envelope::success_into(out, id, value)
+                .map_err(|e| JsonRpcError::new(ErrorCode::InternalError, format!("Invalid result: {e}"))),
+            Encode::Xdr(rid) => truenas_xdr::frame::build_reply_ok_into(out, rid, value)
+                .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}"))),
+            Encode::XdrBody => truenas_xdr::to_writer(&mut *out, value)
                 .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}"))),
         }
     }
@@ -139,10 +120,10 @@ where
 // --- type erasure ------------------------------------------------------------
 //
 // `decode` (typed param validation) runs *before* authorization so INVALID_PARAMS precedes
-// NOT_AUTHORIZED; `run` is handler + encode. `Accepts`/`Returns` live in the
+// NOT_AUTHORIZED; `run_into` is handler + encode. `Accepts`/`Returns` live in the
 // erasure struct's *self type* (`ClosureSync<A, R, F>`), keeping the trait impls well-formed (no
-// unconstrained impl params). Both delegate the wire (de)serialization to the [`Codec`] seam, so
-// one `decode`/`run` pair serves every wire.
+// unconstrained impl params). Both delegate the wire (de)serialization to the `WireParams`/`Encode`
+// seam, so one `decode`/`run_into` pair serves every wire.
 
 pub(crate) trait ErasedSync<S>: Send + Sync {
     /// Decode + typed-validate params off `params`' wire. Returns the boxed typed value and — for
@@ -153,13 +134,14 @@ pub(crate) trait ErasedSync<S>: Send + Sync {
         params: WireParams,
         want_value: bool,
     ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError>;
-    /// Run the handler on the decoded params and encode the result for `codec`'s wire.
-    fn run(
+    /// Run the handler on the decoded params and write the framed reply into `out` per `encode`.
+    fn run_into(
         &self,
-        codec: Codec,
+        encode: Encode,
         decoded: Box<dyn Any + Send>,
         cx: &RequestCtx<S>,
-    ) -> Result<WireReply, JsonRpcError>;
+        out: &mut Vec<u8>,
+    ) -> Result<(), JsonRpcError>;
     /// Run the handler on already-decoded params and return the **typed** result boxed, with **no
     /// wire encode** — the in-process path used by [`RequestCtx::call_op`]. A method that is not a
     /// plain request/response (e.g. filterable) returns an "not internally callable" error.
@@ -178,14 +160,15 @@ pub(crate) trait ErasedAsync<S>: Send + Sync {
         params: WireParams,
         want_value: bool,
     ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError>;
-    /// Await the handler and encode the result for `codec`'s wire. Run inline on the runtime (the
-    /// async handler yields), so — unlike the sync path — there is no `spawn_blocking` hop.
-    async fn run(
+    /// Await the handler and write the framed reply into `out` per `encode`. Run inline on the
+    /// runtime (the async handler yields), so — unlike the sync path — there is no `spawn_blocking` hop.
+    async fn run_into(
         &self,
-        codec: Codec,
+        encode: Encode<'_>,
         decoded: Box<dyn Any + Send>,
         cx: RequestCtx<S>,
-    ) -> Result<WireReply, JsonRpcError>;
+        out: &mut Vec<u8>,
+    ) -> Result<(), JsonRpcError>;
     /// See [`ErasedSync::run_value`] — the async in-process path (no wire encode).
     async fn run_value(
         &self,
@@ -213,17 +196,18 @@ where
     ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError> {
         decode_plain::<A>(params, want_value)
     }
-    fn run(
+    fn run_into(
         &self,
-        codec: Codec,
+        encode: Encode,
         decoded: Box<dyn Any + Send>,
         cx: &RequestCtx<S>,
-    ) -> Result<WireReply, JsonRpcError> {
+        out: &mut Vec<u8>,
+    ) -> Result<(), JsonRpcError> {
         let accepts = *decoded
             .downcast::<A>()
             .expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx)?;
-        codec.encode_result(&result)
+        encode.write_result(&result, out)
     }
     fn run_value(
         &self,
@@ -259,17 +243,18 @@ where
     ) -> Result<(Box<dyn Any + Send>, Value), JsonRpcError> {
         decode_plain::<A>(params, want_value)
     }
-    async fn run(
+    async fn run_into(
         &self,
-        codec: Codec,
+        encode: Encode<'_>,
         decoded: Box<dyn Any + Send>,
         cx: RequestCtx<S>,
-    ) -> Result<WireReply, JsonRpcError> {
+        out: &mut Vec<u8>,
+    ) -> Result<(), JsonRpcError> {
         let accepts = *decoded
             .downcast::<A>()
             .expect("decoded params type matches the method");
         let result = (self.f)(accepts, cx).await?;
-        codec.encode_result(&result)
+        encode.write_result(&result, out)
     }
     async fn run_value(
         &self,
@@ -390,25 +375,26 @@ where
             }
         }
     }
-    fn run(
+    fn run_into(
         &self,
-        codec: Codec,
+        encode: Encode,
         decoded: Box<dyn Any + Send>,
         cx: &RequestCtx<S>,
-    ) -> Result<WireReply, JsonRpcError> {
-        match codec {
-            Codec::Json => {
+        out: &mut Vec<u8>,
+    ) -> Result<(), JsonRpcError> {
+        match encode {
+            Encode::Json(_) => {
                 let aug = *decoded
                     .downcast::<AugIn<A>>()
                     .expect("decoded params type matches the method");
-                // Compile after authz (the caller runs `run` only on an allowed request), so a bad
-                // query → INVALID_PARAMS (via `From<FilterError>`) lands *after* NOT_AUTHORIZED.
+                // Compile after authz (the caller runs `run_into` only on an allowed request), so a
+                // bad query → INVALID_PARAMS (via `From<FilterError>`) lands *after* NOT_AUTHORIZED.
                 let cf = compile_filters(&aug.query_filters)?;
                 let co = compile_options(&aug.query_options)?;
-                let out = (self.f)(aug.base, cx, &cf, &co)?;
-                finalize_json(out, &aug.query_options).map(WireReply::Json)
+                let result = (self.f)(aug.base, cx, &cf, &co)?;
+                finalize_json_into(result, &aug.query_options, encode, out)
             }
-            Codec::Xdr => {
+            Encode::Xdr(_) | Encode::XdrBody => {
                 let (base, xopts, filters_json) = *decoded
                     .downcast::<(A, XdrQueryOptions, String)>()
                     .expect("decoded params type matches the method");
@@ -416,8 +402,8 @@ where
                     .map_err(|e| JsonRpcError::invalid_params(format!("query-filters: {e}")))?;
                 let cf = compile_filters(&filters)?;
                 let co = compile_options(&xopts.into_query_options())?;
-                let out = (self.f)(base, cx, &cf, &co)?;
-                finalize_xdr(out).map(WireReply::Xdr)
+                let result = (self.f)(base, cx, &cf, &co)?;
+                finalize_xdr_into(result, encode, out)
             }
         }
     }
@@ -430,39 +416,44 @@ where
     }
 }
 
-/// Encode a filterable result for the **JSON** wire: `count` →
+/// Write a filterable result for the **JSON** wire as the framed reply into `out`: `count` →
 /// the integer; `get` → the single record (or REQUEST_FAILED when none matched); otherwise
 /// the array of entries.
-fn finalize_json<E: Serialize>(
-    out: Filtered<E>,
+fn finalize_json_into<E: Serialize>(
+    result: Filtered<E>,
     opts: &QueryOptions,
-) -> Result<Box<RawValue>, JsonRpcError> {
-    match out {
-        Filtered::Count(n) => encode_result(&n),
+    encode: Encode,
+    out: &mut Vec<u8>,
+) -> Result<(), JsonRpcError> {
+    match result {
+        Filtered::Count(n) => encode.write_result(&n, out),
         Filtered::Rows(rows) => {
             if opts.get {
                 match rows.into_iter().next() {
-                    Some(e) => encode_result(&e),
+                    Some(e) => encode.write_result(&e, out),
                     None => Err(JsonRpcError::request_failed(
                         "no record matched query with get=True",
                     )),
                 }
             } else {
-                encode_result(&rows)
+                encode.write_result(&rows, out)
             }
         }
     }
 }
 
-/// Encode a filterable result for the **XDR** wire: `count` → a hyper; otherwise
+/// Write a filterable result for the **XDR** wire into `out`: `count` → a hyper; otherwise
 /// `u32 count + entries`. `get` is not
 /// offered over the binary wire (the reduced [`XdrQueryOptions`] has no `get`).
-fn finalize_xdr<E: Serialize>(out: Filtered<E>) -> Result<Vec<u8>, JsonRpcError> {
-    let bytes = match out {
-        Filtered::Count(n) => truenas_xdr::to_bytes(&n),
-        Filtered::Rows(rows) => truenas_xdr::to_bytes(&rows),
-    };
-    bytes.map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}")))
+fn finalize_xdr_into<E: Serialize>(
+    result: Filtered<E>,
+    encode: Encode,
+    out: &mut Vec<u8>,
+) -> Result<(), JsonRpcError> {
+    match result {
+        Filtered::Count(n) => encode.write_result(&n, out),
+        Filtered::Rows(rows) => encode.write_result(&rows, out),
+    }
 }
 
 /// The reduced `query-options` carried on the XDR wire: `count`, `order_by`, and hyper
@@ -954,19 +945,57 @@ impl From<truenas_filter::FilterError> for JsonRpcError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+    use truenas_xdr::frame;
 
-    // `into_json`/`into_xdr` are only ever called with the wire's matching reply variant (the JSON
-    // dispatch always runs `Codec::Json`, the XDR dispatch `Codec::Xdr`); call them on the mismatched
-    // variant directly so the `unreachable!` arms are covered and the invariant stays pinned.
+    // The `Encode` seam writes the framed reply straight into a buffer; each arm must match the
+    // two-step encode it replaces, byte-for-byte — the wire-compat invariant.
     #[test]
-    #[should_panic(expected = "JSON dispatch produced an XDR reply")]
-    fn into_json_rejects_an_xdr_reply() {
-        WireReply::Xdr(Vec::new()).into_json();
+    fn encode_json_matches_two_step() {
+        let value = (1i64, "x".to_string());
+        let mut out = Vec::new();
+        Encode::Json(Some("id-1")).write_result(&value, &mut out).unwrap();
+        assert_eq!(out, crate::envelope::success(Some("id-1"), &encode_result(&value).unwrap()));
+
+        // Notification id (None) → `"id":null`.
+        let mut out2 = Vec::new();
+        Encode::Json(None).write_result(&value, &mut out2).unwrap();
+        assert_eq!(out2, crate::envelope::success(None, &encode_result(&value).unwrap()));
     }
 
     #[test]
-    #[should_panic(expected = "XDR dispatch produced a JSON reply")]
-    fn into_xdr_rejects_a_json_reply() {
-        WireReply::Json(serde_json::value::to_raw_value(&()).unwrap()).into_xdr();
+    fn encode_xdr_framed_and_body() {
+        let value = vec![7u32, 8, 9];
+        let rid = Some([3u8; 16]);
+
+        // Framed: envelope + result (the wire reply).
+        let mut framed = Vec::new();
+        Encode::Xdr(rid).write_result(&value, &mut framed).unwrap();
+        assert_eq!(framed, frame::build_reply_ok(rid, &truenas_xdr::to_bytes(&value).unwrap()).unwrap());
+
+        // Bare body (the `run_proc` / op-table reuse path): just the XDR result, no envelope.
+        let mut body = Vec::new();
+        Encode::XdrBody.write_result(&value, &mut body).unwrap();
+        assert_eq!(body, truenas_xdr::to_bytes(&value).unwrap());
+    }
+
+    // A result whose `Serialize` fails (a map with non-string keys is invalid JSON) must surface as
+    // INTERNAL_ERROR on both the JSON and XDR write paths — exercising the error arms of `write_result`.
+    #[test]
+    fn encode_result_serialize_failure_is_internal_error() {
+        let mut bad = BTreeMap::new();
+        bad.insert(vec![1u8, 2], 3i32); // non-string map key → serde_json refuses
+
+        let mut out = Vec::new();
+        let je = Encode::Json(Some("id")).write_result(&bad, &mut out).unwrap_err();
+        assert_eq!(je.code, ErrorCode::InternalError.code());
+
+        let mut xb = Vec::new();
+        let xe = Encode::XdrBody.write_result(&bad, &mut xb).unwrap_err();
+        assert_eq!(xe.code, ErrorCode::InternalError.code());
+
+        let mut xf = Vec::new();
+        let xfe = Encode::Xdr(None).write_result(&bad, &mut xf).unwrap_err();
+        assert_eq!(xfe.code, ErrorCode::InternalError.code());
     }
 }

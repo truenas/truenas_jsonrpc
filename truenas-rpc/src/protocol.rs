@@ -23,9 +23,9 @@ use serde_json::{json, Value};
 use crate::envelope::{self, ParsedRequest};
 use crate::error::{BuildResult, Error, ErrorCode, JsonRpcError};
 use crate::method::{
-    decode_params, encode_result, AsyncRpcMethod, Codec, ErasedTransfer, FilterableRpcMethod,
+    decode_params, encode_result, AsyncRpcMethod, Encode, ErasedTransfer, FilterableRpcMethod,
     RpcFdPassMethod, RpcFdTransferMethod, RpcMethod, Method, MethodDef, MethodImpl,
-    MethodMeta, SubscriptionDef, SubscriptionImpl, WireParams, WireReply,
+    MethodMeta, SubscriptionDef, SubscriptionImpl, WireParams,
 };
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::{InternalCaller, RequestCtx};
@@ -734,10 +734,10 @@ impl<S: Send + Sync + 'static> Service<S> {
     ) -> Result<Vec<u8>, JsonRpcError> {
         let (pipeline, cx, is_async) = self.prepare_xdr(proc_id, rid, session)?;
         if is_async {
-            pipeline.run_xdr_async(params, cx).await
+            pipeline.run_xdr_async(params, cx, Encode::XdrBody).await
         } else {
             let params = params.to_vec();
-            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
+            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx, Encode::XdrBody)).await {
                 Ok(result) => result,
                 Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
             }
@@ -1068,10 +1068,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let outcome = match self.service.prepare_xdr(request.proc_id, rid, session) {
             Ok((pipeline, cx, is_async)) => {
                 if is_async {
-                    pipeline.run_xdr_async(request.params, cx).await
+                    pipeline.run_xdr_async(request.params, cx, Encode::Xdr(rid)).await
                 } else {
                     let params = request.params.to_vec();
-                    match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx)).await {
+                    match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx, Encode::Xdr(rid))).await {
                         Ok(result) => result,
                         // A handler panic unwinds the worker thread; reply INTERNAL_ERROR (the JSON
                         // sync path does the same via `run_blocking`).
@@ -1083,10 +1083,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             }
             Err(e) => Err(e),
         };
+        // `run_into` already framed the reply (envelope + result) via `Encode::Xdr` — one pass, no
+        // intermediate result `Vec` + copy — so the success arm is the finished frame.
         let reply = match outcome {
-            Ok(result_bytes) => {
-                frame::build_reply_ok(rid, &result_bytes).expect("XDR reply envelope encodes")
-            }
+            Ok(framed) => framed,
             Err(e) => self.xdr_error(rid, &e),
         };
         finish(note, reply)
@@ -2147,12 +2147,16 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Ok((d, _)) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
-        let outcome = match role_gate(self.method.meta.required, &self.session) {
+        let mut out = Vec::new();
+        let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.run(Codec::Json, decoded, &cx).map(WireReply::into_json),
+            Ok(()) => erased.run_into(Encode::Json(self.rid.as_deref()), decoded, &cx, &mut out),
         };
-        self.do_audit(audit_outcome(&outcome), &audit_detail);
-        response_bytes(self.rid.as_deref(), &outcome)
+        self.do_audit(audit_outcome(&res), &audit_detail);
+        match res {
+            Ok(()) => out,
+            Err(e) => envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+        }
     }
 
     /// Blocking-pool entry: route a python body through the `PyDispatcher` seam, everything
@@ -2207,12 +2211,16 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Ok((d, _)) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
-        let outcome = match role_gate(self.method.meta.required, &self.session) {
+        let mut out = Vec::new();
+        let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.run(Codec::Json, decoded, cx).await.map(WireReply::into_json),
+            Ok(()) => erased.run_into(Encode::Json(self.rid.as_deref()), decoded, cx, &mut out).await,
         };
-        self.do_audit(audit_outcome(&outcome), &audit_detail);
-        response_bytes(self.rid.as_deref(), &outcome)
+        self.do_audit(audit_outcome(&res), &audit_detail);
+        match res {
+            Ok(()) => out,
+            Err(e) => envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+        }
     }
 
     /// XDR pipeline (blocking pool): XDR decode (INVALID_PARAMS, before authz) → authorize → run
@@ -2221,7 +2229,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
     /// the authorizer and the (redacted) audit record, since XDR is non-self-describing (see
     /// [`ErasedSync::xdr_decode`]). A subscription/python method that opted into an xdr_id is not
     /// callable here → method-not-found.
-    fn run_xdr(mut self, params: &[u8], cx: RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+    fn run_xdr(mut self, params: &[u8], cx: RequestCtx<S>, encode: Encode) -> Result<Vec<u8>, JsonRpcError> {
         let (MethodImpl::Sync(erased) | MethodImpl::Filterable(erased)) = &self.method.imp else {
             // Subscription / python methods are not callable over the binary wire.
             return Err(JsonRpcError::method_not_found("Method not found"));
@@ -2239,14 +2247,15 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         }
         // Audit needs the params (reflected at decode) but not the result, so `run` returns just
         // the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
-        let outcome = match role_gate(self.method.meta.required, &self.session) {
+        let mut out = Vec::new();
+        let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.run(Codec::Xdr, decoded, &cx).map(WireReply::into_xdr),
+            Ok(()) => erased.run_into(encode, decoded, &cx, &mut out),
         };
         if want_audit {
-            self.do_audit(audit_outcome(&outcome), &audit_detail);
+            self.do_audit(audit_outcome(&res), &audit_detail);
         }
-        outcome
+        res.map(|()| out)
     }
 
     /// Inline async XDR pipeline (the async-wire analogue of [`run_xdr`](Self::run_xdr)): XDR
@@ -2254,7 +2263,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
     /// the runtime (the async handler yields, so no `spawn_blocking` hop). The reply stays XDR
     /// bytes; params/result reflect to JSON `Value`s for the authorizer / audit record exactly as
     /// the sync path does.
-    async fn run_xdr_async(mut self, params: &[u8], cx: RequestCtx<S>) -> Result<Vec<u8>, JsonRpcError> {
+    async fn run_xdr_async(mut self, params: &[u8], cx: RequestCtx<S>, encode: Encode<'_>) -> Result<Vec<u8>, JsonRpcError> {
         let MethodImpl::Async(erased) = &self.method.imp else {
             unreachable!("run_xdr_async on a non-async method")
         };
@@ -2269,14 +2278,15 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         }
         // Audit needs the params (reflected at decode) but not the result, so `run` returns just
         // the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
-        let outcome = match role_gate(self.method.meta.required, &self.session) {
+        let mut out = Vec::new();
+        let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.run(Codec::Xdr, decoded, cx).await.map(WireReply::into_xdr),
+            Ok(()) => erased.run_into(encode, decoded, cx, &mut out).await,
         };
         if want_audit {
-            self.do_audit(audit_outcome(&outcome), &audit_detail);
+            self.do_audit(audit_outcome(&res), &audit_detail);
         }
-        outcome
+        res.map(|()| out)
     }
 
     /// Audit one call (success / handler error / authz denial — never a decode failure):
@@ -2375,7 +2385,7 @@ mod tests {
         let method = RpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
         let session = dummy_session();
         let cx = dummy_cx(&session);
-        let _ = pipeline(method).run_xdr_async(&[], cx).await;
+        let _ = pipeline(method).run_xdr_async(&[], cx, Encode::Xdr(None)).await;
     }
 
     // (The subscribe-without-id guard and all pub/sub behavior are covered via the real

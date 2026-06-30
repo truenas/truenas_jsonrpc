@@ -11,7 +11,9 @@
 //! encoded as tuples through the same [`crate::to_bytes`]/[`crate::from_bytes`] codec used
 //! for params/results, so the frame needs no separate serde-derive.
 
-use crate::{from_bytes, from_bytes_with, to_bytes, FixedOpaque, Strictness, VarOpaque, XdrError};
+use serde::Serialize;
+
+use crate::{from_bytes, from_bytes_with, to_bytes, to_writer, FixedOpaque, Strictness, VarOpaque, XdrError};
 
 /// Frame magic, `"TXDR"` as a big-endian `u32`.
 pub const MAGIC: u32 = 0x5458_4452;
@@ -90,6 +92,22 @@ pub fn build_reply_ok(rid: Option<[u8; 16]>, result: &[u8]) -> Result<Vec<u8>, X
     Ok(out)
 }
 
+/// Like [`build_reply_ok`], but serializes the envelope **and** the typed `result` directly into
+/// `out` — one pass, no intermediate result `Vec` and no copy. The framed reply is *appended* to
+/// whatever `out` already holds, so callers can hand in a per-connection reusable buffer (cleared
+/// first) and pay no per-reply allocation after warmup. With an empty `out` the bytes are identical
+/// to `build_reply_ok(rid, &to_bytes(result))`.
+pub fn build_reply_ok_into<T: ?Sized + Serialize>(
+    out: &mut Vec<u8>,
+    rid: Option<[u8; 16]>,
+    result: &T,
+) -> Result<(), XdrError> {
+    let env: ReplyEnvelope = (MAGIC, VERSION, rid.map(FixedOpaque), STATUS_OK);
+    to_writer(&mut *out, &env)?;
+    to_writer(&mut *out, result)?;
+    Ok(())
+}
+
 /// Build an error reply frame: magic + envelope (status 1) + `(code, detail)`. `detail_json`
 /// is the JSON `{code,message[,data]}` object (the same `error` member the JSON wire carries).
 pub fn build_reply_err(
@@ -126,4 +144,35 @@ fn check_header(magic: u32, version: u32) -> Result<(), XdrError> {
         return Err(XdrError::Message(format!("unsupported TXDR frame version {version}")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The one-pass `build_reply_ok_into` must produce byte-for-byte the same frame as the
+    // two-step `build_reply_ok(rid, &to_bytes(result))` it replaces — for present and absent rids,
+    // and it must append (not overwrite) so a reusable buffer works.
+    #[test]
+    fn reply_ok_into_matches_two_step() {
+        let rids = [Some([7u8; 16]), None];
+        for rid in rids {
+            let value = (1234i64, "hello".to_string(), vec![1u32, 2, 3]);
+            let two_step = build_reply_ok(rid, &to_bytes(&value).unwrap()).unwrap();
+            let mut one_pass = Vec::new();
+            build_reply_ok_into(&mut one_pass, rid, &value).unwrap();
+            assert_eq!(one_pass, two_step, "rid={rid:?}");
+
+            // Appends to existing content (reusable-buffer contract).
+            let mut buf = vec![0xAB, 0xCD];
+            build_reply_ok_into(&mut buf, rid, &value).unwrap();
+            assert_eq!(&buf[..2], &[0xAB, 0xCD]);
+            assert_eq!(&buf[2..], &two_step[..]);
+
+            // And it round-trips through parse_reply.
+            let parsed = parse_reply(&one_pass).unwrap();
+            assert_eq!(parsed.status, STATUS_OK);
+            assert_eq!(parsed.rid, rid);
+        }
+    }
 }

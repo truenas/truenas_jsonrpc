@@ -123,11 +123,16 @@ async fn write_loop<IO: AsyncWrite + Unpin>(
     writer: Arc<Mutex<WriteHalf<IO>>>,
     mut rx: UnboundedReceiver<Vec<u8>>,
 ) {
+    // Reused across bursts so the per-burst gather (`bodies`) and the non-vectored coalesce buffer
+    // (`batch`) keep their capacity instead of reallocating on every flush.
+    let mut bodies: Vec<Vec<u8>> = Vec::new();
+    let mut batch: Vec<u8> = Vec::new();
     while let Some(first) = rx.recv().await {
         // Collect the burst before taking the lock: the first payload (awaited above) plus whatever
         // else is already queued, drained non-blockingly so we never await the channel under lock.
         // Just move the body handles in here — no copy; framing happens at write time below.
-        let mut bodies = vec![first];
+        bodies.clear();
+        bodies.push(first);
         while let Ok(next) = rx.try_recv() {
             bodies.push(next);
         }
@@ -139,7 +144,7 @@ async fn write_loop<IO: AsyncWrite + Unpin>(
         let wrote = if w.is_write_vectored() {
             write_all_vectored(&mut *w, &bodies).await
         } else {
-            let mut batch = Vec::new();
+            batch.clear();
             for body in &bodies {
                 crate::framing::frame_into(&mut batch, body);
             }
@@ -613,5 +618,111 @@ mod tests {
             crate::framing::frame_into(&mut expected, body);
         }
         assert_eq!(w.out, expected);
+    }
+
+    /// An `AsyncRead`+`AsyncWrite` that records everything written into a shared buffer, so a
+    /// spawned `write_loop` can be inspected after it runs. `vectored` selects which reuse path the
+    /// loop exercises: `false` → the coalescing `batch` buffer, `true` → the `bodies` gather.
+    struct Recorder {
+        out: Arc<std::sync::Mutex<Vec<u8>>>,
+        vectored: bool,
+    }
+
+    impl AsyncRead for Recorder {
+        // `write_loop` only writes; the read half is dropped, so this is never polled.
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            _: &mut tokio::io::ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            Poll::Pending
+        }
+    }
+
+    impl AsyncWrite for Recorder {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.out.lock().unwrap().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+        fn poll_write_vectored(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bufs: &[IoSlice<'_>],
+        ) -> Poll<std::io::Result<usize>> {
+            let mut out = self.out.lock().unwrap();
+            let mut n = 0;
+            for s in bufs {
+                out.extend_from_slice(s);
+                n += s.len();
+            }
+            Poll::Ready(Ok(n))
+        }
+        fn is_write_vectored(&self) -> bool {
+            self.vectored
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    /// `write_loop` reuses its `bodies`/`batch` buffers across bursts (kept for capacity). Drive a
+    /// LARGE burst, wait until it is fully on the wire, then a TINY burst — and assert the wire bytes
+    /// are exactly `framed(large…) ++ framed(tiny)`: no tail of the large burst leaks into the small
+    /// one (the stale-data risk the reuse introduces). A missing/misplaced `clear()` makes the small
+    /// burst carry the large burst's bytes, which this catches.
+    async fn write_loop_burst_reuse(vectored: bool) {
+        let out = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (_read, w) = split(Recorder { out: out.clone(), vectored });
+        let writer = Arc::new(Mutex::new(w));
+        let (tx, rx) = unbounded_channel::<Vec<u8>>();
+
+        // Burst 1: four 500-byte payloads queued before the loop runs → drained into one burst,
+        // growing the reused buffers to ~2 KiB.
+        let big: Vec<Vec<u8>> = (0..4u8).map(|i| vec![i; 500]).collect();
+        for b in &big {
+            tx.send(b.clone()).unwrap();
+        }
+        let task = tokio::spawn(write_loop(writer, rx));
+
+        // Wait until burst 1 is fully on the wire, so burst 2 is a SEPARATE burst that must shrink
+        // the reused buffers back down.
+        let big_len: usize = big.iter().map(|b| HEADER + b.len()).sum();
+        let mut spun = 0;
+        while out.lock().unwrap().len() < big_len {
+            tokio::task::yield_now().await;
+            spun += 1;
+            assert!(spun < 100_000, "burst 1 never flushed");
+        }
+        assert_eq!(out.lock().unwrap().len(), big_len, "burst 1 should be exactly its framed length");
+
+        // Burst 2: a single 3-byte payload. A stale tail of burst 1 would surface here.
+        let small = vec![0xABu8; 3];
+        tx.send(small.clone()).unwrap();
+        drop(tx); // close → the loop exits after burst 2
+        task.await.unwrap();
+
+        let mut expected = Vec::new();
+        for b in &big {
+            crate::framing::frame_into(&mut expected, b);
+        }
+        crate::framing::frame_into(&mut expected, &small);
+        assert_eq!(
+            *out.lock().unwrap(),
+            expected,
+            "vectored={vectored}: bytes from the large burst leaked into the small one"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_loop_reuses_buffers_without_leaking_a_stale_tail() {
+        write_loop_burst_reuse(false).await; // non-vectored: the coalescing `batch` buffer
+        write_loop_burst_reuse(true).await; // vectored: the `bodies` gather
     }
 }

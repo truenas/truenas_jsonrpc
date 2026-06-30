@@ -160,6 +160,27 @@ pub(crate) fn success(id: Option<&str>, result: &RawValue) -> Vec<u8> {
         .expect("serializing a success envelope cannot fail")
 }
 
+/// Write a success response — `{"jsonrpc":"2.0","result":<result>,"id":<id|null>}` — directly into
+/// `out`, serializing the typed `result` in place (no intermediate `RawValue`). Byte-for-byte
+/// identical to `success(id, &to_raw_value(result))`; **appends** to `out` so a per-connection
+/// reusable buffer (cleared first) pays no per-reply allocation. A serialize failure (a handler
+/// result whose `Serialize` errors) is returned for the caller to map to `INTERNAL_ERROR`.
+pub(crate) fn success_into<T: ?Sized + Serialize>(
+    out: &mut Vec<u8>,
+    id: Option<&str>,
+    result: &T,
+) -> Result<(), serde_json::Error> {
+    out.extend_from_slice(br#"{"jsonrpc":"2.0","result":"#);
+    serde_json::to_writer(&mut *out, result)?;
+    out.extend_from_slice(br#","id":"#);
+    match id {
+        Some(s) => serde_json::to_writer(&mut *out, s)?,
+        None => out.extend_from_slice(b"null"),
+    }
+    out.push(b'}');
+    Ok(())
+}
+
 #[derive(Serialize)]
 struct NotificationEnvelope<'a> {
     jsonrpc: &'static str,
