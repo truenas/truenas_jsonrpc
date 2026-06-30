@@ -90,6 +90,19 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             }
         }
 
+        // async ⇒ a plain request/result method (registered via `async_method`): result required,
+        // not combinable with filterable/python/server_client (each has its own dispatch).
+        if m.is_async {
+            if m.result.is_none() {
+                return Err(err(format!("method {wire:?}: async requires 'result'")));
+            }
+            if m.filterable || m.python || m.direction() == Direction::ServerClient {
+                return Err(err(format!(
+                    "method {wire:?}: async cannot combine with filterable/python/server_client"
+                )));
+            }
+        }
+
         // A subscription (server→client) cannot ride the binary wire — the binary framing carries no
         // server-push path (so it is never reachable over ONC RPC or the TXDR sub-wire).
         if m.xdr && m.direction() == Direction::ServerClient {

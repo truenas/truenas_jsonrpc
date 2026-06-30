@@ -205,6 +205,22 @@ fn cross_cutting_errors() {
 }
 
 #[test]
+fn async_methods() {
+    // An `async: true` method emits an RPITIT trait method + an `async_method` registration (awaited
+    // inline on the runtime — no `spawn_blocking` hop).
+    let ok = r##"{"name":"t","version":"1","$defs":{"A":{"type":"object","properties":{},"required":[]}},"methods":{"go":{"handler":"go","async":true,"params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"}}}}"##;
+    let s = generate_server(&Spec::parse(ok, "spec").unwrap()).unwrap();
+    assert!(s.contains("fn go(&self, request: A, cx: truenas_rpc::RequestCtx<S>) -> impl ::core::future::Future"));
+    assert!(s.contains("builder.async_method(truenas_rpc::AsyncRpcMethod::new"));
+    assert!(s.contains("async move { h.go(request, cx).await }"));
+
+    // Validation: async needs a `result`; it can't combine with filterable/python/server_client.
+    let m = |body: &str| format!(r##"{{"name":"t","version":"1","$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"go":{{"handler":"go","async":true,"params":{{"$ref":"#/$defs/A"}}{body}}}}}}}"##);
+    assert!(parse_err(&m("")).contains("async requires 'result'"));
+    assert!(parse_err(&m(r##","result":{"$ref":"#/$defs/A"},"python":true"##)).contains("async cannot combine"));
+}
+
+#[test]
 fn protocol_errors() {
     // A spec with one plain method + an overridable `protocols` list.
     let with = |protos: &str| format!(r##"{{"name":"t","version":"1","protocols":{protos},"$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"x":{{"handler":"x","params":{{"$ref":"#/$defs/A"}},"result":{{"$ref":"#/$defs/A"}}}}}}}}"##);

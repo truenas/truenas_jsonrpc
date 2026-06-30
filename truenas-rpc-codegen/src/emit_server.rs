@@ -195,6 +195,7 @@ fn render_default(
 /// Kinds of method (drives the trait method + register line).
 enum Kind {
     Plain,
+    Async,
     Filterable,
     Subscription,
     Python,
@@ -207,6 +208,8 @@ fn kind_of(m: &MethodSpec) -> Kind {
         Kind::Subscription
     } else if m.filterable {
         Kind::Filterable
+    } else if m.is_async {
+        Kind::Async
     } else {
         Kind::Plain
     }
@@ -221,6 +224,16 @@ fn emit_handlers_trait(spec: &Spec) -> Result<String> {
                 let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
                 methods.push_str(&format!(
                     "    /// Handler for `{}`.\n    fn {}(&self, request: {params}, cx: &truenas_rpc::RequestCtx<S>) -> Result<{result}, truenas_rpc::JsonRpcError>;\n",
+                    wire_doc(spec, m), m.handler
+                ));
+            }
+            Kind::Async => {
+                let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
+                // RPITIT (`-> impl Future + Send`, stable since 1.75) — no `async-trait` dep on the
+                // generated code. Implement it with `async fn {handler}(..)`. `cx` is by value (the
+                // future is awaited on the runtime, not borrowing the dispatch frame).
+                methods.push_str(&format!(
+                    "    /// Async handler for `{}`.\n    fn {}(&self, request: {params}, cx: truenas_rpc::RequestCtx<S>) -> impl ::core::future::Future<Output = Result<{result}, truenas_rpc::JsonRpcError>> + Send;\n",
                     wire_doc(spec, m), m.handler
                 ));
             }
@@ -253,6 +266,16 @@ fn emit_register(spec: &Spec) -> Result<String> {
                 let params = ref_name_of(&m.params, "params")?;
                 body.push_str(&format!(
                     "    let h = handlers.clone();\n    let builder = builder.method(truenas_rpc::RpcMethod::new({def}, move |request: {params}, cx: &truenas_rpc::RequestCtx<S>| h.{}(request, cx)))?;\n",
+                    m.handler
+                ));
+            }
+            Kind::Async => {
+                uses_handlers = true;
+                let params = ref_name_of(&m.params, "params")?;
+                // Clone the `Arc<H>` into each invocation's future so it owns its handle (a `Fn`
+                // closure can't move its capture), and await the handler inline on the runtime.
+                body.push_str(&format!(
+                    "    let h = handlers.clone();\n    let builder = builder.async_method(truenas_rpc::AsyncRpcMethod::new({def}, move |request: {params}, cx: truenas_rpc::RequestCtx<S>| {{\n        let h = h.clone();\n        async move {{ h.{}(request, cx).await }}\n    }}))?;\n",
                     m.handler
                 ));
             }

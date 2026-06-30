@@ -190,6 +190,11 @@ pub struct MethodSpec {
     /// A python-backed method (body runs via the PyO3 bridge).
     #[serde(default)]
     pub python: bool,
+    /// An inline-async handler (registered via `async_method`, awaited on the runtime — no
+    /// `spawn_blocking` hop). For a non-blocking handler; the generated trait method becomes
+    /// `async fn` (taking `cx` by value).
+    #[serde(rename = "async", default)]
+    pub is_async: bool,
 }
 
 impl MethodSpec {
