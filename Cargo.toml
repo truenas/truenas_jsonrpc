@@ -11,6 +11,7 @@ members = [
     "truenas-rpc-codegen",
     "truenas-rpc-pyo3",
     "truenas-rpc-server",
+    "truenas-rpc-client",
     "truenas-rpc-auth",
     "truenas-keyring",
     "truenas-nss",
@@ -18,10 +19,10 @@ members = [
     "truenas-gssapi",
     "examples/demo",
 ]
-# Seven crates are excluded from the default set (a plain `cargo build`/`cargo test` and
+# Eight crates are excluded from the default set (a plain `cargo build`/`cargo test` and
 # `coverage.sh`, which run without `-p`, skip them): `truenas-rpc-pyo3` links libpython
-# (so the default build links none); `truenas-rpc-server`
-# does socket / kTLS / SCM_RIGHTS I/O that can't be unit-tested to 100% deterministically; the
+# (so the default build links none); `truenas-rpc-server` and `truenas-rpc-client`
+# do socket / kTLS / SCM_RIGHTS I/O that can't be unit-tested to 100% deterministically; the
 # opt-in auth layers above the core — `truenas-rpc-auth` (peer-cred / mTLS / SCRAM, the latter
 # behind feature flags + OpenSSL) and `truenas-keyring` (raw kernel-keyring syscalls, whose tests
 # skip when no keyring is available); `truenas-nss` (passwd FFI, whose tests need a passwd db);

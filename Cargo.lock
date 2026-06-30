@@ -782,6 +782,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "truenas-rpc-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "truenas-rpc",
+ "truenas-rpc-server",
+ "uuid",
+]
+
+[[package]]
 name = "truenas-rpc-codegen"
 version = "0.1.0"
 dependencies = [
