@@ -303,7 +303,7 @@ fn build_emits_artifacts_with_explicit_out() {
     assert!(server.ends_with("server_gen.rs"));
     assert!(std::fs::read_to_string(&server).unwrap().contains("pub fn register"));
     let client = Build::new().json_idl(&abs).out_dir(&out).emit_client().unwrap();
-    assert!(std::fs::read_to_string(&client).unwrap().contains("pub trait Transport"));
+    assert!(std::fs::read_to_string(&client).unwrap().contains("truenas_rpc_client::CallEngine"));
     let openrpc = Build::new().json_idl(&abs).out_dir(&out).emit_openrpc().unwrap();
     assert!(std::fs::read_to_string(&openrpc).unwrap().contains("\"openrpc\""));
     assert!(Build::new().out_dir(&out).emit_server().is_err()); // missing json_idl

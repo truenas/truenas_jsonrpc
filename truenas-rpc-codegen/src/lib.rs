@@ -94,7 +94,8 @@ pub fn generate_server(spec: &Spec) -> Result<String> {
     emit_server::generate(&spec.raw, &spec.origin)
 }
 
-/// Emit the typed async client module (a `Transport` trait + one method per RPC).
+/// Emit the typed async client module (a client generic over a `truenas_rpc_client::CallEngine`,
+/// one `async fn` per RPC).
 pub fn generate_client(spec: &Spec) -> Result<String> {
     emit_client::generate(&spec.raw, &spec.origin)
 }
