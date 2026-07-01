@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 truenas-rpc = { path = "../truenas-rpc" }
+truenas-xdr = { path = "../truenas-xdr" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

@@ -45,15 +45,15 @@ pub enum Inbound<P: ProtocolRuntime + ?Sized> {
     Reply {
         /// The correlation key of the call this replies to.
         key: P::CorrelationKey,
-        /// The call's result bytes, or the error the server returned.
-        result: Result<Box<RawValue>, JsonRpcError>,
+        /// The call's raw result bytes (JSON text or XDR, per the wire), or the server's error.
+        result: Result<Vec<u8>, JsonRpcError>,
     },
     /// A server→client notification on `topic`.
     Notification {
         /// The topic (e.g. a method name).
         topic: P::Topic,
-        /// The notification payload.
-        payload: Box<RawValue>,
+        /// The raw notification payload bytes.
+        payload: Vec<u8>,
     },
 }
 
@@ -71,17 +71,18 @@ pub trait ProtocolRuntime: Send + Sync + 'static {
 
     /// This runtime's framing.
     fn framing(&self) -> &Self::Framing;
-    /// Encode a call and allocate the correlation key its reply will arrive under.
+    /// Encode a call and allocate the correlation key its reply will arrive under. `params` are the
+    /// already-serialized request bytes for the wire (JSON for a name key, XDR for a proc-id key).
     fn encode_call(
         &self,
         method: &Self::MethodKey,
-        params: Option<&RawValue>,
+        params: &[u8],
     ) -> EncodedCall<Self::CorrelationKey>;
     /// Classify one inbound frame (the engine never inspects bytes itself).
     fn parse_inbound(&self, frame: &[u8]) -> Result<Inbound<Self>, ClientError>;
 }
 
-type ReplyTx = oneshot::Sender<Result<Box<RawValue>, JsonRpcError>>;
+type ReplyTx = oneshot::Sender<Result<Vec<u8>, JsonRpcError>>;
 
 /// Shared, task-spanning state: the correlation registry + the writer channel + a closed flag.
 struct Shared<P: ProtocolRuntime> {
@@ -96,14 +97,14 @@ impl<P: ProtocolRuntime> Shared<P> {
     }
 }
 
-/// An async stream of server→client notifications, `(topic, payload)`.
+/// An async stream of server→client notifications, `(topic, payload-bytes)`.
 pub struct NotificationStream<T> {
-    rx: mpsc::UnboundedReceiver<(T, Box<RawValue>)>,
+    rx: mpsc::UnboundedReceiver<(T, Vec<u8>)>,
 }
 
 impl<T> NotificationStream<T> {
     /// The next notification, or `None` once the connection is gone.
-    pub async fn recv(&mut self) -> Option<(T, Box<RawValue>)> {
+    pub async fn recv(&mut self) -> Option<(T, Vec<u8>)> {
         self.rx.recv().await
     }
 }
@@ -146,7 +147,7 @@ impl<P: ProtocolRuntime> Client<P> {
     ) -> (Self, NotificationStream<P::Topic>) {
         let runtime = Arc::new(runtime);
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
-        let (notif_tx, notif_rx) = mpsc::unbounded_channel::<(P::Topic, Box<RawValue>)>();
+        let (notif_tx, notif_rx) = mpsc::unbounded_channel::<(P::Topic, Vec<u8>)>();
         let shared = Arc::new(Shared {
             pending: Mutex::new(HashMap::new()),
             out_tx,
@@ -160,11 +161,12 @@ impl<P: ProtocolRuntime> Client<P> {
     }
 
     /// Send one method call and await its reply. The codegen-facing typed methods build on this.
+    /// `params` are the already-serialized request bytes for the wire.
     pub async fn call(
         &self,
         method: &P::MethodKey,
-        params: Option<&RawValue>,
-    ) -> Result<Box<RawValue>, ClientError> {
+        params: &[u8],
+    ) -> Result<Vec<u8>, ClientError> {
         let enc = self.runtime.encode_call(method, params);
         self.send(enc).await
     }
@@ -174,7 +176,7 @@ impl<P: ProtocolRuntime> Client<P> {
     async fn send(
         &self,
         enc: EncodedCall<P::CorrelationKey>,
-    ) -> Result<Box<RawValue>, ClientError> {
+    ) -> Result<Vec<u8>, ClientError> {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(ClientError::Closed);
         }
@@ -208,8 +210,10 @@ async fn writer_loop<P: ProtocolRuntime>(
     mut out_rx: mpsc::UnboundedReceiver<Vec<u8>>,
 ) {
     // Coalesce: frame the first body, then drain everything already queued into one write per burst.
+    // `batch` is reused across bursts (cleared, capacity kept) so steady-state pays no per-burst alloc.
+    let mut batch: Vec<u8> = Vec::new();
     while let Some(first) = out_rx.recv().await {
-        let mut batch = Vec::with_capacity(first.len() + 4);
+        batch.clear();
         runtime.framing().frame_into(&mut batch, &first);
         while let Ok(next) = out_rx.try_recv() {
             runtime.framing().frame_into(&mut batch, &next);
@@ -225,7 +229,7 @@ async fn recv_loop<P: ProtocolRuntime>(
     shared: Arc<Shared<P>>,
     mut reader: BoxRead,
     limit: usize,
-    notif_tx: mpsc::UnboundedSender<(P::Topic, Box<RawValue>)>,
+    notif_tx: mpsc::UnboundedSender<(P::Topic, Vec<u8>)>,
 ) {
     let mut acc = BytesMut::with_capacity(8 * 1024);
     'outer: loop {
@@ -270,8 +274,8 @@ pub trait Negotiates: ProtocolRuntime {
 impl<P: Negotiates> Client<P> {
     /// Bind a named protocol (the `$/negotiate` handshake).
     pub async fn negotiate(&self, protocol: &str) -> Result<P::Negotiated, ClientError> {
-        let raw = self.send(self.runtime.encode_negotiate(protocol)).await?;
-        serde_json::from_str(raw.get()).map_err(|e| ClientError::Decode(e.to_string()))
+        let bytes = self.send(self.runtime.encode_negotiate(protocol)).await?;
+        serde_json::from_slice(&bytes).map_err(|e| ClientError::Decode(e.to_string()))
     }
 }
 
@@ -284,18 +288,18 @@ pub trait Authenticates: ProtocolRuntime {
 }
 
 impl<P: Authenticates> Client<P> {
-    /// Run the session-setup handshake; returns the setup result.
+    /// Run the session-setup handshake; returns the raw setup-result bytes.
     pub async fn authenticate(
         &self,
         params: Option<&RawValue>,
-    ) -> Result<Box<RawValue>, ClientError> {
+    ) -> Result<Vec<u8>, ClientError> {
         self.send(self.runtime.encode_setup(params)).await
     }
     /// Continue a multi-step session setup.
     pub async fn authenticate_continue(
         &self,
         params: Option<&RawValue>,
-    ) -> Result<Box<RawValue>, ClientError> {
+    ) -> Result<Vec<u8>, ClientError> {
         self.send(self.runtime.encode_setup_continue(params)).await
     }
 }

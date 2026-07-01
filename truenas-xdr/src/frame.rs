@@ -75,6 +75,22 @@ pub fn build_request(
     Ok(out)
 }
 
+/// Like [`build_request`], but serializes the envelope + already-XDR-encoded `params` into `out` in
+/// one pass — no intermediate envelope `Vec` + copy. The framed request is *appended* to whatever
+/// `out` holds, so a caller can hand in a cleared reusable buffer. With an empty `out` the bytes are
+/// identical to `build_request(proc_id, rid, params)`.
+pub fn build_request_into(
+    out: &mut Vec<u8>,
+    proc_id: u32,
+    rid: Option<[u8; 16]>,
+    params: &[u8],
+) -> Result<(), XdrError> {
+    let env: RequestEnvelope = (MAGIC, VERSION, proc_id, rid.map(FixedOpaque));
+    to_writer(&mut *out, &env)?;
+    out.extend_from_slice(params);
+    Ok(())
+}
+
 /// Parse a request frame. Assumes [`is_xdr`] has already selected the XDR path; still
 /// validates the magic + version defensively.
 pub fn parse_request(wire: &[u8]) -> Result<Request<'_>, XdrError> {
@@ -172,6 +188,28 @@ mod tests {
             // And it round-trips through parse_reply.
             let parsed = parse_reply(&one_pass).unwrap();
             assert_eq!(parsed.status, STATUS_OK);
+            assert_eq!(parsed.rid, rid);
+        }
+    }
+
+    // The one-pass `build_request_into` must equal the two-step `build_request` byte-for-byte, for
+    // present and absent rids, and append to an existing buffer.
+    #[test]
+    fn request_into_matches_two_step() {
+        for rid in [Some([9u8; 16]), None] {
+            let params = to_bytes(&(7i64, "hi".to_string())).unwrap();
+            let two_step = build_request(1001, rid, &params).unwrap();
+            let mut one_pass = Vec::new();
+            build_request_into(&mut one_pass, 1001, rid, &params).unwrap();
+            assert_eq!(one_pass, two_step, "rid={rid:?}");
+
+            let mut buf = vec![0xEE];
+            build_request_into(&mut buf, 1001, rid, &params).unwrap();
+            assert_eq!(buf[0], 0xEE);
+            assert_eq!(&buf[1..], &two_step[..]);
+
+            let parsed = parse_request(&one_pass).unwrap();
+            assert_eq!(parsed.proc_id, 1001);
             assert_eq!(parsed.rid, rid);
         }
     }

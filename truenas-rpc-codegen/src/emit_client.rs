@@ -36,10 +36,27 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
                 m.handler
             ));
         } else {
-            // plain or python (from the client's view both are a typed request → result)
+            // plain or python (from the client's view both are a typed request → result). A method
+            // declared `xdr` in the IDL is called over the TXDR binary sub-wire (by proc-id) on the
+            // same connection — the server already serves both wires; here the client picks the
+            // binary path transparently, encoding params + decoding the result via XDR.
             let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss("result"))?, "result")?;
+            let (doc, body) = match (m.xdr, m.xdr_id) {
+                (true, Some(id)) => (
+                    format!("Call `{wire}` over the binary XDR wire (proc-id {id})."),
+                    format!(
+                        "        let params = truenas_rpc_client::to_xdr(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;\n        let bytes = self.engine.call(truenas_rpc_client::MethodKey::Proc({id}u32), &params).await?;\n        truenas_rpc_client::from_xdr(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))\n",
+                    ),
+                ),
+                _ => (
+                    format!("Call `{wire}`."),
+                    format!(
+                        "        let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;\n        let bytes = self.engine.call({key}, &params).await?;\n        serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))\n",
+                    ),
+                ),
+            };
             methods.push_str(&format!(
-                "    /// Call `{wire}`.\n    pub async fn {}(&self, request: {params}) -> Result<{result}, truenas_rpc::JsonRpcError> {{\n        let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;\n        let bytes = self.engine.call({key}, &params).await?;\n        serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))\n    }}\n",
+                "    /// {doc}\n    pub async fn {}(&self, request: {params}) -> Result<{result}, truenas_rpc::JsonRpcError> {{\n{body}    }}\n",
                 m.handler
             ));
         }

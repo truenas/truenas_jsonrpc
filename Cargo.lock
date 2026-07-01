@@ -795,6 +795,7 @@ dependencies = [
  "tokio",
  "truenas-rpc",
  "truenas-rpc-server",
+ "truenas-xdr",
  "uuid",
 ]
 

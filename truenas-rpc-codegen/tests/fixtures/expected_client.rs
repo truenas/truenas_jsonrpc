@@ -19,11 +19,11 @@ impl<E: truenas_rpc_client::CallEngine> SampleClient<E> {
         let bytes = self.engine.call(truenas_rpc_client::MethodKey::Name("login"), &params).await?;
         serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))
     }
-    /// Call `ping`.
+    /// Call `ping` over the binary XDR wire (proc-id 1001).
     pub async fn ping(&self, request: PingArgs) -> Result<PingResult, truenas_rpc::JsonRpcError> {
-        let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;
-        let bytes = self.engine.call(truenas_rpc_client::MethodKey::Name("ping"), &params).await?;
-        serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))
+        let params = truenas_rpc_client::to_xdr(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;
+        let bytes = self.engine.call(truenas_rpc_client::MethodKey::Proc(1001u32), &params).await?;
+        truenas_rpc_client::from_xdr(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))
     }
     /// Call `crash`.
     pub async fn crash(&self, request: CrashArgs) -> Result<PingResult, truenas_rpc::JsonRpcError> {
