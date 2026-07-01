@@ -26,7 +26,7 @@ pub use engine::{
     NotificationStream, ProtocolRuntime, QueryResult, SubId,
 };
 pub use error::ClientError;
-pub use jsonrpc::{JsonRpcClient, JsonRpcMethod, JsonRpcRuntime, LengthPrefix, Negotiated};
+pub use jsonrpc::{JsonRpcClient, JsonRpcMethod, JsonRpcRuntime, LengthPrefix, Negotiated, Progress};
 
 /// XDR (de)serialization for the binary sub-wire, re-exported so a generated client can encode a
 /// `MethodKey::Proc` call's params / decode its reply without a direct `truenas-xdr` dependency.

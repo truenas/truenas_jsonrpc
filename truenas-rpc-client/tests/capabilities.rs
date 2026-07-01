@@ -14,7 +14,9 @@ use truenas_rpc::{
     AsyncRpcMethod, JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RoleMask, RpcMethod,
     Session, SessionLifecycle, SubscriptionDef,
 };
-use truenas_rpc_client::{CallEngine, ClientConfig, Endpoint, JsonRpcClient, MethodKey};
+use truenas_rpc_client::{
+    CallEngine, ClientConfig, Endpoint, JsonRpcClient, JsonRpcMethod, MethodKey, Progress,
+};
 use truenas_rpc_server::{JsonRpc, TruenasRpcServer, UnixConfig};
 
 #[derive(Deserialize, Serialize)]
@@ -167,5 +169,56 @@ async fn dropping_a_call_cancels_it_server_side() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(observed.load(Ordering::SeqCst), "dropping the call must cancel the handler server-side");
+    let _ = std::fs::remove_file(&path);
+}
+
+// --- $/progress --------------------------------------------------------------
+
+/// A protocol whose `job` method emits three `$/progress` updates before returning.
+fn progress_proto() -> JsonRpcProtocol<()> {
+    JsonRpcProtocol::<()>::builder("prog", "1")
+        .async_method(AsyncRpcMethod::new(
+            MethodDef::new("job"),
+            |_a: Empty, cx: RequestCtx<()>| async move {
+                cx.update_progress(Some(25.0), Some("quarter"), None);
+                cx.update_progress(Some(50.0), Some("half"), None);
+                cx.update_progress(Some(100.0), Some("done"), None);
+                Ok::<_, JsonRpcError>(json!({ "ok": true }))
+            },
+        ))
+        .unwrap()
+        .build()
+}
+
+#[tokio::test]
+async fn call_with_progress_streams_updates_then_the_reply() {
+    let (path, _srv) = serve("prog", "prog", progress_proto()).await;
+    let (client, _neg, _notifs) =
+        JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "prog", ClientConfig::default())
+            .await
+            .unwrap();
+
+    // Drain progress concurrently with the call; the sender drops (stream ends) when the reply lands.
+    let (ptx, mut prx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let drain = tokio::spawn(async move {
+        let mut updates = Vec::new();
+        while let Some(bytes) = prx.recv().await {
+            updates.push(serde_json::from_slice::<Progress>(&bytes).unwrap());
+        }
+        updates
+    });
+
+    let reply = client
+        .call_with_progress(&JsonRpcMethod::Name("job".to_string()), b"{}", ptx)
+        .await
+        .unwrap();
+    assert_eq!(serde_json::from_slice::<Value>(&reply).unwrap()["ok"], true);
+
+    let updates = drain.await.unwrap();
+    assert_eq!(updates.len(), 3, "three progress updates, all before the reply");
+    assert_eq!(updates[0].percent, Some(25.0));
+    assert_eq!(updates[1].percent, Some(50.0));
+    assert_eq!(updates[2].description.as_deref(), Some("done"));
+
     let _ = std::fs::remove_file(&path);
 }

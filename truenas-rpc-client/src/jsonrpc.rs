@@ -201,10 +201,47 @@ fn parse_json_reply(frame: &[u8]) -> Result<Inbound<JsonRpcRuntime>, ClientError
         };
         Ok(Inbound::Reply { key, result })
     } else if let Some(method) = env.method {
-        Ok(Inbound::Notification { topic: method, payload: raw_bytes(env.params) })
+        let payload = raw_bytes(env.params);
+        if method == "$/progress" {
+            // Per-call progress: correlated by `params.id` (the target call), not a topic. Route it
+            // to that call's progress sink instead of the general notification stream.
+            let key = progress_target(&payload)?;
+            Ok(Inbound::Progress { key, payload })
+        } else {
+            Ok(Inbound::Notification { topic: method, payload })
+        }
     } else {
         Err(ClientError::Decode("inbound message has neither id nor method".to_string()))
     }
+}
+
+/// The target call id of a `$/progress` update (its `params.id`) — the correlation key the update is
+/// routed to. The full `payload` (including `id`) is delivered as-is; a consumer's progress type just
+/// ignores the extra field.
+fn progress_target(payload: &[u8]) -> Result<Uuid, ClientError> {
+    #[derive(serde::Deserialize)]
+    struct Target {
+        id: String,
+    }
+    let t: Target = serde_json::from_slice(payload)
+        .map_err(|e| ClientError::Decode(format!("$/progress params: {e}")))?;
+    Uuid::parse_str(&t.id).map_err(|e| ClientError::Decode(format!("bad $/progress id {:?}: {e}", t.id)))
+}
+
+/// A decoded `$/progress` update (the JSON-RPC progress shape). Decode a payload from
+/// [`Client::call_with_progress`](crate::Client::call_with_progress) with `serde_json::from_slice`;
+/// the update's target-`id` field is ignored (the engine already routed by it).
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Progress {
+    /// Completion percentage, if the handler reported one.
+    #[serde(default)]
+    pub percent: Option<f64>,
+    /// A human-readable status line, if any.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Any handler-specific extra payload.
+    #[serde(default)]
+    pub extra: Option<serde_json::Value>,
 }
 
 /// Classify one inbound TXDR frame: a reply correlated by its 16-byte xid (= a UUID). `STATUS_OK`

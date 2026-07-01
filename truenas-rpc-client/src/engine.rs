@@ -31,7 +31,7 @@ pub trait Framing: Send + Sync + 'static {
     fn frame_into(&self, out: &mut Vec<u8>, payload: &[u8]);
 }
 
-/// One classified inbound frame. (`Progress`/`Control` arrive with later capabilities.)
+/// One classified inbound frame.
 pub enum Inbound<P: ProtocolRuntime + ?Sized> {
     /// A reply to a call, correlated by `key`.
     Reply {
@@ -39,6 +39,16 @@ pub enum Inbound<P: ProtocolRuntime + ?Sized> {
         key: P::CorrelationKey,
         /// The call's raw result bytes (JSON text or XDR, per the wire), or the server's error.
         result: Result<Vec<u8>, JsonRpcError>,
+    },
+    /// A **per-call** progress update (`$/progress` on the JSON-RPC wire), correlated to an in-flight
+    /// call by `key`. Routed to that call's progress sink if it opted in via
+    /// [`Client::call_with_progress`]; otherwise dropped. Unlike a [`Notification`](Self::Notification)
+    /// it does not complete the call — the reply still follows.
+    Progress {
+        /// The correlation key of the in-flight call this update belongs to.
+        key: P::CorrelationKey,
+        /// The raw progress payload bytes (the update's params — decode with your progress type).
+        payload: Vec<u8>,
     },
     /// A server→client notification on `topic`.
     Notification {
@@ -84,13 +94,23 @@ pub trait ProtocolRuntime: Send + Sync + 'static {
 }
 
 type ReplyTx = oneshot::Sender<Result<Vec<u8>, JsonRpcError>>;
+/// A per-call progress sink (opted into via [`Client::call_with_progress`]). Each in-flight call may
+/// have one; the call's progress updates are pushed here (non-blocking, drop on backpressure) until
+/// the reply arrives and the entry is removed, ending the stream.
+type ProgressTx = mpsc::UnboundedSender<Vec<u8>>;
 
-/// The correlation registry behind one `Mutex`: outstanding replies keyed by correlation id, plus
-/// the monotonic id source. `next_seq` lives **inside** this lock — the same lock a call must take
-/// anyway to register its reply slot — so minting an id adds no second synchronization point (no
-/// separate atomic, no random-UUID generation on the send path).
+/// One outstanding call's registry entry: the reply channel + an optional progress sink.
+struct PendingEntry {
+    reply: ReplyTx,
+    progress: Option<ProgressTx>,
+}
+
+/// The correlation registry behind one `Mutex`: outstanding calls keyed by correlation id, plus the
+/// monotonic id source. `next_seq` lives **inside** this lock — the same lock a call must take anyway
+/// to register its reply slot — so minting an id adds no second synchronization point (no separate
+/// atomic, no random-UUID generation on the send path).
 struct Pending<K> {
-    map: HashMap<K, ReplyTx>,
+    map: HashMap<K, PendingEntry>,
     next_seq: u64,
 }
 
@@ -201,18 +221,43 @@ impl<P: ProtocolRuntime> Client<P> {
         self.round_trip(|key| self.runtime.encode_call(method, params, key)).await
     }
 
-    /// Draw the next correlation id and register its reply slot under a **single** acquisition of the
-    /// pending lock. The oneshot is allocated *before* the lock (so it isn't held across a malloc);
-    /// the id (`next_seq`) is drawn *inside* it, so minting the id needs no separate atomic and no
-    /// random-UUID generation — the runtime maps the sequence number to the wire id via an immutable
-    /// per-connection prefix.
-    fn register(&self) -> (P::CorrelationKey, oneshot::Receiver<Result<Vec<u8>, JsonRpcError>>) {
+    /// Like [`call`](Self::call), but the call's **progress** updates (`$/progress` on the JSON-RPC
+    /// wire) are delivered to `progress` — the raw params bytes of each update (decode with your
+    /// progress type, e.g. [`Progress`](crate::Progress)) — while the reply is awaited. The sender is
+    /// dropped when the call completes, ending the stream; a wire with no progress simply never sends.
+    /// Drain it concurrently (the reply won't arrive until progress stops), from another task:
+    ///
+    /// ```ignore
+    /// let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    /// let job = tokio::spawn(async move { client.call_with_progress(&method, &params, tx).await });
+    /// while let Some(update) = rx.recv().await { /* report progress */ }
+    /// let reply = job.await??;
+    /// ```
+    pub async fn call_with_progress(
+        &self,
+        method: &P::MethodKey,
+        params: &[u8],
+        progress: mpsc::UnboundedSender<Vec<u8>>,
+    ) -> Result<Vec<u8>, ClientError> {
+        self.round_trip_tracked(|key| self.runtime.encode_call(method, params, key), Some(progress))
+            .await
+    }
+
+    /// Draw the next correlation id and register its reply slot (+ optional progress sink) under a
+    /// **single** acquisition of the pending lock. The oneshot is allocated *before* the lock (so it
+    /// isn't held across a malloc); the id (`next_seq`) is drawn *inside* it, so minting the id needs
+    /// no separate atomic and no random-UUID generation — the runtime maps the sequence number to the
+    /// wire id via an immutable per-connection prefix.
+    fn register(
+        &self,
+        progress: Option<ProgressTx>,
+    ) -> (P::CorrelationKey, oneshot::Receiver<Result<Vec<u8>, JsonRpcError>>) {
         let (tx, rx) = oneshot::channel();
         let mut pending = self.shared.lock_pending();
         let seq = pending.next_seq;
         pending.next_seq = seq.wrapping_add(1);
         let key = self.runtime.key_for_seq(seq);
-        pending.map.insert(key.clone(), tx);
+        pending.map.insert(key.clone(), PendingEntry { reply: tx, progress });
         (key, rx)
     }
 
@@ -225,10 +270,18 @@ impl<P: ProtocolRuntime> Client<P> {
         &self,
         encode: impl FnOnce(&P::CorrelationKey) -> Vec<u8>,
     ) -> Result<Vec<u8>, ClientError> {
+        self.round_trip_tracked(encode, None).await
+    }
+
+    async fn round_trip_tracked(
+        &self,
+        encode: impl FnOnce(&P::CorrelationKey) -> Vec<u8>,
+        progress: Option<ProgressTx>,
+    ) -> Result<Vec<u8>, ClientError> {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(ClientError::Closed);
         }
-        let (key, rx) = self.register();
+        let (key, rx) = self.register(progress);
         let wire = encode(&key);
         if self.shared.out_tx.send(wire).is_err() {
             self.shared.lock_pending().map.remove(&key);
@@ -288,8 +341,17 @@ async fn recv_loop<P: ProtocolRuntime>(
             match runtime.framing().take_frame(&mut acc, limit) {
                 Ok(Some(frame)) => match runtime.parse_inbound(&frame) {
                     Ok(Inbound::Reply { key, result }) => {
-                        if let Some(tx) = shared.lock_pending().map.remove(&key) {
-                            let _ = tx.send(result);
+                        if let Some(entry) = shared.lock_pending().map.remove(&key) {
+                            let _ = entry.reply.send(result);
+                        }
+                    }
+                    // Progress is per-call and mid-flight: peek the entry (don't remove — the reply
+                    // still follows) and push to its sink if the call opted in. Never `.await` under
+                    // the lock (unbounded send is sync; drops on backpressure).
+                    Ok(Inbound::Progress { key, payload }) => {
+                        let pending = shared.lock_pending();
+                        if let Some(sink) = pending.map.get(&key).and_then(|e| e.progress.as_ref()) {
+                            let _ = sink.send(payload);
                         }
                     }
                     Ok(Inbound::Notification { topic, payload }) => {
