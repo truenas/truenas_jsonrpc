@@ -31,14 +31,6 @@ pub trait Framing: Send + Sync + 'static {
     fn frame_into(&self, out: &mut Vec<u8>, payload: &[u8]);
 }
 
-/// A call encoded to its (unframed) wire bytes, plus the correlation key its reply will arrive under.
-pub struct EncodedCall<K> {
-    /// The unframed call body (the writer task frames it).
-    pub wire: Vec<u8>,
-    /// The key the reply correlates on.
-    pub key: K,
-}
-
 /// One classified inbound frame. (`Progress`/`Control` arrive with later capabilities.)
 pub enum Inbound<P: ProtocolRuntime + ?Sized> {
     /// A reply to a call, correlated by `key`.
@@ -71,29 +63,69 @@ pub trait ProtocolRuntime: Send + Sync + 'static {
 
     /// This runtime's framing.
     fn framing(&self) -> &Self::Framing;
-    /// Encode a call and allocate the correlation key its reply will arrive under. `params` are the
-    /// already-serialized request bytes for the wire (JSON for a name key, XDR for a proc-id key).
-    fn encode_call(
-        &self,
-        method: &Self::MethodKey,
-        params: &[u8],
-    ) -> EncodedCall<Self::CorrelationKey>;
+    /// Map a per-connection monotonic sequence number to the correlation key a call's reply will
+    /// arrive under. The engine draws `seq` under the pending-registry lock it already takes per call
+    /// (so the id costs no separate atomic and no random-UUID generation); the runtime combines it
+    /// with an immutable per-connection prefix so the wire id stays globally unique.
+    fn key_for_seq(&self, seq: u64) -> Self::CorrelationKey;
+    /// Encode a call to its unframed wire bytes under correlation `key`. `params` are the
+    /// already-serialized request bytes (JSON for a name key, XDR for a proc-id key).
+    fn encode_call(&self, method: &Self::MethodKey, params: &[u8], key: &Self::CorrelationKey) -> Vec<u8>;
     /// Classify one inbound frame (the engine never inspects bytes itself).
     fn parse_inbound(&self, frame: &[u8]) -> Result<Inbound<Self>, ClientError>;
+    /// Encode a best-effort cancellation for an in-flight call's `key`, if the wire has one
+    /// (JSON-RPC → a fire-and-forget `$/cancelRequest`). Returns `None` (the default) for a wire with
+    /// no cancellation. The engine fires this when a `call` future is **dropped before its reply
+    /// arrives** — i.e. idiomatic Rust cancellation: drop the future (via `tokio::time::timeout`,
+    /// `select!`, `JoinHandle::abort`, …) and the outstanding request is cancelled server-side.
+    fn encode_cancel(&self, _target: &Self::CorrelationKey) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 type ReplyTx = oneshot::Sender<Result<Vec<u8>, JsonRpcError>>;
 
+/// The correlation registry behind one `Mutex`: outstanding replies keyed by correlation id, plus
+/// the monotonic id source. `next_seq` lives **inside** this lock — the same lock a call must take
+/// anyway to register its reply slot — so minting an id adds no second synchronization point (no
+/// separate atomic, no random-UUID generation on the send path).
+struct Pending<K> {
+    map: HashMap<K, ReplyTx>,
+    next_seq: u64,
+}
+
 /// Shared, task-spanning state: the correlation registry + the writer channel + a closed flag.
 struct Shared<P: ProtocolRuntime> {
-    pending: Mutex<HashMap<P::CorrelationKey, ReplyTx>>,
+    pending: Mutex<Pending<P::CorrelationKey>>,
     out_tx: mpsc::UnboundedSender<Vec<u8>>,
     closed: AtomicBool,
 }
 
 impl<P: ProtocolRuntime> Shared<P> {
-    fn lock_pending(&self) -> std::sync::MutexGuard<'_, HashMap<P::CorrelationKey, ReplyTx>> {
+    fn lock_pending(&self) -> std::sync::MutexGuard<'_, Pending<P::CorrelationKey>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Guards an in-flight call's reply slot for the duration of the await. If the call future is dropped
+/// before its reply arrives, [`Drop`] clears the slot (so it doesn't leak in the pending map) and
+/// fires the runtime's best-effort cancellation ([`ProtocolRuntime::encode_cancel`], fire-and-forget).
+/// [`round_trip`](Client::round_trip) sets `key = None` the moment the reply is in hand, so a
+/// completed call's drop is a no-op.
+struct DropCancel<'a, P: ProtocolRuntime> {
+    shared: &'a Arc<Shared<P>>,
+    runtime: &'a Arc<P>,
+    key: Option<P::CorrelationKey>,
+}
+
+impl<P: ProtocolRuntime> Drop for DropCancel<'_, P> {
+    fn drop(&mut self) {
+        if let Some(key) = self.key.take() {
+            self.shared.lock_pending().map.remove(&key);
+            if let Some(wire) = self.runtime.encode_cancel(&key) {
+                let _ = self.shared.out_tx.send(wire); // fire-and-forget; a dead connection is moot
+            }
+        }
     }
 }
 
@@ -148,7 +180,7 @@ impl<P: ProtocolRuntime> Client<P> {
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (notif_tx, notif_rx) = mpsc::unbounded_channel::<(P::Topic, Vec<u8>)>();
         let shared = Arc::new(Shared {
-            pending: Mutex::new(HashMap::new()),
+            pending: Mutex::new(Pending { map: HashMap::new(), next_seq: 0 }),
             out_tx,
             closed: AtomicBool::new(false),
         });
@@ -166,29 +198,50 @@ impl<P: ProtocolRuntime> Client<P> {
         method: &P::MethodKey,
         params: &[u8],
     ) -> Result<Vec<u8>, ClientError> {
-        let enc = self.runtime.encode_call(method, params);
-        self.send(enc).await
+        self.round_trip(|key| self.runtime.encode_call(method, params, key)).await
     }
 
-    /// The one correlated round-trip: register the pending reply **before** writing (race-free), then
-    /// await the oneshot. There is **no timer** — per JSON-RPC a request is outstanding until it is
-    /// answered, so the call waits for its reply however long the op runs. A doomed call is failed not
-    /// by a duration scavenger but by the connection dying: the sender is dropped → `Closed`.
-    async fn send(
+    /// Draw the next correlation id and register its reply slot under a **single** acquisition of the
+    /// pending lock. The oneshot is allocated *before* the lock (so it isn't held across a malloc);
+    /// the id (`next_seq`) is drawn *inside* it, so minting the id needs no separate atomic and no
+    /// random-UUID generation — the runtime maps the sequence number to the wire id via an immutable
+    /// per-connection prefix.
+    fn register(&self) -> (P::CorrelationKey, oneshot::Receiver<Result<Vec<u8>, JsonRpcError>>) {
+        let (tx, rx) = oneshot::channel();
+        let mut pending = self.shared.lock_pending();
+        let seq = pending.next_seq;
+        pending.next_seq = seq.wrapping_add(1);
+        let key = self.runtime.key_for_seq(seq);
+        pending.map.insert(key.clone(), tx);
+        (key, rx)
+    }
+
+    /// The one correlated round-trip: register the pending reply **before** writing (race-free), let
+    /// the caller `encode` the wire under the just-minted `key`, then await the oneshot. There is
+    /// **no timer** — per JSON-RPC a request is outstanding until it is answered, so the call waits
+    /// for its reply however long the op runs. A doomed call is failed not by a duration scavenger
+    /// but by the connection dying: the sender is dropped → `Closed`.
+    pub(crate) async fn round_trip(
         &self,
-        enc: EncodedCall<P::CorrelationKey>,
+        encode: impl FnOnce(&P::CorrelationKey) -> Vec<u8>,
     ) -> Result<Vec<u8>, ClientError> {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(ClientError::Closed);
         }
-        let key = enc.key.clone();
-        let (tx, rx) = oneshot::channel();
-        self.shared.lock_pending().insert(key.clone(), tx);
-        if self.shared.out_tx.send(enc.wire).is_err() {
-            self.shared.lock_pending().remove(&key);
+        let (key, rx) = self.register();
+        let wire = encode(&key);
+        if self.shared.out_tx.send(wire).is_err() {
+            self.shared.lock_pending().map.remove(&key);
             return Err(ClientError::Closed);
         }
-        match rx.await {
+        // If this future is dropped before the reply lands (a timeout / `select!` / abort), the guard
+        // clears the pending slot (else it would leak until the connection closes) and fires a
+        // best-effort cancellation. Disarmed the instant the reply is in hand, so the happy path pays
+        // only a branch.
+        let mut guard = DropCancel { shared: &self.shared, runtime: &self.runtime, key: Some(key) };
+        let result = rx.await;
+        guard.key = None;
+        match result {
             Ok(result) => result.map_err(ClientError::Rpc),
             Err(_recv) => Err(ClientError::Closed), // sender dropped → connection gone
         }
@@ -235,7 +288,7 @@ async fn recv_loop<P: ProtocolRuntime>(
             match runtime.framing().take_frame(&mut acc, limit) {
                 Ok(Some(frame)) => match runtime.parse_inbound(&frame) {
                     Ok(Inbound::Reply { key, result }) => {
-                        if let Some(tx) = shared.lock_pending().remove(&key) {
+                        if let Some(tx) = shared.lock_pending().map.remove(&key) {
                             let _ = tx.send(result);
                         }
                     }
@@ -255,7 +308,7 @@ async fn recv_loop<P: ProtocolRuntime>(
     }
     // Connection gone: fail every in-flight call (drop the senders → callers see `Closed`).
     shared.closed.store(true, Ordering::SeqCst);
-    shared.lock_pending().clear();
+    shared.lock_pending().map.clear();
 }
 
 // --- Optional capabilities (each unlocks one engine method) ------------------------------------
@@ -264,24 +317,24 @@ async fn recv_loop<P: ProtocolRuntime>(
 pub trait Negotiates: ProtocolRuntime {
     /// The decoded negotiate result.
     type Negotiated: serde::de::DeserializeOwned;
-    /// Encode the negotiate request for `protocol`.
-    fn encode_negotiate(&self, protocol: &str) -> EncodedCall<Self::CorrelationKey>;
+    /// Encode the negotiate request for `protocol` under correlation `key`.
+    fn encode_negotiate(&self, protocol: &str, key: &Self::CorrelationKey) -> Vec<u8>;
 }
 
 impl<P: Negotiates> Client<P> {
     /// Bind a named protocol (the `$/negotiate` handshake).
     pub async fn negotiate(&self, protocol: &str) -> Result<P::Negotiated, ClientError> {
-        let bytes = self.send(self.runtime.encode_negotiate(protocol)).await?;
+        let bytes = self.round_trip(|key| self.runtime.encode_negotiate(protocol, key)).await?;
         serde_json::from_slice(&bytes).map_err(|e| ClientError::Decode(e.to_string()))
     }
 }
 
 /// A protocol with a session-setup (authentication) handshake.
 pub trait Authenticates: ProtocolRuntime {
-    /// Encode `$/sessionSetup`.
-    fn encode_setup(&self, params: Option<&RawValue>) -> EncodedCall<Self::CorrelationKey>;
-    /// Encode `$/sessionSetupContinue` (multi-step auth).
-    fn encode_setup_continue(&self, params: Option<&RawValue>) -> EncodedCall<Self::CorrelationKey>;
+    /// Encode `$/sessionSetup` under correlation `key`.
+    fn encode_setup(&self, params: Option<&RawValue>, key: &Self::CorrelationKey) -> Vec<u8>;
+    /// Encode `$/sessionSetupContinue` (multi-step auth) under correlation `key`.
+    fn encode_setup_continue(&self, params: Option<&RawValue>, key: &Self::CorrelationKey) -> Vec<u8>;
 }
 
 impl<P: Authenticates> Client<P> {
@@ -290,27 +343,27 @@ impl<P: Authenticates> Client<P> {
         &self,
         params: Option<&RawValue>,
     ) -> Result<Vec<u8>, ClientError> {
-        self.send(self.runtime.encode_setup(params)).await
+        self.round_trip(|key| self.runtime.encode_setup(params, key)).await
     }
     /// Continue a multi-step session setup.
     pub async fn authenticate_continue(
         &self,
         params: Option<&RawValue>,
     ) -> Result<Vec<u8>, ClientError> {
-        self.send(self.runtime.encode_setup_continue(params)).await
+        self.round_trip(|key| self.runtime.encode_setup_continue(params, key)).await
     }
 }
 
 /// A protocol with a graceful close (`$/sessionClose`).
 pub trait GracefulClose: ProtocolRuntime {
-    /// Encode the close request.
-    fn encode_close(&self) -> EncodedCall<Self::CorrelationKey>;
+    /// Encode the close request under correlation `key`.
+    fn encode_close(&self, key: &Self::CorrelationKey) -> Vec<u8>;
 }
 
 impl<P: GracefulClose> Client<P> {
     /// Close the session gracefully (best-effort), then tear the connection down.
     pub async fn close(self) -> Result<(), ClientError> {
-        let _ = self.send(self.runtime.encode_close()).await;
+        let _ = self.round_trip(|key| self.runtime.encode_close(key)).await;
         Ok(())
     }
 }

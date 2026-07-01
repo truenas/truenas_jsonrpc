@@ -13,8 +13,8 @@ use truenas_rpc::JsonRpcError;
 
 use crate::config::{ClientConfig, Endpoint};
 use crate::engine::{
-    Authenticates, CallEngine, Client, EncodedCall, Framing, GracefulClose, Inbound, MethodKey,
-    Negotiates, NotificationStream, ProtocolRuntime,
+    Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
+    NotificationStream, ProtocolRuntime,
 };
 use crate::error::ClientError;
 
@@ -55,14 +55,23 @@ pub enum JsonRpcMethod {
     Proc(u32),
 }
 
-/// The JSON-RPC runtime. Stateless beyond its framing (request ids are fresh UUIDs).
+/// The JSON-RPC runtime: framing + a per-connection request-id source. Request ids are **not**
+/// random per call — that would burn ~120 ns of userspace RNG on every send for correlation that
+/// only needs uniqueness. Instead a 64-bit random `prefix` is drawn once at construction and the
+/// low 64 bits are a monotonic sequence (drawn by the engine under the pending lock it already
+/// holds). The high random half keeps the wire id globally unique across connections — so the
+/// server's per-protocol `$/cancelRequest` table never collides, and a peer using fully-random
+/// UUIDv4 stays interoperable (the wire id is 128 opaque bits either way).
 pub struct JsonRpcRuntime {
     framing: LengthPrefix,
+    prefix: u64,
 }
 
 impl Default for JsonRpcRuntime {
     fn default() -> Self {
-        JsonRpcRuntime { framing: LengthPrefix }
+        // One random draw per connection (amortized over every call it makes). The low 64 bits of a
+        // v4 UUID are fully random (the version/variant bits sit higher), so take those as the prefix.
+        JsonRpcRuntime { framing: LengthPrefix, prefix: Uuid::new_v4().as_u128() as u64 }
     }
 }
 
@@ -76,21 +85,28 @@ impl ProtocolRuntime for JsonRpcRuntime {
         &self.framing
     }
 
-    fn encode_call(&self, method: &JsonRpcMethod, params: &[u8]) -> EncodedCall<Uuid> {
-        let id = Uuid::new_v4();
-        let wire = match method {
+    fn key_for_seq(&self, seq: u64) -> Uuid {
+        // High 64 bits: the per-connection random prefix. Low 64 bits: the monotonic sequence. The
+        // result is a valid canonical UUID (the server validates format, not how it was minted).
+        Uuid::from_u128(((self.prefix as u128) << 64) | seq as u128)
+    }
+
+    fn encode_call(&self, method: &JsonRpcMethod, params: &[u8], key: &Uuid) -> Vec<u8> {
+        match method {
             // Name → the JSON text envelope; the reply comes back as JSON, correlated by the id string.
-            JsonRpcMethod::Name(name) => encode_json_request(name, &id, params),
+            JsonRpcMethod::Name(name) => encode_json_request(name, key, params),
             // Proc → a TXDR frame using the call's UUID as the 16-byte xid; `params` are already
             // XDR-encoded by the caller. The reply comes back as a TXDR frame, correlated by the xid.
-            JsonRpcMethod::Proc(proc) => {
-                let mut out = Vec::with_capacity(params.len() + 40);
-                truenas_xdr::frame::build_request_into(&mut out, *proc, Some(*id.as_bytes()), params)
-                    .expect("XDR request envelope encodes");
-                out
-            }
-        };
-        EncodedCall { wire, key: id }
+            JsonRpcMethod::Proc(proc) => encode_xdr_request(*proc, key, params),
+        }
+    }
+
+    fn encode_cancel(&self, target: &Uuid) -> Option<Vec<u8>> {
+        // A **no-id** `$/cancelRequest` notification (fire-and-forget): the server cancels the target
+        // and sends nothing back. `target_id` is the target call's id — the canonical UUID the
+        // request went out under (`Uuid`'s `Display` is the canonical hyphenated lowercase form).
+        let params = format!(r#"{{"target_id":"{target}"}}"#);
+        Some(encode_json_notification("$/cancelRequest", params.as_bytes()))
     }
 
     fn parse_inbound(&self, frame: &[u8]) -> Result<Inbound<Self>, ClientError> {
@@ -118,6 +134,31 @@ fn encode_json_request(name: &str, id: &Uuid, params: &[u8]) -> Vec<u8> {
         out.extend_from_slice(br#""}"#);
     } else {
         out.extend_from_slice(br#"","params":"#);
+        out.extend_from_slice(params);
+        out.push(b'}');
+    }
+    out
+}
+
+/// Encode a TXDR request frame (proc-id key): the 16-byte `id` becomes the xid, `params` are the
+/// caller's already-XDR-encoded body. Written straight into the request buffer — no id allocation.
+fn encode_xdr_request(proc: u32, id: &Uuid, params: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(params.len() + 40);
+    truenas_xdr::frame::build_request_into(&mut out, proc, Some(*id.as_bytes()), params)
+        .expect("XDR request envelope encodes");
+    out
+}
+
+/// A no-id JSON-RPC notification `{"jsonrpc":"2.0","method":..,"params":..}` — the fire-and-forget
+/// shape (no `id`, so the server sends no reply). Used for `$/cancelRequest` on a call's drop.
+fn encode_json_notification(method: &str, params: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(params.len() + method.len() + 48);
+    out.extend_from_slice(br#"{"jsonrpc":"2.0","method":"#);
+    serde_json::to_writer(&mut out, method).expect("a string always serializes");
+    if params.is_empty() {
+        out.push(b'}');
+    } else {
+        out.extend_from_slice(br#","params":"#);
         out.extend_from_slice(params);
         out.push(b'}');
     }
@@ -209,25 +250,25 @@ pub struct Negotiated {
 
 impl Negotiates for JsonRpcRuntime {
     type Negotiated = Negotiated;
-    fn encode_negotiate(&self, protocol: &str) -> EncodedCall<Uuid> {
+    fn encode_negotiate(&self, protocol: &str, key: &Uuid) -> Vec<u8> {
         let protocol = serde_json::to_string(protocol).unwrap_or_else(|_| "\"\"".to_string());
         let params = format!(r#"{{"protocol":{protocol}}}"#).into_bytes();
-        self.encode_call(&JsonRpcMethod::Name("$/negotiate".to_string()), &params)
+        encode_json_request("$/negotiate", key, &params)
     }
 }
 
 impl Authenticates for JsonRpcRuntime {
-    fn encode_setup(&self, params: Option<&RawValue>) -> EncodedCall<Uuid> {
-        self.encode_call(&JsonRpcMethod::Name("$/sessionSetup".to_string()), raw_param(params))
+    fn encode_setup(&self, params: Option<&RawValue>, key: &Uuid) -> Vec<u8> {
+        encode_json_request("$/sessionSetup", key, raw_param(params))
     }
-    fn encode_setup_continue(&self, params: Option<&RawValue>) -> EncodedCall<Uuid> {
-        self.encode_call(&JsonRpcMethod::Name("$/sessionSetupContinue".to_string()), raw_param(params))
+    fn encode_setup_continue(&self, params: Option<&RawValue>, key: &Uuid) -> Vec<u8> {
+        encode_json_request("$/sessionSetupContinue", key, raw_param(params))
     }
 }
 
 impl GracefulClose for JsonRpcRuntime {
-    fn encode_close(&self) -> EncodedCall<Uuid> {
-        self.encode_call(&JsonRpcMethod::Name("$/sessionClose".to_string()), &[])
+    fn encode_close(&self, key: &Uuid) -> Vec<u8> {
+        encode_json_request("$/sessionClose", key, &[])
     }
 }
 
@@ -266,13 +307,15 @@ impl JsonRpcClient {
 #[async_trait::async_trait]
 impl CallEngine for JsonRpcClient {
     async fn call(&self, method: MethodKey<'_>, params: &[u8]) -> Result<Vec<u8>, JsonRpcError> {
-        // Map the codegen-facing key onto the runtime key. `params` are already the wire bytes
-        // (JSON for a name, XDR for a proc-id) — spliced through the engine with no re-encode.
-        let key = match method {
-            MethodKey::Name(n) => JsonRpcMethod::Name(n.to_string()),
-            MethodKey::Proc(p) => JsonRpcMethod::Proc(p),
-        };
-        Client::call(self, &key, params).await.map_err(ClientError::into_jsonrpc)
+        // Encode straight from the borrowed seam key — no owning `JsonRpcMethod::Name(String)` clone
+        // of the (always-`&'static`) method name. `params` are already the wire bytes (JSON for a
+        // name, XDR for a proc-id), spliced through with no re-encode.
+        self.round_trip(|key| match method {
+            MethodKey::Name(n) => encode_json_request(n, key, params),
+            MethodKey::Proc(p) => encode_xdr_request(p, key, params),
+        })
+        .await
+        .map_err(ClientError::into_jsonrpc)
     }
 }
 

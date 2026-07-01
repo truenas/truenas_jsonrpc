@@ -22,8 +22,8 @@ mod transport;
 
 pub use config::{ClientConfig, Endpoint};
 pub use engine::{
-    Authenticates, CallEngine, Client, EncodedCall, Framing, GracefulClose, Inbound, MethodKey,
-    Negotiates, NotificationStream, ProtocolRuntime, QueryResult, SubId,
+    Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
+    NotificationStream, ProtocolRuntime, QueryResult, SubId,
 };
 pub use error::ClientError;
 pub use jsonrpc::{JsonRpcClient, JsonRpcMethod, JsonRpcRuntime, LengthPrefix, Negotiated};
