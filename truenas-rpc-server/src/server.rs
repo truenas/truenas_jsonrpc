@@ -6,13 +6,15 @@
 use std::collections::HashMap;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 #[cfg(feature = "websocket")]
 use http::HeaderMap;
+use serde::Serialize;
+use serde_json::{json, Value};
 use tokio::net::{TcpListener, ToSocketAddrs, UnixListener};
-use truenas_rpc::JsonRpcProtocol;
+use truenas_rpc::{JsonRpcError, JsonRpcProtocol, SessionId};
 
 use crate::engine::{ConnContext, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
@@ -360,4 +362,87 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
             });
         }
     }
+
+    /// Publish a notification to every subscriber of `topic` on the named `protocol` — the
+    /// embedder's handle for server→client pub/sub. The protocol was moved in at
+    /// [`build`](TruenasRpcServerBuilder::build); this reaches the registered instance, so
+    /// subscribers on live connections receive the notification over their back-channel. Non-blocking
+    /// (drops on a slow subscriber's backpressure, like any notification). Errors if the `protocol`
+    /// or `topic` is unknown, or the payload doesn't match the topic's declared notification type.
+    pub fn send_notification<T: Serialize>(
+        &self,
+        protocol: &str,
+        topic: &str,
+        payload: &T,
+    ) -> Result<(), JsonRpcError> {
+        match self.shared.protocols.get(protocol) {
+            Some(p) => p.send_notification(topic, payload),
+            None => Err(JsonRpcError::internal(format!("no protocol named {protocol:?}"))),
+        }
+    }
+
+    /// Snapshot the live **session → operation tree** as JSON: every negotiated protocol's active
+    /// sessions (id, lifecycle, origin, credential, age) and each session's in-flight long-lived
+    /// operations — raw-fd transfers, passthrough take-overs, and cancellable requests. Normal
+    /// method calls are **not** listed: they complete in microseconds and the dispatch fast path
+    /// tracks nothing, so this shows only the handful of genuinely long-running things in flight.
+    ///
+    /// Reads only shared registries, so it never perturbs the data path. A consumer wires it to
+    /// whatever trigger it likes — a signal handler, an admin RPC, an HTTP `/debug` route; see
+    /// [`write_operations_dump`](Self::write_operations_dump) for the write-to-a-file form.
+    pub fn dump_operations_json(&self) -> Value {
+        // The protocol map is unordered — sort by name for a stable dump (sessions within a protocol
+        // are already oldest-first). `SessionId::nil()` as the "caller" marks no entry `current`.
+        let mut names: Vec<&String> = self.shared.protocols.keys().collect();
+        names.sort();
+        let sessions: Vec<Value> = names
+            .into_iter()
+            .filter_map(|n| self.shared.protocols.get(n))
+            .flat_map(|p| p.render_sessions(SessionId::nil()))
+            .collect();
+        json!({
+            "server": self.shared.name,
+            "dumped_at": unix_now(),
+            "session_count": sessions.len(),
+            "sessions": sessions,
+        })
+    }
+
+    /// Write [`dump_operations_json`](Self::dump_operations_json) to `path` as pretty JSON, replacing
+    /// it atomically (write-temp-then-rename, so a reader never sees a half-written file). Reads only
+    /// shared registries, so it never perturbs the data path.
+    ///
+    /// **Signal policy is the application's, not the library's.** This crate deliberately does *not*
+    /// install a signal handler: a library seizing the process-global `SIGUSR2` disposition (and
+    /// spawning a thread for it) would fight the embedding binary. Wire it to whatever trigger you
+    /// want — e.g. `SIGUSR2`, entirely in your own code:
+    ///
+    /// ```ignore
+    /// let mut sigusr2 =
+    ///     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined2())?;
+    /// tokio::spawn(async move {
+    ///     while sigusr2.recv().await.is_some() {
+    ///         let _ = server.write_operations_dump("/run/truenas-rpc/operations.json");
+    ///     }
+    /// });
+    /// ```
+    pub fn write_operations_dump(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
+        let path = path.as_ref();
+        let body = serde_json::to_vec_pretty(&self.dump_operations_json())
+            .expect("a serde_json::Value always serializes");
+        // Write a sibling temp file then rename over the target: rename is atomic on one filesystem,
+        // so a concurrent reader (an admin, a tool) never observes a half-written dump.
+        let tmp = path.with_extension("tmp");
+        std::fs::write(&tmp, &body)?;
+        std::fs::rename(&tmp, path)
+    }
+}
+
+/// Seconds since the Unix epoch, for the dump's `dumped_at` (a wall-clock stamp on an otherwise
+/// monotonic snapshot).
+fn unix_now() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
 }

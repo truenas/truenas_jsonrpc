@@ -47,8 +47,8 @@ pub use pydispatch::{PyDispatcher, PyOutcome, PyResult};
 pub use request::RequestCtx;
 pub use role::{RoleMask, Roles};
 pub use session::{
-    Clock, Credential, IdGen, NullOutbound, Outbound, Session, SessionId, SessionOrigin,
-    SystemClock, UuidGen,
+    Clock, Credential, IdGen, NullOutbound, OperationGuard, OperationInfo, OperationKind, Outbound,
+    Session, SessionId, SessionOrigin, SystemClock, UuidGen,
 };
 pub use types::{RequestInfo, MessageDirection, ServerInfo, SessionLifecycle};
 // Re-exported from `truenas-filter` so consumers can write filterable (query) handlers

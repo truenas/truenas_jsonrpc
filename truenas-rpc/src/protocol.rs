@@ -13,6 +13,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use serde::de::DeserializeOwned;
@@ -30,7 +31,9 @@ use crate::method::{
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::{InternalCaller, RequestCtx};
 use crate::role::{RoleMask, Roles};
-use crate::session::{Clock, IdGen, Outbound, Session, SessionId, SessionOrigin, SystemClock, UuidGen};
+use crate::session::{
+    Clock, IdGen, OperationKind, Outbound, Session, SessionId, SessionOrigin, SystemClock, UuidGen,
+};
 use crate::setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 use crate::transfer::{FileTransfer, Transfer, TransferDirection};
 use crate::types::{RequestInfo, MessageDirection, SessionLifecycle};
@@ -291,6 +294,11 @@ struct SetupSlot<S> {
 struct Inflight {
     cancel: Arc<AtomicBool>,
     session_id: SessionId,
+    // For the `$/sessions` / SIGUSR2 admin dump: which method is in flight and since when. Set only
+    // on the cancellable path (a normal, non-cancellable call never lands in this table), so it adds
+    // nothing to the request/reply fast path.
+    method: Arc<str>,
+    started: Instant,
 }
 
 /// A registered subscription to a SERVER_CLIENT topic: the owning session (for fan-out via
@@ -1199,7 +1207,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             if let Some(id) = &rid {
                 self.inflight.lock().unwrap_or_else(PoisonError::into_inner).insert(
                     id.clone(),
-                    Inflight { cancel: flag.clone(), session_id: session.id() },
+                    Inflight {
+                        cancel: flag.clone(),
+                        session_id: session.id(),
+                        method: method.meta.name.clone(),
+                        started: Instant::now(),
+                    },
                 );
             }
             flag
@@ -1406,7 +1419,15 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let meta = method.meta.clone();
         let session = session.clone();
         let final_rid = rid.clone();
+        // Track the transfer as a live operation for the admin dump. A transfer is a rare,
+        // potentially very long-lived mode switch (a bulk stream — e.g. a dataset receive), so
+        // registering it costs nothing measurable and is exactly what an admin dumping the session
+        // tree needs to see. The guard rides inside `complete`, so the operation stays registered
+        // from now until the transfer finishes *or* the directive is dropped unrun — either drops
+        // the guard and unregisters it. Nothing here touches the normal request/reply path.
+        let op = session.track_operation(OperationKind::Transfer, meta.name.clone());
         let complete = Box::new(move |ft: &dyn FileTransfer| -> Vec<u8> {
+            let _op = op;
             let outcome = erased.run_transfer(decoded, ft);
             if audit {
                 if let Some(sink) = &audit_sink {
@@ -1494,30 +1515,75 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     /// on every protocol and concatenates them). Upgrades each registry `Weak` under the lock (a
     /// dropped session won't upgrade), then renders off the lock via the configured [`SessionInfo`].
     pub fn render_sessions(&self, current: SessionId) -> Vec<Value> {
-        // Upgrade live sessions under the lock; a dropped session won't upgrade.
+        let live = self.live_sessions();
+        let now_unix = unix_now();
+        live.iter().map(|s| self.render_session(s, current, now_unix)).collect()
+    }
+
+    /// The live sessions on this protocol (registry `Weak`s upgraded), oldest first — the shared walk
+    /// behind [`render_sessions`](Self::render_sessions) and the server's SIGUSR2 operation dump. A
+    /// dropped session won't upgrade, so this never resurrects a closed connection.
+    pub fn live_sessions(&self) -> Vec<Arc<Session<S>>> {
         let mut live: Vec<Arc<Session<S>>> = self
-            .service.sessions
+            .service
+            .sessions
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .values()
             .filter_map(Weak::upgrade)
             .collect();
-        live.sort_by_key(|s| s.created()); // stable output, oldest first (matches the TrueNAS middleware ordering)
-        let now_unix = unix_now();
-        live.iter().map(|s| self.render_session(s, current, now_unix)).collect()
+        // Stable output, oldest first (matches the TrueNAS middleware ordering).
+        live.sort_by_key(|s| s.created());
+        live
     }
 
-    /// Render one session for `$/sessions`: the core base entry, `current` marked for the caller,
-    /// then the configured [`SessionInfo`]'s **extra** fields merged on top (embedder keys win).
+    /// Render one session for `$/sessions`: the core base entry, `current` marked for the caller, the
+    /// live-operations array, then the configured [`SessionInfo`]'s **extra** fields merged on top
+    /// (embedder keys win).
     fn render_session(&self, session: &Session<S>, current: SessionId, now_unix: f64) -> Value {
         let mut base = default_session_entry(session, now_unix);
         base.insert("current".to_string(), Value::Bool(session.id() == current));
+        base.insert("operations".to_string(), Value::Array(self.session_operations(session)));
         if let Some(renderer) = &self.session_info {
             if let Value::Object(extra) = renderer.render(session) {
                 base.extend(extra); // embedder fields augment / override the core base
             }
         }
         Value::Object(base)
+    }
+
+    /// Assemble one session's in-flight operations for the listing / admin dump: the long-lived mode
+    /// switches (raw-fd transfers + passthrough take-overs, from the session's own registry) plus its
+    /// cancellable in-flight requests (from the `$/cancelRequest` registry, whose `id` an admin can
+    /// target a cancel by). **Normal, non-cancellable method calls are not tracked** — they complete
+    /// in microseconds and the dispatch fast path records nothing — so this is only ever the handful
+    /// of genuinely long-running things a session is doing.
+    fn session_operations(&self, session: &Session<S>) -> Vec<Value> {
+        let mut ops: Vec<Value> = session
+            .operations()
+            .into_iter()
+            .map(|o| {
+                json!({
+                    "kind": o.kind.as_str(),
+                    "method": o.label.as_ref(),
+                    "age_seconds": o.age.as_secs_f64(),
+                })
+            })
+            .collect();
+        let sid = session.id();
+        let reg = self.inflight.lock().unwrap_or_else(PoisonError::into_inner);
+        for (rid, entry) in reg.iter() {
+            if entry.session_id == sid {
+                ops.push(json!({
+                    "kind": "request",
+                    "method": entry.method.as_ref(),
+                    "id": rid,
+                    "cancellable": true,
+                    "age_seconds": entry.started.elapsed().as_secs_f64(),
+                }));
+            }
+        }
+        ops
     }
 
     /// `$/describe`: return the configured OpenRPC service description. Unauthenticated and
@@ -1625,7 +1691,13 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 let audit_message = slot.meta.audit_message.clone();
                 let fd_handoff = handoff.fd_handoff;
                 let complete = handoff.complete;
+                // Track the passthrough take-over as a live operation for the admin dump — always
+                // tracked (like a transfer, it's a rare, potentially long-lived hand-off of the
+                // connection fd). The guard rides inside `run`, unregistering when the take-over
+                // completes or the directive is dropped unrun.
+                let op = session.track_operation(OperationKind::Passthrough, Arc::from(method.as_str()));
                 let run = Box::new(move |ft: &dyn FileTransfer| {
+                    let _op = op;
                     let outcome = (complete)(ft);
                     if let Ok((new_lifecycle, raw)) = &outcome {
                         session.set_lifecycle(*new_lifecycle);
@@ -2355,6 +2427,49 @@ mod tests {
             let wire = format!(r#"{{"jsonrpc":"2.0","method":"{m}","id":"{id}"}}"#);
             assert!(matches!(proto.dispatch(wire.as_bytes(), &s).await, Dispatched::Reply(_)));
         }
+    }
+
+    #[test]
+    fn session_operations_lists_transfers_and_cancellable_requests() {
+        let proto = JsonRpcProtocol::<()>::builder("t", "1").build();
+        let s = proto.new_session(Some(()), Arc::new(NullOutbound));
+
+        // A live transfer (its guard held) tracked on the session's own registry, plus a cancellable
+        // in-flight request owned by this session in the `$/cancelRequest` registry.
+        let _op = s.track_operation(OperationKind::Transfer, Arc::from("snapshot.receive"));
+        let mut reg = proto.inflight.lock().unwrap();
+        reg.insert(
+            "req-1".to_string(),
+            Inflight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                session_id: s.id(),
+                method: Arc::from("pool.scrub"),
+                started: Instant::now(),
+            },
+        );
+        // A request owned by a *different* session must not leak into this session's operations.
+        reg.insert(
+            "req-other".to_string(),
+            Inflight {
+                cancel: Arc::new(AtomicBool::new(false)),
+                session_id: SessionId::nil(),
+                method: Arc::from("other.op"),
+                started: Instant::now(),
+            },
+        );
+        drop(reg);
+
+        let entries = proto.render_sessions(s.id());
+        assert_eq!(entries.len(), 1);
+        let ops = entries[0]["operations"].as_array().unwrap();
+        assert_eq!(ops.len(), 2, "the transfer + this session's request, not the other session's");
+        assert_eq!(ops[0]["kind"], "transfer");
+        assert_eq!(ops[0]["method"], "snapshot.receive");
+        assert!(ops[0]["age_seconds"].as_f64().unwrap() >= 0.0);
+        assert_eq!(ops[1]["kind"], "request");
+        assert_eq!(ops[1]["method"], "pool.scrub");
+        assert_eq!(ops[1]["id"], "req-1");
+        assert_eq!(ops[1]["cancellable"], true);
     }
 
     // The pipeline's variant assertions are unreachable in normal dispatch (`run_method`

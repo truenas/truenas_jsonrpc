@@ -3,8 +3,8 @@
 //! UUIDv4 / system time) that make dispatch deterministic for unit tests and the A/B harness.
 
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, PoisonError, RwLock};
-use std::time::Instant;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
+use std::time::{Duration, Instant};
 
 use crate::role::RoleMask;
 use crate::types::SessionLifecycle;
@@ -37,6 +37,77 @@ pub struct Credential {
     pub description: String,
     /// The authenticated account uid, if resolved.
     pub uid: Option<u32>,
+}
+
+/// The kind of a long-lived [operation](Session::track_operation) tracked on a session — a mode
+/// switch that takes over the connection for an extended, admin-visible span. **Normal method calls
+/// are deliberately not tracked**: they complete in microseconds, so recording each one would put a
+/// lock on the dispatch hot path for no admin value. Only these rare hand-offs are registered, which
+/// is why the observability adds nothing to the request/reply fast path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OperationKind {
+    /// A raw-fd transfer: the handler was lent the connection's socket fd for a self-delimiting bulk
+    /// stream (e.g. a dataset send/receive), which can run for minutes or hours.
+    Transfer,
+    /// A passthrough auth take-over: a `$/sessionSetup` handler took the connection fd to finish
+    /// authentication out-of-band.
+    Passthrough,
+}
+
+impl OperationKind {
+    /// A stable, lowercase label for the `$/sessions` listing and the admin dump.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OperationKind::Transfer => "transfer",
+            OperationKind::Passthrough => "passthrough",
+        }
+    }
+}
+
+/// One live operation recorded on a session (held under the session's operation lock).
+struct OperationRecord {
+    id: u64,
+    kind: OperationKind,
+    label: Arc<str>,
+    started: Instant,
+}
+
+/// A session's operation registry: a monotonic id source + the live records. The lock guarding it is
+/// taken **only** when a transfer/passthrough begins or ends, or when an admin snapshots the tree —
+/// never on the normal request/reply path.
+#[derive(Default)]
+struct OpRegistry {
+    next_id: u64,
+    live: Vec<OperationRecord>,
+}
+
+/// A point-in-time view of one in-flight [operation](OperationKind) on a session, for the
+/// `$/sessions` listing and the server's SIGUSR2 dump.
+#[derive(Clone, Debug)]
+pub struct OperationInfo {
+    /// A per-session monotonic id (also the start order).
+    pub id: u64,
+    /// What kind of operation this is.
+    pub kind: OperationKind,
+    /// The label — the method that initiated the operation.
+    pub label: Arc<str>,
+    /// How long it has been running.
+    pub age: Duration,
+}
+
+/// RAII guard returned by [`Session::track_operation`]: ends the operation (removes it from the
+/// session registry) when dropped, so a completed, panicked, or dropped/cancelled hand-off always
+/// clears. Held for the operation's lifetime — dropping it immediately ends the operation.
+#[must_use = "dropping the guard immediately ends the operation; hold it for the operation's lifetime"]
+pub struct OperationGuard<S> {
+    session: Arc<Session<S>>,
+    id: u64,
+}
+
+impl<S> Drop for OperationGuard<S> {
+    fn drop(&mut self) {
+        self.session.end_operation(self.id);
+    }
 }
 
 /// Generates ids (session ids, subscription ids). Injectable so tests and the A/B
@@ -143,6 +214,10 @@ pub struct Session<S> {
     origin: OnceLock<SessionOrigin>,
     credential: RwLock<Option<Credential>>,
     out: Arc<dyn Outbound>,
+    // Live long-lived operations (raw-fd transfers / passthrough take-overs) for the `$/sessions`
+    // listing and the SIGUSR2 dump. The lock is taken only when such an operation begins/ends or an
+    // admin reads the tree — never on the normal dispatch path, so request/reply pays nothing for it.
+    op_registry: Mutex<OpRegistry>,
 }
 
 impl<S> Session<S> {
@@ -163,6 +238,7 @@ impl<S> Session<S> {
             origin: OnceLock::new(),
             credential: RwLock::new(None),
             out,
+            op_registry: Mutex::new(OpRegistry::default()),
         }
     }
 
@@ -254,6 +330,40 @@ impl<S> Session<S> {
         f(self.credential.read().unwrap_or_else(PoisonError::into_inner).as_ref())
     }
 
+    /// Begin tracking a long-lived [operation](OperationKind) (a raw-fd transfer or a passthrough
+    /// take-over) on this session, returning an RAII [`OperationGuard`] that unregisters it on drop —
+    /// so a completed, panicked, or dropped/cancelled hand-off always clears. Surfaced by
+    /// [`operations`](Self::operations), the `$/sessions` listing, and the server's SIGUSR2 dump.
+    ///
+    /// This is **not** called on the request/reply fast path — only for the rare mode-switch
+    /// hand-offs — so the per-session lock it takes never touches normal dispatch.
+    pub fn track_operation(self: &Arc<Self>, kind: OperationKind, label: Arc<str>) -> OperationGuard<S> {
+        let mut reg = self.op_registry.lock().unwrap_or_else(PoisonError::into_inner);
+        let id = reg.next_id;
+        reg.next_id += 1;
+        reg.live.push(OperationRecord { id, kind, label, started: Instant::now() });
+        drop(reg);
+        OperationGuard { session: self.clone(), id }
+    }
+
+    /// Remove an operation by id — called by [`OperationGuard`]'s drop.
+    fn end_operation(&self, id: u64) {
+        self.op_registry.lock().unwrap_or_else(PoisonError::into_inner).live.retain(|o| o.id != id);
+    }
+
+    /// Snapshot the live operations on this session (oldest first) for the `$/sessions` listing and
+    /// the admin dump. Normal method calls are not tracked, so this lists only in-flight raw-fd
+    /// transfers / passthrough take-overs.
+    pub fn operations(&self) -> Vec<OperationInfo> {
+        self.op_registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .live
+            .iter()
+            .map(|o| OperationInfo { id: o.id, kind: o.kind, label: o.label.clone(), age: o.started.elapsed() })
+            .collect()
+    }
+
     pub(crate) fn outbound(&self) -> &Arc<dyn Outbound> {
         &self.out
     }
@@ -294,5 +404,35 @@ mod tests {
     fn decode_rejects_unknown_discriminant() {
         // Only 0..=3 are ever written (via `as u8`); any other byte is corruption.
         let _ = decode(4);
+    }
+
+    #[test]
+    fn track_operation_registers_and_guard_unregisters_on_drop() {
+        let s: Arc<Session<()>> =
+            Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)));
+        assert!(s.operations().is_empty());
+
+        let g0 = s.track_operation(OperationKind::Transfer, Arc::from("snapshot.receive"));
+        let g1 = s.track_operation(OperationKind::Passthrough, Arc::from("$/sessionSetup"));
+        let live = s.operations();
+        assert_eq!(live.len(), 2);
+        assert_eq!(live[0].id, 0);
+        assert_eq!(live[0].kind, OperationKind::Transfer);
+        assert_eq!(live[0].kind.as_str(), "transfer");
+        assert_eq!(live[0].label.as_ref(), "snapshot.receive");
+        assert!(live[0].age >= Duration::ZERO);
+        assert_eq!(live[1].id, 1);
+        assert_eq!(live[1].kind, OperationKind::Passthrough);
+        assert_eq!(live[1].kind.as_str(), "passthrough");
+
+        // Dropping the first guard unregisters exactly that operation; `retain` keeps order.
+        drop(g0);
+        let live = s.operations();
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].id, 1);
+        assert_eq!(live[0].kind, OperationKind::Passthrough);
+
+        drop(g1);
+        assert!(s.operations().is_empty());
     }
 }
