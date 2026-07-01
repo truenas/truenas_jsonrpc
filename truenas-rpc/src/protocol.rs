@@ -2147,7 +2147,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Ok((d, _)) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.method.meta.reply_capacity);
         let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => erased.run_into(Encode::Json(self.rid.as_deref()), decoded, &cx, &mut out),
@@ -2211,7 +2211,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
             Ok((d, _)) => d,
             Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
         };
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.method.meta.reply_capacity);
         let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => erased.run_into(Encode::Json(self.rid.as_deref()), decoded, cx, &mut out).await,
@@ -2247,7 +2247,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         }
         // Audit needs the params (reflected at decode) but not the result, so `run` returns just
         // the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.method.meta.reply_capacity);
         let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => erased.run_into(encode, decoded, &cx, &mut out),
@@ -2278,7 +2278,7 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         }
         // Audit needs the params (reflected at decode) but not the result, so `run` returns just
         // the wire bytes: no result→`Value` reflection, no envelope synthesis, no re-parse.
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.method.meta.reply_capacity);
         let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => erased.run_into(encode, decoded, cx, &mut out).await,

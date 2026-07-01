@@ -564,6 +564,9 @@ pub(crate) struct MethodMeta {
     pub secret_fields: Arc<[String]>,
     /// If set, the method is also reachable over the XDR binary wire at this proc-id.
     pub xdr_id: Option<u32>,
+    /// Pre-size hint (bytes) for the per-reply output buffer, derived from the response shape by
+    /// codegen so the framed reply serializes into one allocation. `0` → an unsized buffer.
+    pub reply_capacity: usize,
 }
 
 /// A method's name + flags (`pre_auth`, `audit`, `audit_message`, `cancellable`, `roles`,
@@ -579,6 +582,7 @@ pub struct MethodDef {
     doc: Option<Arc<str>>,
     secret_fields: Vec<String>,
     xdr_id: Option<u32>,
+    reply_capacity: usize,
 }
 
 impl MethodDef {
@@ -594,6 +598,7 @@ impl MethodDef {
             doc: None,
             secret_fields: Vec::new(),
             xdr_id: None,
+            reply_capacity: 0,
         }
     }
 
@@ -658,6 +663,14 @@ impl MethodDef {
         self
     }
 
+    /// Pre-size the per-reply output buffer (bytes). The generated `register()` sets this from the
+    /// response shape so the framed reply serializes into one allocation instead of growing from
+    /// zero. `0` (the default) means an unsized buffer (`Vec::new()`).
+    pub fn reply_capacity(mut self, bytes: usize) -> Self {
+        self.reply_capacity = bytes;
+        self
+    }
+
     pub(crate) fn into_meta(self, direction: MessageDirection) -> MethodMeta {
         MethodMeta {
             name: self.name,
@@ -671,6 +684,7 @@ impl MethodDef {
             doc: self.doc,
             secret_fields: self.secret_fields.into(),
             xdr_id: self.xdr_id,
+            reply_capacity: self.reply_capacity,
         }
     }
 }

@@ -396,7 +396,55 @@ fn method_def_expr(spec: &Spec, wire: &str, m: &MethodSpec) -> String {
             s.push_str(&format!(".xdr({id}u32)"));
         }
     }
+    if let Some(cap) = reply_capacity(spec, m) {
+        s.push_str(&format!(".reply_capacity({cap})"));
+    }
     s
+}
+
+/// ~ the JSON-RPC reply envelope skeleton `{"jsonrpc":"2.0","result":<>,"id":"<36-char uuid>"}`.
+const REPLY_ENVELOPE_BYTES: usize = 72;
+
+/// A generous estimate of the JSON bytes a value of `node`'s shape serializes to — used only to
+/// pre-size the reply buffer (`MethodDef::reply_capacity`). Over-estimating reserves a few extra
+/// bytes once; under-estimating costs one realloc. Fixed-shape types (integers/bools/fixed objects)
+/// land near-exact; variable ones (strings/arrays) get a typical-small allowance. `$ref`s resolve
+/// through `spec.defs`, recursion-guarded.
+fn json_value_bytes(node: &SchemaNode, spec: &Spec, depth: usize) -> usize {
+    if depth > 8 {
+        return 16;
+    }
+    if let Some(r) = &node.reference {
+        if let Ok(name) = ref_name(r) {
+            if let Some(d) = spec.defs.get(&name) {
+                return json_value_bytes(d, spec, depth + 1);
+            }
+        }
+        return 16;
+    }
+    match node.ty.as_deref() {
+        Some("integer") => 20, // i64 text + sign
+        Some("number") => 24,
+        Some("boolean") => 5,
+        Some("string") => 24, // "<short string>"; content variable
+        Some("array") => 2 + node.items.as_ref().map_or(16, |it| json_value_bytes(it, spec, depth + 1)),
+        Some("object") => {
+            2 + node
+                .properties
+                .iter()
+                .map(|(name, p)| name.len() + 4 + json_value_bytes(p, spec, depth + 1))
+                .sum::<usize>()
+        }
+        _ => 16, // enum / unknown
+    }
+}
+
+/// The per-method reply-buffer reservation: the JSON-RPC envelope plus its result (or, for a
+/// filterable method, one `entry`). `None` for methods with no result/entry (subscription, python,
+/// transfer), which keep the default unsized buffer.
+fn reply_capacity(spec: &Spec, m: &MethodSpec) -> Option<usize> {
+    let node = m.result.as_ref().or(m.entry.as_ref())?;
+    Some(REPLY_ENVELOPE_BYTES + json_value_bytes(node, spec, 0))
 }
 
 /// The wire-names of the secret properties in a method's params `$def` (fed to
@@ -421,4 +469,38 @@ fn miss(m: &MethodSpec, slot: &str) -> CodegenError {
 
 fn wire_doc(_spec: &Spec, m: &MethodSpec) -> String {
     m.handler.clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(defs: serde_json::Value) -> Spec {
+        serde_json::from_value(serde_json::json!({
+            "name": "t",
+            "version": "1",
+            "$defs": defs,
+            "methods": {},
+        }))
+        .expect("minimal spec deserializes")
+    }
+
+    /// The `json_value_bytes` arms the golden specs don't reach: a self-referential `$ref` (the
+    /// recursion guard), an unresolved `$ref`, and a typeless/unknown node — each returns the
+    /// catch-all 16-byte default.
+    #[test]
+    fn reply_capacity_size_walker_guards_and_defaults() {
+        let s = spec(serde_json::json!({ "A": { "$ref": "#/$defs/A" } }));
+
+        let self_ref = SchemaNode { reference: Some("#/$defs/A".to_string()), ..Default::default() };
+        assert_eq!(json_value_bytes(&self_ref, &s, 0), 16, "recursion guard (depth > 8)");
+
+        let dangling = SchemaNode { reference: Some("#/$defs/Missing".to_string()), ..Default::default() };
+        assert_eq!(json_value_bytes(&dangling, &s, 0), 16, "unresolved $ref (name resolves, def absent)");
+
+        let malformed = SchemaNode { reference: Some("#/components/Foo".to_string()), ..Default::default() };
+        assert_eq!(json_value_bytes(&malformed, &s, 0), 16, "malformed $ref (ref_name errors)");
+
+        assert_eq!(json_value_bytes(&SchemaNode::default(), &s, 0), 16, "unknown / typeless node");
+    }
 }
