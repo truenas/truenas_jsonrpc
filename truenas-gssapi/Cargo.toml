@@ -2,8 +2,8 @@
 #
 # The auth crate's native Kerberos mechanism uses ~6 functions of the frozen RFC 2744 C ABI. We bind
 # them directly rather than depend on `libgssapi`, which pulls `libgssapi-sys` → `bindgen` → `clang-sys`
-# and requires `libclang` on every build host. This mirrors how `truenas-keyring` (keyctl),
-# `truenas-nss` (getpwnam), and `truenas-audit` (netlink) own their small FFI surfaces. Not in
+# and requires `libclang` on every build host. This mirrors how `truenas-keyring` (keyctl) and
+# `truenas-audit` (netlink) own their small FFI surfaces. Not in
 # `default-members` (it links system krb5 and its accept path needs a KDC/keytab to exercise fully).
 [package]
 name = "truenas-gssapi"

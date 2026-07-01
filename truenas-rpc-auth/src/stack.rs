@@ -294,12 +294,15 @@ impl AuthStackBuilder {
         self
     }
 
-    /// Resolve a [`Principal::User`]'s uid via the system passwd database (`getpwnam`) — the
-    /// built-in [`user_resolver`](Self::user_resolver) for accounts that live in NSS.
+    /// Resolve a [`Principal::User`]'s uid via the system passwd database (`getpwnam`, through
+    /// `nix::unistd::User`) — the built-in [`user_resolver`](Self::user_resolver) for accounts that
+    /// live in NSS.
     #[cfg(feature = "nss")]
     #[must_use]
     pub fn resolve_users_via_nss(self) -> Self {
-        self.user_resolver(|name| truenas_nss::getpwnam(name).ok().flatten().map(|e| e.uid))
+        self.user_resolver(|name| {
+            nix::unistd::User::from_name(name).ok().flatten().map(|u| u.uid.as_raw())
+        })
     }
 
     /// Read a `(uid, mechanism)`'s roles from a keyring

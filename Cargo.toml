@@ -14,22 +14,21 @@ members = [
     "truenas-rpc-client",
     "truenas-rpc-auth",
     "truenas-keyring",
-    "truenas-nss",
     "truenas-audit",
     "truenas-gssapi",
     "examples/demo",
 ]
-# Eight crates are excluded from the default set (a plain `cargo build`/`cargo test` and
+# Seven crates are excluded from the default set (a plain `cargo build`/`cargo test` and
 # `coverage.sh`, which run without `-p`, skip them): `truenas-rpc-pyo3` links libpython
 # (so the default build links none); `truenas-rpc-server` and `truenas-rpc-client`
 # do socket / kTLS / SCM_RIGHTS I/O that can't be unit-tested to 100% deterministically; the
 # opt-in auth layers above the core — `truenas-rpc-auth` (peer-cred / mTLS / SCRAM, the latter
-# behind feature flags + OpenSSL) and `truenas-keyring` (raw kernel-keyring syscalls, whose tests
-# skip when no keyring is available); `truenas-nss` (passwd FFI, whose tests need a passwd db);
-# `truenas-audit` (NETLINK_AUDIT FFI, whose end-to-end test needs CAP_AUDIT_WRITE + a live kernel
-# audit); and `truenas-gssapi` (hand-written FFI to the system MIT krb5 GSSAPI, whose accept path
-# needs a KDC/keytab). All are covered behaviorally and excluded from the coverage gate, but still
-# built by `cargo clippy --workspace` and tested with `cargo test -p …`.
+# behind feature flags + OpenSSL; passwd → uid via `nix::unistd::User`) and `truenas-keyring` (raw
+# kernel-keyring syscalls, whose tests skip when no keyring is available); `truenas-audit`
+# (NETLINK_AUDIT FFI, whose end-to-end test needs CAP_AUDIT_WRITE + a live kernel audit); and
+# `truenas-gssapi` (hand-written FFI to the system MIT krb5 GSSAPI, whose accept path needs a
+# KDC/keytab). All are covered behaviorally and excluded from the coverage gate, but still built by
+# `cargo clippy --workspace` and tested with `cargo test -p …`.
 default-members = [
     "truenas-rpc",
     "truenas-filter",

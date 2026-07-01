@@ -34,8 +34,10 @@ openssl = { version = "0.10", optional = true }
 # crate also backs the `server_roles` (uid → roles) lookup for authorization.
 truenas-keyring = { path = "../truenas-keyring", optional = true }
 # The passwd lookup (the `nss` feature): resolve a SCRAM username → uid so authorization can key off
-# the uid. Optional — an embedder may supply its own username→uid resolver instead.
-truenas-nss = { path = "../truenas-nss", optional = true }
+# the uid, via `nix::unistd::User::from_name` (getpwnam_r) — no bespoke NSS FFI. Optional — an
+# embedder may supply its own username→uid resolver instead. Already in the lock (nix backs the
+# server's SCM_RIGHTS).
+nix = { version = "0.29", features = ["user"], optional = true }
 # Native GSSAPI/Kerberos acceptor (the `gssapi` feature): our own minimal FFI to the system MIT krb5
 # GSSAPI (no `libgssapi`/`bindgen`/`clang-sys`). The half-built `ServerCtx` is `Send` not `Sync`, so
 # `gssapi.rs` rides it across rounds inside a `Mutex` — no `unsafe` in this crate. Token base64 reuses
@@ -47,8 +49,8 @@ truenas-gssapi = { path = "../truenas-gssapi", optional = true }
 scram = ["dep:openssl"]
 # A kernel-keyring-backed `CredentialSource` for SCRAM (implies `scram`).
 keyring = ["scram", "dep:truenas-keyring"]
-# A built-in passwd-backed username→uid resolver (`getpwnam`) for keying authorization off the uid.
-nss = ["dep:truenas-nss"]
+# A built-in passwd-backed username→uid resolver (`getpwnam` via nix) for keying authorization off the uid.
+nss = ["dep:nix"]
 # OIDC/OAuth ID-token verification: offline JWT signature + claim validation (over OpenSSL) against
 # IdP JWKS keys the embedder supplies (no HTTP client here). Off by default.
 oauth = ["dep:openssl"]

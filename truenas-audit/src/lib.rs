@@ -17,7 +17,7 @@
 //!
 //! Own the `NETLINK_AUDIT` syscall surface directly (audited `unsafe` over `libc`, confined to
 //! [`netlink`]) rather than depend on the stale, ~zero-adoption rust-netlink `audit` crate —
-//! matching the `truenas-keyring`/`truenas-nss` policy.
+//! matching the `truenas-keyring` policy.
 //!
 //! ```no_run
 //! use truenas_audit::{AuditPrincipal, LinuxAuditSink};
