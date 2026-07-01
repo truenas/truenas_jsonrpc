@@ -116,7 +116,6 @@ pub struct Client<P: ProtocolRuntime> {
     shared: Arc<Shared<P>>,
     recv: JoinHandle<()>,
     writer: JoinHandle<()>,
-    config: ClientConfig,
 }
 
 impl<P: ProtocolRuntime> Drop for Client<P> {
@@ -135,7 +134,7 @@ impl<P: ProtocolRuntime> Client<P> {
         endpoint: &Endpoint,
         config: ClientConfig,
     ) -> Result<(Self, NotificationStream<P::Topic>), ClientError> {
-        let (reader, writer) = connect_endpoint(endpoint).await?;
+        let (reader, writer) = connect_endpoint(endpoint, config.tcp_keepalive).await?;
         Ok(Self::spawn(runtime, reader, writer, config))
     }
 
@@ -156,7 +155,7 @@ impl<P: ProtocolRuntime> Client<P> {
         let writer_task = tokio::spawn(writer_loop(runtime.clone(), writer, out_rx));
         let recv_task =
             tokio::spawn(recv_loop(runtime.clone(), shared.clone(), reader, config.limit, notif_tx));
-        let client = Client { runtime, shared, recv: recv_task, writer: writer_task, config };
+        let client = Client { runtime, shared, recv: recv_task, writer: writer_task };
         (client, NotificationStream { rx: notif_rx })
     }
 
@@ -172,7 +171,9 @@ impl<P: ProtocolRuntime> Client<P> {
     }
 
     /// The one correlated round-trip: register the pending reply **before** writing (race-free), then
-    /// await the oneshot (with a timeout). A timeout/close removes the pending entry.
+    /// await the oneshot. There is **no timer** — per JSON-RPC a request is outstanding until it is
+    /// answered, so the call waits for its reply however long the op runs. A doomed call is failed not
+    /// by a duration scavenger but by the connection dying: the sender is dropped → `Closed`.
     async fn send(
         &self,
         enc: EncodedCall<P::CorrelationKey>,
@@ -187,13 +188,9 @@ impl<P: ProtocolRuntime> Client<P> {
             self.shared.lock_pending().remove(&key);
             return Err(ClientError::Closed);
         }
-        match tokio::time::timeout(self.config.call_timeout, rx).await {
-            Ok(Ok(result)) => result.map_err(ClientError::Rpc),
-            Ok(Err(_recv)) => Err(ClientError::Closed), // sender dropped → connection gone
-            Err(_timeout) => {
-                self.shared.lock_pending().remove(&key);
-                Err(ClientError::Timeout)
-            }
+        match rx.await {
+            Ok(result) => result.map_err(ClientError::Rpc),
+            Err(_recv) => Err(ClientError::Closed), // sender dropped → connection gone
         }
     }
 

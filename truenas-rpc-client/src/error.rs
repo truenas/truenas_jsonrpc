@@ -10,9 +10,6 @@ pub enum ClientError {
     /// complete.
     #[error("connection closed")]
     Closed,
-    /// The call exceeded the configured `call_timeout` with no reply.
-    #[error("call timed out")]
-    Timeout,
     /// A transport I/O error (connect / read / write).
     #[error("transport error: {0}")]
     Transport(#[from] std::io::Error),

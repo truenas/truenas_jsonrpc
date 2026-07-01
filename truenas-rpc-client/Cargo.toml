@@ -20,6 +20,7 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 bytes = "1"
+socket2 = "0.5"
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt", "rt-multi-thread"] }
 
 [dev-dependencies]

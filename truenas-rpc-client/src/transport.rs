@@ -2,6 +2,9 @@
 //! at connect time, each boxed as a trait object — so the engine is generic over the *protocol*, not
 //! the transport. TLS / WebSocket arrive behind features later (mirroring the server).
 
+use std::time::Duration;
+
+use socket2::{SockRef, TcpKeepalive};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpStream, UnixStream};
 
@@ -12,8 +15,14 @@ pub type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
 /// The owned write half of a connection.
 pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
-/// Connect `endpoint` and return its split read/write halves.
-pub async fn connect_endpoint(endpoint: &Endpoint) -> std::io::Result<(BoxRead, BoxWrite)> {
+/// Connect `endpoint` and return its split read/write halves. `tcp_keepalive` (TCP only) arms
+/// `SO_KEEPALIVE` with that idle time, so a crashed/partitioned peer is detected in bounded time
+/// **regardless of how long any call runs** — the liveness signal we rely on instead of a per-call
+/// duration scavenger. AF_UNIX needs none: local peer death surfaces as EOF on the next read.
+pub async fn connect_endpoint(
+    endpoint: &Endpoint,
+    tcp_keepalive: Option<Duration>,
+) -> std::io::Result<(BoxRead, BoxWrite)> {
     match endpoint {
         Endpoint::Unix(path) => {
             let (r, w) = UnixStream::connect(path).await?.into_split();
@@ -22,6 +31,9 @@ pub async fn connect_endpoint(endpoint: &Endpoint) -> std::io::Result<(BoxRead, 
         Endpoint::Tcp(addr) => {
             let stream = TcpStream::connect(addr).await?;
             let _ = stream.set_nodelay(true);
+            if let Some(idle) = tcp_keepalive {
+                let _ = SockRef::from(&stream).set_tcp_keepalive(&TcpKeepalive::new().with_time(idle));
+            }
             let (r, w) = stream.into_split();
             Ok((Box::new(r), Box::new(w)))
         }

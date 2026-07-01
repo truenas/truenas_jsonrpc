@@ -23,17 +23,25 @@ impl Endpoint {
     }
 }
 
-/// Client tuning. [`Default`] is a 30s call timeout and a 4 MiB inbound message limit.
+/// Client tuning. [`Default`]: TCP keep-alive after 30s idle and a 4 MiB inbound message limit.
+///
+/// A call has **no** timeout — per JSON-RPC, a request stays outstanding until it is answered, so a
+/// call waits for its reply however long the op takes (a job, a raw-fd transfer). The client never
+/// scavenges by duration; a *doomed* call is failed by the **connection** dying — a dead peer
+/// (detected by keep-alive on TCP, or EOF on AF_UNIX) drops the pending senders, so every in-flight
+/// call resolves as [`Closed`](crate::ClientError::Closed).
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
-    /// Max time to await one call's reply before [`ClientError::Timeout`](crate::ClientError::Timeout).
-    pub call_timeout: Duration,
+    /// TCP keep-alive idle time (TCP endpoints only; AF_UNIX detects peer death via EOF). Probes a
+    /// silent connection so a crashed/partitioned peer is detected in bounded time **independent of
+    /// how long any call runs**. `None` disables it.
+    pub tcp_keepalive: Option<Duration>,
     /// Max inbound message (frame) size accepted.
     pub limit: usize,
 }
 
 impl Default for ClientConfig {
     fn default() -> Self {
-        ClientConfig { call_timeout: Duration::from_secs(30), limit: 4 * 1024 * 1024 }
+        ClientConfig { tcp_keepalive: Some(Duration::from_secs(30)), limit: 4 * 1024 * 1024 }
     }
 }
