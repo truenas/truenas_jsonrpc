@@ -23,8 +23,10 @@ mod transport;
 pub use config::{ClientConfig, Endpoint};
 pub use engine::{
     Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
-    NotificationStream, ProtocolRuntime, QueryResult, SubId,
+    NotificationStream, ProtocolRuntime, QueryResult, SubId, TransferHandle, Transfers,
 };
+/// Stream direction for a raw-fd transfer, re-exported from the core.
+pub use truenas_rpc::TransferDirection;
 pub use error::ClientError;
 pub use jsonrpc::{JsonRpcClient, JsonRpcMethod, JsonRpcRuntime, LengthPrefix, Negotiated, Progress};
 

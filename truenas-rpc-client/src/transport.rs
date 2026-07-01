@@ -2,6 +2,7 @@
 //! at connect time, each boxed as a trait object — so the engine is generic over the *protocol*, not
 //! the transport. TLS / WebSocket arrive behind features later (mirroring the server).
 
+use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;
 
 use socket2::{SockRef, TcpKeepalive};
@@ -15,18 +16,22 @@ pub type BoxRead = Box<dyn AsyncRead + Unpin + Send>;
 /// The owned write half of a connection.
 pub type BoxWrite = Box<dyn AsyncWrite + Unpin + Send>;
 
-/// Connect `endpoint` and return its split read/write halves. `tcp_keepalive` (TCP only) arms
-/// `SO_KEEPALIVE` with that idle time, so a crashed/partitioned peer is detected in bounded time
+/// Connect `endpoint` and return its split read/write halves **plus the raw socket fd**. The fd is
+/// retained (the split halves keep it open) so a raw-fd transfer can pause the reader and hand the
+/// blocking fd to a handler; it is plaintext here (no userspace TLS yet). `tcp_keepalive` (TCP only)
+/// arms `SO_KEEPALIVE` with that idle time, so a crashed/partitioned peer is detected in bounded time
 /// **regardless of how long any call runs** — the liveness signal we rely on instead of a per-call
 /// duration scavenger. AF_UNIX needs none: local peer death surfaces as EOF on the next read.
 pub async fn connect_endpoint(
     endpoint: &Endpoint,
     tcp_keepalive: Option<Duration>,
-) -> std::io::Result<(BoxRead, BoxWrite)> {
+) -> std::io::Result<(BoxRead, BoxWrite, RawFd)> {
     match endpoint {
         Endpoint::Unix(path) => {
-            let (r, w) = UnixStream::connect(path).await?.into_split();
-            Ok((Box::new(r), Box::new(w)))
+            let stream = UnixStream::connect(path).await?;
+            let fd = stream.as_raw_fd();
+            let (r, w) = stream.into_split();
+            Ok((Box::new(r), Box::new(w), fd))
         }
         Endpoint::Tcp(addr) => {
             let stream = TcpStream::connect(addr).await?;
@@ -34,8 +39,9 @@ pub async fn connect_endpoint(
             if let Some(idle) = tcp_keepalive {
                 let _ = SockRef::from(&stream).set_tcp_keepalive(&TcpKeepalive::new().with_time(idle));
             }
+            let fd = stream.as_raw_fd();
             let (r, w) = stream.into_split();
-            Ok((Box::new(r), Box::new(w)))
+            Ok((Box::new(r), Box::new(w), fd))
         }
     }
 }

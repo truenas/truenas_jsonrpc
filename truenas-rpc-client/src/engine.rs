@@ -8,15 +8,16 @@
 //! `NetworkWire: Wire`). The minimal required seam is just: frame + encode-a-call + classify-a-reply.
 
 use std::collections::HashMap;
+use std::os::fd::{AsRawFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::BytesMut;
 use serde_json::value::RawValue;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 use tokio::task::JoinHandle;
-use truenas_rpc::JsonRpcError;
+use truenas_rpc::{JsonRpcError, TransferDirection};
 
 use crate::config::{ClientConfig, Endpoint};
 use crate::error::ClientError;
@@ -48,6 +49,15 @@ pub enum Inbound<P: ProtocolRuntime + ?Sized> {
         /// The correlation key of the in-flight call this update belongs to.
         key: P::CorrelationKey,
         /// The raw progress payload bytes (the update's params — decode with your progress type).
+        payload: Vec<u8>,
+    },
+    /// A `$/transferReady` handshake for an in-flight raw-fd transfer, correlated by `key`. The
+    /// engine hands the payload to the waiting [`transfer`](Client::transfer) and **parks the recv
+    /// task** — the bytes that follow are the raw stream, read off the fd by the transfer, not framed.
+    TransferReady {
+        /// The correlation key of the in-flight transfer this readies.
+        key: P::CorrelationKey,
+        /// The raw `$/transferReady` params bytes (`{id, direction, result}`).
         payload: Vec<u8>,
     },
     /// A server→client notification on `topic`.
@@ -99,10 +109,12 @@ type ReplyTx = oneshot::Sender<Result<Vec<u8>, JsonRpcError>>;
 /// the reply arrives and the entry is removed, ending the stream.
 type ProgressTx = mpsc::UnboundedSender<Vec<u8>>;
 
-/// One outstanding call's registry entry: the reply channel + an optional progress sink.
+/// One outstanding call's registry entry: the reply channel + an optional progress sink + (for a
+/// raw-fd transfer) a one-shot for the `$/transferReady` handshake payload.
 struct PendingEntry {
     reply: ReplyTx,
     progress: Option<ProgressTx>,
+    ready: Option<oneshot::Sender<Vec<u8>>>,
 }
 
 /// The correlation registry behind one `Mutex`: outstanding calls keyed by correlation id, plus the
@@ -114,11 +126,14 @@ struct Pending<K> {
     next_seq: u64,
 }
 
-/// Shared, task-spanning state: the correlation registry + the writer channel + a closed flag.
+/// Shared, task-spanning state: the correlation registry + the writer channel + a closed flag + the
+/// raw-fd-transfer resume signal (the recv task parks on it at `$/transferReady`; the transfer fires
+/// it once the raw stream is done, so the recv task reads the final reply).
 struct Shared<P: ProtocolRuntime> {
     pending: Mutex<Pending<P::CorrelationKey>>,
     out_tx: mpsc::UnboundedSender<Vec<u8>>,
     closed: AtomicBool,
+    transfer_resume: Notify,
 }
 
 impl<P: ProtocolRuntime> Shared<P> {
@@ -168,6 +183,9 @@ pub struct Client<P: ProtocolRuntime> {
     shared: Arc<Shared<P>>,
     recv: JoinHandle<()>,
     writer: JoinHandle<()>,
+    // The connection's raw socket fd, kept open by the split halves — lent (blocking) to a raw-fd
+    // transfer handler. Plaintext here (no userspace TLS yet).
+    transfer_fd: RawFd,
 }
 
 impl<P: ProtocolRuntime> Drop for Client<P> {
@@ -186,14 +204,15 @@ impl<P: ProtocolRuntime> Client<P> {
         endpoint: &Endpoint,
         config: ClientConfig,
     ) -> Result<(Self, NotificationStream<P::Topic>), ClientError> {
-        let (reader, writer) = connect_endpoint(endpoint, config.tcp_keepalive).await?;
-        Ok(Self::spawn(runtime, reader, writer, config))
+        let (reader, writer, fd) = connect_endpoint(endpoint, config.tcp_keepalive).await?;
+        Ok(Self::spawn(runtime, reader, writer, fd, config))
     }
 
     fn spawn(
         runtime: P,
         reader: BoxRead,
         writer: BoxWrite,
+        transfer_fd: RawFd,
         config: ClientConfig,
     ) -> (Self, NotificationStream<P::Topic>) {
         let runtime = Arc::new(runtime);
@@ -203,11 +222,12 @@ impl<P: ProtocolRuntime> Client<P> {
             pending: Mutex::new(Pending { map: HashMap::new(), next_seq: 0 }),
             out_tx,
             closed: AtomicBool::new(false),
+            transfer_resume: Notify::new(),
         });
         let writer_task = tokio::spawn(writer_loop(runtime.clone(), writer, out_rx));
         let recv_task =
             tokio::spawn(recv_loop(runtime.clone(), shared.clone(), reader, config.limit, notif_tx));
-        let client = Client { runtime, shared, recv: recv_task, writer: writer_task };
+        let client = Client { runtime, shared, recv: recv_task, writer: writer_task, transfer_fd };
         (client, NotificationStream { rx: notif_rx })
     }
 
@@ -251,13 +271,14 @@ impl<P: ProtocolRuntime> Client<P> {
     fn register(
         &self,
         progress: Option<ProgressTx>,
+        ready: Option<oneshot::Sender<Vec<u8>>>,
     ) -> (P::CorrelationKey, oneshot::Receiver<Result<Vec<u8>, JsonRpcError>>) {
         let (tx, rx) = oneshot::channel();
         let mut pending = self.shared.lock_pending();
         let seq = pending.next_seq;
         pending.next_seq = seq.wrapping_add(1);
         let key = self.runtime.key_for_seq(seq);
-        pending.map.insert(key.clone(), PendingEntry { reply: tx, progress });
+        pending.map.insert(key.clone(), PendingEntry { reply: tx, progress, ready });
         (key, rx)
     }
 
@@ -281,7 +302,7 @@ impl<P: ProtocolRuntime> Client<P> {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(ClientError::Closed);
         }
-        let (key, rx) = self.register(progress);
+        let (key, rx) = self.register(progress, None);
         let wire = encode(&key);
         if self.shared.out_tx.send(wire).is_err() {
             self.shared.lock_pending().map.remove(&key);
@@ -352,6 +373,20 @@ async fn recv_loop<P: ProtocolRuntime>(
                         let pending = shared.lock_pending();
                         if let Some(sink) = pending.map.get(&key).and_then(|e| e.progress.as_ref()) {
                             let _ = sink.send(payload);
+                        }
+                    }
+                    // `$/transferReady`: hand the payload to the waiting `transfer`, then PARK. The
+                    // bytes after this frame are the raw stream — the transfer reads them off the fd,
+                    // so the recv task must not read them as frames. It resumes (reads the final
+                    // reply) once the transfer fires `transfer_resume`.
+                    Ok(Inbound::TransferReady { key, payload }) => {
+                        // Take the ready-sender out under a tight lock, THEN send + park (never hold
+                        // the pending lock across the `.await`).
+                        let ready =
+                            shared.lock_pending().map.get_mut(&key).and_then(|e| e.ready.take());
+                        if let Some(ready) = ready {
+                            let _ = ready.send(payload);
+                            shared.transfer_resume.notified().await;
                         }
                     }
                     Ok(Inbound::Notification { topic, payload }) => {
@@ -428,6 +463,336 @@ impl<P: GracefulClose> Client<P> {
         let _ = self.round_trip(|key| self.runtime.encode_close(key)).await;
         Ok(())
     }
+}
+
+/// A protocol that can host a **raw-fd transfer** — the `$/transferReady` → (`$/transferGo`)
+/// handshake that lends a handler the connection's socket fd for a self-delimiting bulk stream.
+pub trait Transfers: ProtocolRuntime {
+    /// Parse a `$/transferReady` payload (an [`Inbound::TransferReady`]) into the stream direction +
+    /// the negotiated interim-result bytes.
+    fn parse_transfer_ready(
+        &self,
+        payload: &[u8],
+    ) -> Result<(TransferDirection, Vec<u8>), ClientError>;
+    /// Encode a `$/transferGo` for a **download**'s `key` (client-consumes: sent once the reader has
+    /// parked, so the raw stream that follows is read off the fd, not by the recv task).
+    fn encode_transfer_go(&self, key: &Self::CorrelationKey) -> Vec<u8>;
+}
+
+/// The exclusive, **blocking** raw-fd handle a [`transfer`](Client::transfer) callback receives. Its
+/// fd carries plaintext for the duration; hand it to libzfs (`lzc_send`/`lzc_receive`), `sendfile`,
+/// `splice`, or SCM_RIGHTS fd-passing. [`result`](Self::result) is the `$/transferReady` interim the
+/// producer reported (e.g. a byte count so a download consumer knows how much to read).
+pub struct TransferHandle {
+    fd: RawFd,
+    direction: TransferDirection,
+    result: Vec<u8>,
+}
+
+impl TransferHandle {
+    /// Which way the stream flows (`Download` = server produces / client reads; `Upload` = reverse).
+    pub fn direction(&self) -> TransferDirection {
+        self.direction
+    }
+    /// The `$/transferReady` interim-result bytes the producer reported.
+    pub fn result(&self) -> &[u8] {
+        &self.result
+    }
+
+    /// Read exactly `buf.len()` bytes of the stream (blocking) — for a `Download`. Errors with
+    /// `UnexpectedEof` if the peer closes early. (A convenience over the raw fd; you may also drive
+    /// it yourself via [`as_raw_fd`](Self::as_raw_fd) with `splice`/`sendfile`/libzfs.)
+    pub fn read_exact(&self, mut buf: &mut [u8]) -> std::io::Result<()> {
+        while !buf.is_empty() {
+            // SAFETY: `fd` is the live, blocking connection socket; `read` fills up to `buf.len()`.
+            #[allow(unsafe_code)]
+            let n = unsafe { libc::read(self.fd, buf.as_mut_ptr().cast(), buf.len()) };
+            match n {
+                -1 => return Err(std::io::Error::last_os_error()),
+                0 => {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        "transfer peer closed early",
+                    ))
+                }
+                n => {
+                    let tmp = buf;
+                    buf = &mut tmp[n as usize..];
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Write all of `buf` to the stream (blocking) — for an `Upload`.
+    pub fn write_all(&self, buf: &[u8]) -> std::io::Result<()> {
+        write_all_blocking(self.fd, buf)
+    }
+
+    /// **Zero-copy** send for an `Upload`: `sendfile(2)` `count` bytes from `file` (a regular file)
+    /// to the peer, entirely in-kernel — the payload never enters the process. Returns bytes sent
+    /// (< `count` if the peer closed early).
+    pub fn sendfile(&self, file: &impl AsRawFd, count: usize) -> std::io::Result<usize> {
+        let in_fd = file.as_raw_fd();
+        let mut offset: libc::off_t = 0;
+        let mut sent = 0usize;
+        while sent < count {
+            // SAFETY: out = the blocking socket, in = a readable file; `sendfile` copies in-kernel
+            // and advances `offset` by the number of bytes moved.
+            #[allow(unsafe_code)]
+            let n = unsafe { libc::sendfile(self.fd, in_fd, &mut offset, count - sent) };
+            match n {
+                -1 => return Err(std::io::Error::last_os_error()),
+                0 => break, // peer closed
+                n => sent += n as usize,
+            }
+        }
+        Ok(sent)
+    }
+
+    /// **Zero-copy** receive for a `Download`: move `count` bytes from the peer into `file` (a regular
+    /// file) through a kernel pipe with `splice(2)` — the payload never enters the process. Falls back
+    /// to a buffered copy where the kernel can't `splice` these fds. Returns bytes moved (< `count` if
+    /// the peer closed early).
+    pub fn recvfile(&self, file: &impl AsRawFd, count: usize) -> std::io::Result<usize> {
+        let dst = file.as_raw_fd();
+        if let Some(res) = splice_socket_to_fd(self.fd, dst, count) {
+            return res;
+        }
+        // Fallback: a buffered read → write copy.
+        let mut buf = vec![0u8; 1 << 20];
+        let mut moved = 0usize;
+        while moved < count {
+            let want = (count - moved).min(buf.len());
+            let n = read_once(self.fd, &mut buf[..want])?;
+            if n == 0 {
+                break;
+            }
+            write_all_blocking(dst, &buf[..n])?;
+            moved += n;
+        }
+        Ok(moved)
+    }
+}
+
+/// Write all of `buf` to a blocking fd, looping over short writes.
+fn write_all_blocking(fd: RawFd, mut buf: &[u8]) -> std::io::Result<()> {
+    while !buf.is_empty() {
+        // SAFETY: `fd` is the live, blocking connection socket; `write` sends up to `buf.len()`.
+        #[allow(unsafe_code)]
+        let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+        match n {
+            -1 => return Err(std::io::Error::last_os_error()),
+            0 => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "transfer peer closed")),
+            n => buf = &buf[n as usize..],
+        }
+    }
+    Ok(())
+}
+
+/// One `read(2)` into `buf` (blocking); the buffered-copy fallback for [`TransferHandle::recvfile`].
+fn read_once(fd: RawFd, buf: &mut [u8]) -> std::io::Result<usize> {
+    // SAFETY: `fd` is the live, blocking connection socket; `read` fills up to `buf.len()`.
+    #[allow(unsafe_code)]
+    let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
+    if n < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(n as usize)
+    }
+}
+
+/// Move up to `count` bytes socket→`dst` **zero-copy** via a kernel pipe (`splice`, socket→pipe→fd —
+/// `splice` needs one end to be a pipe). Returns `None` — *before consuming anything* — when `splice`
+/// is unavailable/rejected for these fds (the caller falls back to a buffered copy); `Some(..)` once
+/// it has committed (a failure after partial progress is a real error).
+fn splice_socket_to_fd(src: RawFd, dst: RawFd, count: usize) -> Option<std::io::Result<usize>> {
+    let mut fds = [0 as libc::c_int; 2];
+    // SAFETY: `fds` is a valid 2-int array `pipe` fills with the {read, write} ends.
+    #[allow(unsafe_code)]
+    let rc = unsafe { libc::pipe(fds.as_mut_ptr()) };
+    if rc != 0 {
+        return Some(Err(std::io::Error::last_os_error()));
+    }
+    let (pr, pw) = (fds[0], fds[1]);
+    let mut moved = 0usize;
+    let result = loop {
+        if moved >= count {
+            break Ok(moved);
+        }
+        // socket → pipe
+        // SAFETY: `src` is the blocking socket, `pw` the pipe write end we just made.
+        #[allow(unsafe_code)]
+        let n = unsafe { libc::splice(src, std::ptr::null_mut(), pw, std::ptr::null_mut(), count - moved, 0) };
+        if n < 0 {
+            if moved == 0 {
+                close_fd(pr); // unsupported here, nothing consumed → let the caller fall back
+                close_fd(pw);
+                return None;
+            }
+            break Err(std::io::Error::last_os_error());
+        }
+        if n == 0 {
+            break Ok(moved); // peer closed early
+        }
+        // pipe → fd: drain the `n` buffered bytes into the file.
+        let mut drained = 0usize;
+        let err = loop {
+            if drained >= n as usize {
+                break None;
+            }
+            // SAFETY: `pr` is the pipe read end, `dst` the destination file.
+            #[allow(unsafe_code)]
+            let m = unsafe {
+                libc::splice(pr, std::ptr::null_mut(), dst, std::ptr::null_mut(), n as usize - drained, 0)
+            };
+            if m < 0 {
+                break Some(std::io::Error::last_os_error());
+            }
+            drained += m as usize;
+        };
+        if let Some(e) = err {
+            break Err(e);
+        }
+        moved += n as usize;
+    };
+    close_fd(pr);
+    close_fd(pw);
+    Some(result)
+}
+
+/// `close(2)` a pipe fd we own.
+fn close_fd(fd: RawFd) {
+    // SAFETY: `fd` is a pipe end this module created and owns.
+    #[allow(unsafe_code)]
+    unsafe {
+        libc::close(fd);
+    }
+}
+
+impl AsRawFd for TransferHandle {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd
+    }
+}
+
+impl<P: Transfers> Client<P> {
+    /// Run a raw-fd transfer method (e.g. a dataset send/receive). Sends the request, does the
+    /// `$/transferReady` (+ `$/transferGo` for a download) handshake, **parks the reader**, then runs
+    /// `callback` on a blocking worker with exclusive access to the connection's blocking socket fd
+    /// (a [`TransferHandle`]) — the callback drives the bulk stream. On a clean return it resumes the
+    /// reader and returns the server's final result. Monopolizes the connection for the duration; a
+    /// callback error/panic tears the connection down (the wire is then indeterminate).
+    pub async fn transfer<F>(
+        &self,
+        method: &P::MethodKey,
+        params: &[u8],
+        callback: F,
+    ) -> Result<Vec<u8>, ClientError>
+    where
+        F: FnOnce(TransferHandle) -> std::io::Result<()> + Send + 'static,
+    {
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Err(ClientError::Closed);
+        }
+        // Register the reply slot + a ready slot, then send the request.
+        let (ready_tx, mut ready_rx) = oneshot::channel();
+        let (key, mut reply_rx) = self.register(None, Some(ready_tx));
+        let wire = self.runtime.encode_call(method, params, &key);
+        if self.shared.out_tx.send(wire).is_err() {
+            self.shared.lock_pending().map.remove(&key);
+            return Err(ClientError::Closed);
+        }
+
+        // Await `$/transferReady`, or an early error reply (the server rejected before ready — the
+        // recv task never parked, so the connection stays usable).
+        let ready_payload = tokio::select! {
+            r = &mut reply_rx => {
+                self.shared.lock_pending().map.remove(&key);
+                return match r {
+                    Ok(res) => res.map_err(ClientError::Rpc),
+                    Err(_) => Err(ClientError::Closed),
+                };
+            }
+            r = &mut ready_rx => match r {
+                Ok(p) => p,
+                Err(_) => return Err(ClientError::Closed),
+            },
+        };
+        // From here the recv task is PARKED. Every exit below must unpark it (via `abort_transfer`
+        // on error, or `transfer_resume` on success) or the connection wedges.
+        let (direction, result) = match self.runtime.parse_transfer_ready(&ready_payload) {
+            Ok(dr) => dr,
+            Err(e) => {
+                self.abort_transfer(&key);
+                return Err(e);
+            }
+        };
+        // Make the fd blocking for the handler. Then, for a download (client consumes), send
+        // `$/transferGo` **directly on the fd** (framed) so the server starts streaming — bypassing
+        // the async writer task, which must not poll a now-blocking fd. The reader is already parked,
+        // and the request was flushed before `$/transferReady`, so the writer queue is empty here.
+        let fd = self.transfer_fd;
+        if let Err(e) = set_blocking(fd, true) {
+            self.abort_transfer(&key);
+            return Err(ClientError::Transport(e));
+        }
+        if direction == TransferDirection::Download {
+            let mut framed = Vec::new();
+            self.runtime.framing().frame_into(&mut framed, &self.runtime.encode_transfer_go(&key));
+            if let Err(e) = write_all_blocking(fd, &framed) {
+                let _ = set_blocking(fd, false);
+                self.abort_transfer(&key);
+                return Err(ClientError::Transport(e));
+            }
+        }
+        let handle = TransferHandle { fd, direction, result };
+        let outcome = tokio::task::spawn_blocking(move || callback(handle)).await;
+        let _ = set_blocking(fd, false);
+
+        match outcome {
+            Ok(Ok(())) => {
+                // Clean stream: resume the reader and await the server's final reply.
+                self.shared.transfer_resume.notify_one();
+                let reply = reply_rx.await;
+                self.shared.lock_pending().map.remove(&key);
+                match reply {
+                    Ok(res) => res.map_err(ClientError::Rpc),
+                    Err(_) => Err(ClientError::Closed),
+                }
+            }
+            Ok(Err(e)) => {
+                self.abort_transfer(&key);
+                Err(ClientError::Transport(e))
+            }
+            Err(_panic) => {
+                self.abort_transfer(&key);
+                Err(ClientError::Rpc(JsonRpcError::internal("transfer callback panicked")))
+            }
+        }
+    }
+}
+
+impl<P: ProtocolRuntime> Client<P> {
+    /// Abort a transfer whose wire state is indeterminate (a mid-stream failure, or a bad handshake):
+    /// drop its pending slot, mark the connection closed, and unpark the recv task so it observes the
+    /// close and exits. Only called after the reader has parked.
+    fn abort_transfer(&self, key: &P::CorrelationKey) {
+        self.shared.lock_pending().map.remove(key);
+        self.shared.closed.store(true, Ordering::SeqCst);
+        self.shared.transfer_resume.notify_one();
+    }
+}
+
+/// Toggle `O_NONBLOCK` on the connection fd for a transfer: blocking while the handler owns it, then
+/// non-blocking again so tokio's reactor can drive it. The fd stays owned by the connection's split
+/// halves — this only rewrites its status flags.
+fn set_blocking(fd: RawFd, blocking: bool) -> std::io::Result<()> {
+    // SAFETY: `fd` is the live connection socket, kept open by the split halves; the borrow neither
+    // outlives this call nor takes ownership (no close), and `set_nonblocking` only `fcntl`s flags.
+    #[allow(unsafe_code)]
+    let borrowed = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+    socket2::SockRef::from(&borrowed).set_nonblocking(!blocking)
 }
 
 // --- The codegen seam --------------------------------------------------------------------------

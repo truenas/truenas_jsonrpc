@@ -8,8 +8,13 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Async client engine for truenas-rpc: a protocol-agnostic core with per-protocol runtime hooks (JSON-RPC built in)."
 
-[lints]
-workspace = true
+# A raw-fd transfer hands the connection socket to a blocking handler, which needs an `fcntl`
+# to toggle O_NONBLOCK — so, like `truenas-rpc-server`, this crate does socket I/O and can't use
+# the workspace's `unsafe_code = "forbid"`. It denies unsafe by default and allows it only in
+# narrowly-scoped, audited blocks (`#[allow(unsafe_code)]`); the core dispatch stays forbid.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
 
 [dependencies]
 truenas-rpc = { path = "../truenas-rpc" }
@@ -21,6 +26,8 @@ thiserror = { workspace = true }
 async-trait = { workspace = true }
 bytes = "1"
 socket2 = "0.5"
+# O_NONBLOCK toggle for the raw-fd transfer (blocking handler, then restore tokio). Already in the lock.
+libc = "0.2"
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt", "rt-multi-thread"] }
 
 [dev-dependencies]

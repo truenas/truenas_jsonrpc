@@ -12,9 +12,11 @@ use uuid::Uuid;
 use truenas_rpc::JsonRpcError;
 
 use crate::config::{ClientConfig, Endpoint};
+use truenas_rpc::TransferDirection;
+
 use crate::engine::{
     Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
-    NotificationStream, ProtocolRuntime,
+    NotificationStream, ProtocolRuntime, Transfers,
 };
 use crate::error::ClientError;
 
@@ -202,11 +204,12 @@ fn parse_json_reply(frame: &[u8]) -> Result<Inbound<JsonRpcRuntime>, ClientError
         Ok(Inbound::Reply { key, result })
     } else if let Some(method) = env.method {
         let payload = raw_bytes(env.params);
+        // Both `$/progress` and `$/transferReady` are correlated by `params.id` (the target call),
+        // not a topic — route them to that call, not the general notification stream.
         if method == "$/progress" {
-            // Per-call progress: correlated by `params.id` (the target call), not a topic. Route it
-            // to that call's progress sink instead of the general notification stream.
-            let key = progress_target(&payload)?;
-            Ok(Inbound::Progress { key, payload })
+            Ok(Inbound::Progress { key: notification_target(&payload)?, payload })
+        } else if method == "$/transferReady" {
+            Ok(Inbound::TransferReady { key: notification_target(&payload)?, payload })
         } else {
             Ok(Inbound::Notification { topic: method, payload })
         }
@@ -215,10 +218,10 @@ fn parse_json_reply(frame: &[u8]) -> Result<Inbound<JsonRpcRuntime>, ClientError
     }
 }
 
-/// The target call id of a `$/progress` update (its `params.id`) — the correlation key the update is
-/// routed to. The full `payload` (including `id`) is delivered as-is; a consumer's progress type just
-/// ignores the extra field.
-fn progress_target(payload: &[u8]) -> Result<Uuid, ClientError> {
+/// The target call id (`params.id`) of a per-call server message (`$/progress` / `$/transferReady`)
+/// — the correlation key it routes to. The full `payload` (including `id`) is delivered as-is; a
+/// consumer's progress type just ignores the extra field.
+fn notification_target(payload: &[u8]) -> Result<Uuid, ClientError> {
     #[derive(serde::Deserialize)]
     struct Target {
         id: String,
@@ -306,6 +309,37 @@ impl Authenticates for JsonRpcRuntime {
 impl GracefulClose for JsonRpcRuntime {
     fn encode_close(&self, key: &Uuid) -> Vec<u8> {
         encode_json_request("$/sessionClose", key, &[])
+    }
+}
+
+impl Transfers for JsonRpcRuntime {
+    fn parse_transfer_ready(
+        &self,
+        payload: &[u8],
+    ) -> Result<(TransferDirection, Vec<u8>), ClientError> {
+        #[derive(serde::Deserialize)]
+        struct Ready {
+            direction: String,
+            #[serde(default)]
+            result: Option<Box<RawValue>>,
+        }
+        let r: Ready = serde_json::from_slice(payload)
+            .map_err(|e| ClientError::Decode(format!("$/transferReady: {e}")))?;
+        // `TransferDirection` is Serialize-only in the core, so match the wire string here rather
+        // than pull a Deserialize impl into the dispatch crate.
+        let direction = match r.direction.as_str() {
+            "download" => TransferDirection::Download,
+            "upload" => TransferDirection::Upload,
+            other => {
+                return Err(ClientError::Decode(format!("unknown transfer direction {other:?}")))
+            }
+        };
+        let result = r.result.map(|v| v.get().as_bytes().to_vec()).unwrap_or_else(|| b"null".to_vec());
+        Ok((direction, result))
+    }
+
+    fn encode_transfer_go(&self, key: &Uuid) -> Vec<u8> {
+        encode_json_notification("$/transferGo", format!(r#"{{"id":"{key}"}}"#).as_bytes())
     }
 }
 
