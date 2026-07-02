@@ -16,6 +16,12 @@ description = "Async client engine for truenas-rpc: a protocol-agnostic core wit
 unsafe_code = "deny"
 missing_docs = "warn"
 
+[features]
+# Encrypted transport, mirroring the server (system OpenSSL). Off by default: a default build pulls
+# no openssl crates. A direct `tls://` connection uses kernel TLS — transfer-capable, and fails closed
+# if kTLS doesn't engage.
+tls = ["dep:openssl", "dep:openssl-sys", "dep:foreign-types"]
+
 [dependencies]
 truenas-rpc = { path = "../truenas-rpc" }
 truenas-xdr = { path = "../truenas-xdr" }
@@ -29,7 +35,12 @@ socket2 = "0.5"
 # O_NONBLOCK toggle for the raw-fd transfer (blocking handler, then restore tokio). Already in the lock.
 libc = "0.2"
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt", "rt-multi-thread"] }
+# TLS (the `tls` feature): system OpenSSL; kTLS handshake via openssl-sys + foreign-types.
+openssl = { version = "0.10", optional = true }
+openssl-sys = { version = "0.9", optional = true }
+foreign-types = { version = "0.3", optional = true }
 
 [dev-dependencies]
-truenas-rpc-server = { path = "../truenas-rpc-server" }
+# The transport tests stand up a live server over TLS and drive the client against it.
+truenas-rpc-server = { path = "../truenas-rpc-server", features = ["tls"] }
 serde = { workspace = true }

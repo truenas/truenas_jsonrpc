@@ -19,6 +19,11 @@ pub enum ClientError {
     /// The server returned an error for the call.
     #[error("rpc error: {0}")]
     Rpc(#[from] JsonRpcError),
+    /// The active transport cannot host a raw-fd [`transfer`](crate::Client::transfer): the socket
+    /// carries ciphertext (userspace TLS) or the wire is owned by the transport library (WebSocket),
+    /// so there is no plaintext fd to lend. Use a plain AF_UNIX/TCP — or a kTLS — connection.
+    #[error("transport does not support raw-fd transfer (use a plain AF_UNIX/TCP or kTLS connection)")]
+    NoTransfer,
 }
 
 impl ClientError {

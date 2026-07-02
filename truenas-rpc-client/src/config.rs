@@ -10,6 +10,18 @@ pub enum Endpoint {
     Unix(PathBuf),
     /// A TCP `host:port` address.
     Tcp(String),
+    /// An encrypted TCP `host:port` over kernel TLS (the `tls` feature). `server_name` is the SNI /
+    /// verification hostname. Transfer-capable (the fd is plaintext to us); **fails closed** if kTLS
+    /// doesn't engage.
+    #[cfg(feature = "tls")]
+    Tls {
+        /// The TCP `host:port` to connect.
+        addr: String,
+        /// The SNI / certificate-verification hostname.
+        server_name: String,
+        /// The TLS material (trust roots, optional mTLS certificate).
+        tls: crate::tls::ClientTls,
+    },
 }
 
 impl Endpoint {
@@ -20,6 +32,15 @@ impl Endpoint {
     /// A TCP endpoint at `addr` (`host:port`).
     pub fn tcp(addr: impl Into<String>) -> Self {
         Endpoint::Tcp(addr.into())
+    }
+    /// A kernel-TLS endpoint at `addr` (`host:port`), verified/SNI'd as `server_name`, using `tls`.
+    #[cfg(feature = "tls")]
+    pub fn tls(
+        addr: impl Into<String>,
+        server_name: impl Into<String>,
+        tls: crate::tls::ClientTls,
+    ) -> Self {
+        Endpoint::Tls { addr: addr.into(), server_name: server_name.into(), tls }
     }
 }
 

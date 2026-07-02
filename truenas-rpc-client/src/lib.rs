@@ -18,9 +18,13 @@ mod config;
 mod engine;
 mod error;
 mod jsonrpc;
+#[cfg(feature = "tls")]
+mod tls;
 mod transport;
 
 pub use config::{ClientConfig, Endpoint};
+#[cfg(feature = "tls")]
+pub use tls::{ClientTls, ClientTlsBuilder};
 pub use engine::{
     Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
     NotificationStream, ProtocolRuntime, QueryResult, SubId, TransferHandle, Transfers,

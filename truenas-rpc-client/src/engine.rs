@@ -184,8 +184,10 @@ pub struct Client<P: ProtocolRuntime> {
     recv: JoinHandle<()>,
     writer: JoinHandle<()>,
     // The connection's raw socket fd, kept open by the split halves — lent (blocking) to a raw-fd
-    // transfer handler. Plaintext here (no userspace TLS yet).
-    transfer_fd: RawFd,
+    // transfer handler. `None` when the transport exposes no plaintext fd (userspace TLS carries
+    // ciphertext; WebSocket's wire is library-owned), so `transfer` is refused — mirroring the
+    // reference client's per-channel `transfer_target`.
+    transfer_fd: Option<RawFd>,
 }
 
 impl<P: ProtocolRuntime> Drop for Client<P> {
@@ -212,7 +214,7 @@ impl<P: ProtocolRuntime> Client<P> {
         runtime: P,
         reader: BoxRead,
         writer: BoxWrite,
-        transfer_fd: RawFd,
+        transfer_fd: Option<RawFd>,
         config: ClientConfig,
     ) -> (Self, NotificationStream<P::Topic>) {
         let runtime = Arc::new(runtime);
@@ -695,6 +697,11 @@ impl<P: Transfers> Client<P> {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(ClientError::Closed);
         }
+        // A transfer needs a plaintext fd to lend; transports that don't expose one (userspace TLS,
+        // WebSocket) refuse it up front — before sending a request we could never fulfil.
+        let Some(fd) = self.transfer_fd else {
+            return Err(ClientError::NoTransfer);
+        };
         // Register the reply slot + a ready slot, then send the request.
         let (ready_tx, mut ready_rx) = oneshot::channel();
         let (key, mut reply_rx) = self.register(None, Some(ready_tx));
@@ -732,7 +739,6 @@ impl<P: Transfers> Client<P> {
         // `$/transferGo` **directly on the fd** (framed) so the server starts streaming — bypassing
         // the async writer task, which must not poll a now-blocking fd. The reader is already parked,
         // and the request was flushed before `$/transferReady`, so the writer queue is empty here.
-        let fd = self.transfer_fd;
         if let Err(e) = set_blocking(fd, true) {
             self.abort_transfer(&key);
             return Err(ClientError::Transport(e));
