@@ -9,8 +9,8 @@ use libc::c_int;
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::error::Error;
-use crate::sys::{self, Serial, KEY_SPEC_PROCESS_KEYRING};
+use super::error::Error;
+use super::sys::{self, Serial, KEY_SPEC_PROCESS_KEYRING};
 
 /// A kernel key type (the peer of `truenas_keyring.KeyType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

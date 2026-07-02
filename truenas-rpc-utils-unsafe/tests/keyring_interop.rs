@@ -2,10 +2,11 @@
 //! by the other, over a sub-keyring under the **session** keyring (a child process inherits the
 //! session keyring and its possession, so both reach the same keys). Skipped if Python +
 //! `truenas_keyring` aren't importable, or the keyring syscalls are unavailable here.
+#![cfg(feature = "keyring")]
 
 use std::process::Command;
 
-use truenas_keyring::{Found, KeyRing, KeyType, SpecialKeyring};
+use truenas_rpc_utils_unsafe::keyring::{Found, KeyRing, KeyType, SpecialKeyring};
 
 /// Where the built `truenas_keyring` extension lives (overridable via `TRUENAS_PYKEYRING`).
 const DEFAULT_BUILD: &str = "/CODE/claudedir/truenas_pykeyring/build/lib.linux-x86_64-cpython-313";

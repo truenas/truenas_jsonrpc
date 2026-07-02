@@ -319,7 +319,7 @@ test (`tests/conformance.rs`) replays the committed `tests/conformance/golden.js
 through the Rust dispatch core and asserts **byte-stable** responses **and** audit records
 against the frozen golden — the gating proof of wire-stability. It is mutation-tested
 (deliberately breaking the core must fail it) and runs in CI
-(`.github/workflows/rust.yml`); line coverage is gated at **100%**.
+(`.github/workflows/rust.yml`); line coverage is gated at a **near-total floor** (≥99.5%).
 
 ## 13. Where the rest of the stack lives
 
@@ -331,7 +331,7 @@ The wire contract for each is in the root doc; here is where each capability is 
   `$/cancelRequest` drops a subscription.
 - **Raw-fd transfer / SCM_RIGHTS** — a `Dispatched::Transfer` directive + the
   `$/transferReady`/`$/transferGo` handshake here (root §6); the fd hand-off in `truenas-rpc-server`.
-- **Audit queue** (off-path audit drain) — `truenas-audit`.
+- **Audit queue** (off-path audit drain) — `truenas-rpc-utils-unsafe` (its `audit` module).
 - **Transports** — `truenas-rpc-server` / `truenas-rpc-client` (AF_UNIX, TCP, kTLS, WebSocket)
   satisfy §10.
 - **Codegen** — `truenas-rpc-codegen` emits typed server + client bindings (source **text**, not a

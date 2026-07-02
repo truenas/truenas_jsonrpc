@@ -186,7 +186,9 @@ fn audit_config() {
     let default_on = r##"{"name":"svc","version":"1","$defs":{"A":{"type":"object","properties":{},"required":[]}},"methods":{"m":{"handler":"m","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"}}}}"##;
     let s = generate_server(&Spec::parse(default_on, "spec").unwrap()).unwrap();
     assert!(s.contains("pub fn make_audit_sink"));
-    assert!(s.contains(r#"truenas_audit::LinuxAuditSink::<S>::builder("svc").identity"#));
+    assert!(s.contains(
+        r#"truenas_rpc_utils_unsafe::audit::LinuxAuditSink::<S>::builder("svc").identity"#
+    ));
     assert!(s.contains(".audit_sink(make_audit_sink::<S, _>("));
 
     // Configured service + queue bound are baked into `make_audit_sink`.
@@ -194,13 +196,13 @@ fn audit_config() {
     let s = generate_server(&Spec::parse(configured, "spec").unwrap()).unwrap();
     assert!(s.contains(r#"builder("truenas-api").queue_bound(256usize).identity"#));
 
-    // Disabled → no audit wiring at all (so a consumer needs no `truenas-audit` dependency).
+    // Disabled → no audit wiring at all (so a consumer needs no `truenas-rpc-utils-unsafe` dependency).
     let disabled =
         r##"{"name":"svc","version":"1","audit":{"enabled":false},"$defs":{},"methods":{}}"##;
     let s = generate_server(&Spec::parse(disabled, "spec").unwrap()).unwrap();
     assert!(
         !s.contains("make_audit_sink")
-            && !s.contains("truenas_audit")
+            && !s.contains("truenas_rpc_utils_unsafe")
             && !s.contains(".audit_sink(")
     );
 

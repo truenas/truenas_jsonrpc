@@ -62,9 +62,10 @@ record to the kernel audit subsystem (auditd → `/var/log/audit/audit.log`, que
 - **On by default** — omit the `audit` block entirely ⇒ enabled, with `service` defaulting to the
   spec `name`. A given `service` must be non-empty and a given `queueBound` must be `> 0`.
 - **Off** — `"audit": { "enabled": false }` ⇒ no sink is wired and the generated code has **no
-  `truenas-audit` dependency** (nothing references it).
-- **Dependency** — when enabled, the server-gen crate must depend on `truenas-audit` (the generated
-  `register` / `make_audit_sink` reference it). See the `Cargo.toml` below.
+  `truenas-rpc-utils-unsafe` dependency** (nothing references it).
+- **Dependency** — when enabled, the server-gen crate must depend on `truenas-rpc-utils-unsafe` with
+  its `audit` feature (the generated `register` / `make_audit_sink` reference its `audit` module). See
+  the `Cargo.toml` below.
 - **Identity attribution** — `register` installs the sink with an *empty* principal (records carry
   no `acct=` / uid / origin). To attribute records, pass an extractor that reads your session state
   to the generated `make_audit_sink` and re-install it (last call wins, and it reuses the spec's
@@ -104,7 +105,7 @@ my-truenas-service/
 ```toml
 [dependencies]
 truenas-rpc = "..."        # the dispatch core (and serde, for the derives)
-truenas-audit = "..."          # audit backend — needed unless the spec sets audit.enabled=false
+truenas-rpc-utils-unsafe = { version = "...", features = ["audit"] }   # audit backend — unless audit.enabled=false
 serde = { version = "1", features = ["derive"] }
 
 [build-dependencies]

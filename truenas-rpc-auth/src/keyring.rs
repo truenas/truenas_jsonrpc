@@ -16,7 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use openssl::base64::decode_block;
 use serde_json::{json, Value};
-use truenas_keyring::{KeyRing, ScramRecord};
+use truenas_rpc_utils_unsafe::keyring::{KeyRing, ScramRecord};
 
 use crate::scram::{CredentialSource, ScramCredentials};
 
@@ -28,17 +28,17 @@ fn default_identity(record: &ScramRecord) -> Value {
 /// A [`CredentialSource`] that reads SCRAM verifiers from a kernel-keyring sub-keyring.
 ///
 /// Construct over the ring holding the verifiers — typically
-/// [`KeyringStore::server_keys`](truenas_keyring::KeyringStore::server_keys):
+/// [`KeyringStore::server_keys`](truenas_rpc_utils_unsafe::keyring::KeyringStore::server_keys):
 ///
 /// ```no_run
 /// use truenas_rpc_auth::{AuthStack, KeyringCredentials};
-/// use truenas_keyring::{KeyringConfig, KeyringStore};
+/// use truenas_rpc_utils_unsafe::keyring::{KeyringConfig, KeyringStore};
 ///
 /// let store = KeyringStore::open(&KeyringConfig::from_json(
 ///     r#"{ "keyring_type": "persistent", "keyring_identifier": 0 }"#,
 /// )?)?;
 /// let stack = AuthStack::builder().scram(KeyringCredentials::new(store.server_keys())).build();
-/// # Ok::<(), truenas_keyring::Error>(())
+/// # Ok::<(), truenas_rpc_utils_unsafe::keyring::Error>(())
 /// ```
 pub struct KeyringCredentials<F = fn(&ScramRecord) -> Value> {
     ring: KeyRing,

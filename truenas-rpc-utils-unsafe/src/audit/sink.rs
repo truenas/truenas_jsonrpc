@@ -24,8 +24,8 @@ use std::thread;
 
 use truenas_rpc::{AuditOutcome, AuditSink, RequestInfo, Session};
 
-use crate::netlink::{AuditSocket, SendStatus};
-use crate::record::{build_record, lost_record, AuditPrincipal};
+use super::netlink::{AuditSocket, SendStatus};
+use super::record::{build_record, lost_record, AuditPrincipal};
 
 type Extractor<S> = Box<dyn Fn(&Session<S>) -> AuditPrincipal + Send + Sync>;
 

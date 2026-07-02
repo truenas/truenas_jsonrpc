@@ -117,14 +117,14 @@ pub struct BearerTokenRecord {
 /// never stored, only its hash is a key name.
 #[cfg(feature = "keyring")]
 pub struct KeyringBearerTokens {
-    ring: truenas_keyring::KeyRing,
+    ring: truenas_rpc_utils_unsafe::keyring::KeyRing,
 }
 
 #[cfg(feature = "keyring")]
 impl KeyringBearerTokens {
     /// Validate/consume tokens against `ring` — the sub-keyring the edge inserts [`BearerTokenRecord`]s
-    /// into (e.g. a config-extra ring from [`KeyringStore`](truenas_keyring::KeyringStore)).
-    pub fn new(ring: truenas_keyring::KeyRing) -> Self {
+    /// into (e.g. a config-extra ring from [`KeyringStore`](truenas_rpc_utils_unsafe::keyring::KeyringStore)).
+    pub fn new(ring: truenas_rpc_utils_unsafe::keyring::KeyRing) -> Self {
         Self { ring }
     }
 }

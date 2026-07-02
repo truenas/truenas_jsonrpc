@@ -16,7 +16,7 @@
 //! scope by design).
 //!
 //! ```no_run
-//! use truenas_keyring::{KeyringStore, KeyringConfig, ScramRecord};
+//! use truenas_rpc_utils_unsafe::keyring::{KeyringStore, KeyringConfig, ScramRecord};
 //!
 //! let config = KeyringConfig::from_json(r#"{ "keyring_type": "persistent", "keyring_identifier": 0 }"#)?;
 //! let store = KeyringStore::open(&config)?;
@@ -27,18 +27,18 @@
 //! };
 //! store.server_keys().put_record("alice", &record, None)?;
 //! let got: Option<ScramRecord> = store.server_keys().get_record("alice")?;
-//! # Ok::<(), truenas_keyring::Error>(())
+//! # Ok::<(), truenas_rpc_utils_unsafe::keyring::Error>(())
 //! ```
 
 mod config;
 mod error;
 mod key;
-mod keyring;
 mod record;
+mod store;
 mod sys;
 
 pub use config::{KeyringConfig, KeyringType};
 pub use error::Error;
 pub use key::{Description, Found, Key, KeyRing, KeyType, SpecialKeyring};
-pub use keyring::{KeyringStore, CLIENT_KEYS, SERVER_KEYS, SERVER_ROLES};
 pub use record::{RoleRecord, ScramRecord};
+pub use store::{KeyringStore, CLIENT_KEYS, SERVER_KEYS, SERVER_ROLES};

@@ -15,7 +15,7 @@ use std::sync::Mutex;
 
 use openssl::base64::{decode_block, encode_block};
 use serde_json::{json, Value};
-use truenas_gssapi::ServerCtx;
+use truenas_rpc_utils_unsafe::gssapi::ServerCtx;
 
 use crate::channel::{Capability, Channel};
 use crate::mechanism::Mechanism;

@@ -34,5 +34,5 @@ nonzero opaque padding and embedded NULs (the ZFS rules).
 ## Dependencies
 
 `serde` (`default-features = false`, `+std`), `thiserror`, and (with `derive`)
-`truenas-xdr-derive`. No `serde_json` at runtime. `#![forbid(unsafe_code)]`; 100% line-coverage
+`truenas-xdr-derive`. No `serde_json` at runtime. `#![forbid(unsafe_code)]`; near-total line-coverage
 gated (the derive crate is excluded — its output is covered behaviorally here).

@@ -45,19 +45,19 @@ where
     let builder = builder.fd_transfer_method(truenas_rpc::RpcFdTransferMethod::<XferArgs, DownloadReady, DownloadDone, _, _>::new(truenas_rpc::MethodDef::new("x.download").doc("Raw-fd download (server produces the stream) with a typed $/transferReady interim.").reply_capacity(102), truenas_rpc::TransferDirection::Download, { let h = h.clone(); move |request: &XferArgs, cx: &truenas_rpc::RequestCtx<S>| h.download_ready(request, cx) }, move |request: XferArgs, ft: &dyn truenas_rpc::FileTransfer| h.download(request, ft)))?;
     let h = handlers.clone();
     let builder = builder.fd_transfer_method(truenas_rpc::RpcFdTransferMethod::<XferArgs, serde_json::Value, UploadDone, _, _>::new(truenas_rpc::MethodDef::new("x.upload").doc("Raw-fd upload (client produces the stream) with a free-form $/transferReady interim.").reply_capacity(106), truenas_rpc::TransferDirection::Upload, { let h = h.clone(); move |request: &XferArgs, cx: &truenas_rpc::RequestCtx<S>| h.upload_ready(request, cx) }, move |request: XferArgs, ft: &dyn truenas_rpc::FileTransfer| h.upload(request, ft)))?;
-    let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_rpc::Session<S>| truenas_audit::AuditPrincipal::default()));
+    let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_rpc::Session<S>| truenas_rpc_utils_unsafe::audit::AuditPrincipal::default()));
     Ok(builder)
 }
 
 /// Build the spec-configured Linux kernel-audit sink with your identity extractor.
 /// `register` installs one with an empty extractor by default; pass an extractor that reads your
 /// session state and re-install via `.audit_sink(..)` to attribute records (`acct=`, uid, origin).
-pub fn make_audit_sink<S, F>(identity: F) -> truenas_audit::LinuxAuditSink<S>
+pub fn make_audit_sink<S, F>(identity: F) -> truenas_rpc_utils_unsafe::audit::LinuxAuditSink<S>
 where
     S: Send + Sync + 'static,
-    F: Fn(&truenas_rpc::Session<S>) -> truenas_audit::AuditPrincipal + Send + Sync + 'static,
+    F: Fn(&truenas_rpc::Session<S>) -> truenas_rpc_utils_unsafe::audit::AuditPrincipal + Send + Sync + 'static,
 {
-    truenas_audit::LinuxAuditSink::<S>::builder("sample").identity(identity).build()
+    truenas_rpc_utils_unsafe::audit::LinuxAuditSink::<S>::builder("sample").identity(identity).build()
 }
 
 /// The wire protocols this service is served over (from the json-idl `protocols`).

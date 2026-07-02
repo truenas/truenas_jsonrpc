@@ -26,7 +26,7 @@ cargo test -p demo-consumer
 
 ## Dependencies
 
-`truenas-rpc` (runtime) and `truenas-audit` (the audit backend — `demo.json` has no `audit` block,
+`truenas-rpc` (runtime) and `truenas-rpc-utils-unsafe` with the `audit` feature (the audit backend — `demo.json` has no `audit` block,
 so auditing is **on by default** and the generated `register` wires a kernel-audit sink), plus
 `truenas-rpc-codegen` (build-dependency) and `serde` / `serde_json`. The end-to-end test additionally
 dev-depends on `truenas-rpc-server` + `truenas-rpc-client` (a live server + the generated client). No

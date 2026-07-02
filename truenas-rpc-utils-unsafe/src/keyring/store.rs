@@ -4,9 +4,9 @@
 
 use std::collections::HashMap;
 
-use crate::config::{KeyringConfig, KeyringType};
-use crate::error::Error;
-use crate::key::{Found, KeyRing, KeyType, SpecialKeyring};
+use super::config::{KeyringConfig, KeyringType};
+use super::error::Error;
+use super::key::{Found, KeyRing, KeyType, SpecialKeyring};
 
 /// The always-present sub-keyring for **inbound** SCRAM verifiers (authenticating clients to us).
 pub const SERVER_KEYS: &str = "server_keys";

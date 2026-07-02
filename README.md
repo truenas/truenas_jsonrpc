@@ -63,7 +63,7 @@ fn main() {
 truenas-rpc        = { path = "…" }   # dispatch core: JsonRpcProtocol, RequestCtx, JsonRpcError
 truenas-rpc-server = { path = "…" }   # serve the protocol over a socket
 truenas-rpc-client = { path = "…" }   # the generated client (drop if callers live in another crate)
-truenas-audit      = { path = "…" }   # audit sink — auditing is on by default
+truenas-rpc-utils-unsafe = { path = "…", features = ["audit"] }   # audit sink — auditing is on by default
 serde      = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio      = { version = "1", features = ["full"] }
@@ -337,9 +337,9 @@ plus a **server** or **client** crate, and a build-dependency on the codegen. Th
 
 The remaining crates are **internal** — `truenas-filter` (the query engine, re-exported through
 `truenas-rpc`), `truenas-xdr` + `truenas-xdr-derive` (the XDR codec + its `derive` proc-macro), and
-the syscall/FFI backends (`truenas-keyring`, `truenas-audit`, `truenas-gssapi`). You don't name them
-directly; each is self-contained (a small dependency set) and documented in
-[CRATES.md](CRATES.md#crate-details).
+and the opt-in unsafe/FFI utilities (`truenas-rpc-utils-unsafe` — the kernel keyring, kernel audit,
+and GSSAPI backends as feature-gated modules). You don't name most of these directly; each is
+self-contained and documented in [CRATES.md](CRATES.md#crate-details).
 
 ## Dependency graph
 
@@ -395,7 +395,8 @@ a filterable handler needs only the core crate. The graph above is the primary-c
 **Differential conformance** is the gating proof: the conformance tests replay a committed, frozen
 golden corpus (`truenas-rpc/tests/conformance/golden.json` and
 `truenas-filter/tests/conformance/golden.json`) and assert **byte-identical** results across the
-dispatch core and the filter engine. Line coverage is gated at 100% (`./coverage.sh`).
+dispatch core and the filter engine. Line coverage is gated at a near-total floor (`./coverage.sh`,
+≥99.5% — the small remainder is error/panic branches rustfmt isolates onto their own lines).
 
 ## Filter-engine deviations
 
@@ -425,7 +426,7 @@ multi-key, stable), `get`, `count`, `offset`, `limit`, and the middleware compar
 
 ## Development
 
-The workspace is **layered** for testing: a pure-core group held to a **100% line-coverage gate**, and
+The workspace is **layered** for testing: a pure-core group held to a **near-total line-coverage floor**, and
 the socket / FFI / PyO3 crates (excluded from that gate *and* from `default-members`) covered
 behaviorally and tested per-crate. Reproduce CI locally as follows.
 
@@ -435,10 +436,10 @@ behaviorally and tested per-crate. Reproduce CI locally as follows.
 cargo fmt --all --check
 cargo clippy --all-features --all-targets -- -D warnings   # unsafe is forbidden; missing docs warn
 cargo test --all-features                                  # spine + pub/sub + filterable + both A/B goldens
-./coverage.sh 100                                          # native source-based coverage, gated at 100%
+./coverage.sh                                              # native source-based line coverage (≥99.5% floor)
 ```
 
-**Client floor** — the async client engine (socket I/O; behavioral, so a floor not the 100% gate):
+**Client floor** — the async client engine (socket I/O; a separate behavioral floor):
 
 ```sh
 ./coverage-client.sh 85
@@ -478,7 +479,7 @@ truenas_rpc_codegen::Build::new().json_idl("../json-idl").emit_server().unwrap()
 ```
 
 The generated server **audits on by default** — every `audit: true` method (and the `$/` control
-ops) emits to the Linux kernel audit subsystem via `truenas-audit`; a top-level `audit` block in
+ops) emits to the Linux kernel audit subsystem via `truenas-rpc-utils-unsafe`'s `audit` module; a top-level `audit` block in
 the spec configures the service / queue bound or turns it off (`audit.enabled = false`).
 
 See `truenas-rpc-codegen/README.md` for the dialect, the consumer crate layout (`json-idl/` +

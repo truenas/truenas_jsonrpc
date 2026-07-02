@@ -214,7 +214,7 @@ fn emit_register(spec: &Spec) -> Result<String> {
     // `make_audit_sink`). Emitted only when auditing is enabled (so a disabled spec needs no
     // `truenas-audit` dependency).
     let audit_install = if spec.resolved_audit().is_some() {
-        "    let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_rpc::Session<S>| truenas_audit::AuditPrincipal::default()));\n"
+        "    let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_rpc::Session<S>| truenas_rpc_utils_unsafe::audit::AuditPrincipal::default()));\n"
     } else {
         ""
     };
@@ -234,7 +234,7 @@ fn emit_audit(spec: &Spec) -> String {
         None => String::new(),
     };
     format!(
-        "\n/// Build the spec-configured Linux kernel-audit sink with your identity extractor.\n/// `register` installs one with an empty extractor by default; pass an extractor that reads your\n/// session state and re-install via `.audit_sink(..)` to attribute records (`acct=`, uid, origin).\npub fn make_audit_sink<S, F>(identity: F) -> truenas_audit::LinuxAuditSink<S>\nwhere\n    S: Send + Sync + 'static,\n    F: Fn(&truenas_rpc::Session<S>) -> truenas_audit::AuditPrincipal + Send + Sync + 'static,\n{{\n    truenas_audit::LinuxAuditSink::<S>::builder({service}){queue}.identity(identity).build()\n}}\n",
+        "\n/// Build the spec-configured Linux kernel-audit sink with your identity extractor.\n/// `register` installs one with an empty extractor by default; pass an extractor that reads your\n/// session state and re-install via `.audit_sink(..)` to attribute records (`acct=`, uid, origin).\npub fn make_audit_sink<S, F>(identity: F) -> truenas_rpc_utils_unsafe::audit::LinuxAuditSink<S>\nwhere\n    S: Send + Sync + 'static,\n    F: Fn(&truenas_rpc::Session<S>) -> truenas_rpc_utils_unsafe::audit::AuditPrincipal + Send + Sync + 'static,\n{{\n    truenas_rpc_utils_unsafe::audit::LinuxAuditSink::<S>::builder({service}){queue}.identity(identity).build()\n}}\n",
         service = str_lit(&audit.service),
     )
 }

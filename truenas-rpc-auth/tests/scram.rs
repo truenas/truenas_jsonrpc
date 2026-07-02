@@ -299,8 +299,11 @@ async fn scram_without_a_channel_binding_is_denied() {
 
 /// `alice`'s verifier as a base64-encoded keyring record with the given `expiry`.
 #[cfg(feature = "keyring")]
-fn alice_record(creds: &ScramCredentials, expiry: i64) -> truenas_keyring::ScramRecord {
-    truenas_keyring::ScramRecord {
+fn alice_record(
+    creds: &ScramCredentials,
+    expiry: i64,
+) -> truenas_rpc_utils_unsafe::keyring::ScramRecord {
+    truenas_rpc_utils_unsafe::keyring::ScramRecord {
         username: "alice".into(),
         algorithm: "SHA512".into(),
         iterations: creds.iterations,
@@ -314,8 +317,8 @@ fn alice_record(creds: &ScramCredentials, expiry: i64) -> truenas_keyring::Scram
 #[cfg(feature = "keyring")]
 #[tokio::test]
 async fn scram_authenticates_through_a_keyring_record_and_honours_revocation() {
-    use truenas_keyring::{KeyringConfig, KeyringStore};
     use truenas_rpc_auth::KeyringCredentials;
+    use truenas_rpc_utils_unsafe::keyring::{KeyringConfig, KeyringStore};
 
     // A **session** keyring (not a thread keyring): the setup handler runs on a `spawn_blocking`
     // worker, so the ring must be possessed from any thread of the process. The session keyring is.

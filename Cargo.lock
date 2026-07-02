@@ -112,11 +112,11 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "truenas-audit",
  "truenas-rpc",
  "truenas-rpc-client",
  "truenas-rpc-codegen",
  "truenas-rpc-server",
+ "truenas-rpc-utils-unsafe",
  "truenas-xdr",
 ]
 
@@ -805,39 +805,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "truenas-audit"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde_json",
- "thiserror 2.0.18",
- "truenas-rpc",
- "uuid",
-]
-
-[[package]]
 name = "truenas-filter"
 version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "truenas-gssapi"
-version = "0.1.0"
-dependencies = [
- "pkg-config",
-]
-
-[[package]]
-name = "truenas-keyring"
-version = "0.1.0"
-dependencies = [
- "libc",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -863,10 +835,9 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
- "truenas-gssapi",
- "truenas-keyring",
  "truenas-rpc",
  "truenas-rpc-server",
+ "truenas-rpc-utils-unsafe",
 ]
 
 [[package]]
@@ -946,6 +917,19 @@ dependencies = [
  "tokio-tungstenite",
  "truenas-rpc",
  "truenas-xdr",
+]
+
+[[package]]
+name = "truenas-rpc-utils-unsafe"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "pkg-config",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "truenas-rpc",
+ "uuid",
 ]
 
 [[package]]

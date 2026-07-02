@@ -9,7 +9,7 @@ the wire specifics, and optional **capability traits** each unlock one method. T
 
 It does socket I/O (and kTLS / `SCM_RIGHTS` behind features), so — like `truenas-rpc-server` — it is
 excluded from the workspace default members and held to a behavioral coverage **floor** (the
-workspace's `coverage-client.sh`), not the 100% line gate.
+workspace's `coverage-client.sh`), not the core `coverage.sh` line floor.
 
 ## Transports
 

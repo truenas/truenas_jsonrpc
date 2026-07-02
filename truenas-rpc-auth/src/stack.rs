@@ -336,17 +336,22 @@ impl AuthStackBuilder {
     }
 
     /// Read a `(uid, mechanism)`'s roles from a keyring
-    /// [`server_roles`](truenas_keyring::SERVER_ROLES) ring — the built-in
+    /// [`server_roles`](truenas_rpc_utils_unsafe::keyring::SERVER_ROLES) ring — the built-in
     /// [`role_source`](Self::role_source). Records are keyed `"<uid>_<mechanism>"` (e.g.
     /// `"0_UNIX_SOCKET"`, `"1000_SCRAM"`); a pair with no record (or an unreadable one) grants no
     /// roles.
     #[cfg(feature = "keyring")]
     #[must_use]
-    pub fn roles_from_keyring(self, store: Arc<truenas_keyring::KeyringStore>) -> Self {
+    pub fn roles_from_keyring(
+        self,
+        store: Arc<truenas_rpc_utils_unsafe::keyring::KeyringStore>,
+    ) -> Self {
         self.role_source(move |uid, mechanism| {
             store
                 .server_roles()
-                .get_record::<truenas_keyring::RoleRecord>(&format!("{uid}_{mechanism}"))
+                .get_record::<truenas_rpc_utils_unsafe::keyring::RoleRecord>(&format!(
+                    "{uid}_{mechanism}"
+                ))
                 .ok()
                 .flatten()
                 .map(|r| r.roles)

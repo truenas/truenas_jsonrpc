@@ -20,7 +20,7 @@
 //! matching the `truenas-keyring` policy.
 //!
 //! ```no_run
-//! use truenas_audit::{AuditPrincipal, LinuxAuditSink};
+//! use truenas_rpc_utils_unsafe::audit::{AuditPrincipal, LinuxAuditSink};
 //! use truenas_rpc::Session;
 //!
 //! // `S` is your per-session state; read the identity out of it for the record.

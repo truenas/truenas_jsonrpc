@@ -1,7 +1,8 @@
 //! Config validation (pure) + best-effort keyring exercises (skipped if the environment blocks the
 //! keyring syscalls): the high-level record round-trip and the low-level `Key`/`KeyRing` primitives.
+#![cfg(feature = "keyring")]
 
-use truenas_keyring::{
+use truenas_rpc_utils_unsafe::keyring::{
     Found, KeyRing, KeyType, KeyringConfig, KeyringStore, RoleRecord, ScramRecord, SpecialKeyring,
 };
 

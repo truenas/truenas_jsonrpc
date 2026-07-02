@@ -2,8 +2,8 @@
 # Line coverage for `truenas-rpc-client/src` — the async client engine + transports + auth.
 #
 # The client is a behavioral, socket-I/O crate (kTLS, SCM_RIGHTS, WebSocket), so it is excluded from
-# the workspace `coverage.sh` 100% gate — but it is still held to a floor here so its coverage does
-# not silently regress. The remaining gap to 100% is hard-to-inject I/O error branches and the
+# the workspace `coverage.sh` line floor — but it is still held to a floor here so its coverage does
+# not silently regress. The remaining gap is hard-to-inject I/O error branches and the
 # WebSocket adapter's `poll` edge cases; the floor guards the behavioral surface we *can* cover.
 #
 #   ./coverage-client.sh [min_pct]   # default 85; exits non-zero if src/ line coverage < min

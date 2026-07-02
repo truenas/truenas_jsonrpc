@@ -28,35 +28,30 @@ serde_json = { workspace = true }
 # so verifiers/encodings are byte-identical), OAuth (offline JWT signature verification — no `ring`),
 # and GSSAPI (token base64). Off by default; peercred/mTLS pull no openssl.
 openssl = { version = "0.10", optional = true }
-# The keyring-backed `CredentialSource` (the `keyring` feature): looks SCRAM verifiers up in the
-# kernel keyring written by `truenas-keyring` or the `truenas_keyring` extension. Optional — an embedder
-# may supply its own `CredentialSource` (in-memory, an RPC to middleware, …) instead. The same
-# crate also backs the `server_roles` (uid → roles) lookup for authorization.
-truenas-keyring = { path = "../truenas-keyring", optional = true }
+# The kernel-keyring (`keyring` feature) and native GSSAPI (`gssapi` feature) backends both live in
+# `truenas-rpc-utils-unsafe` — the workspace's opt-in unsafe/FFI crate — each behind its own
+# sub-feature. The keyring looks SCRAM verifiers up in the kernel keyring (written by this crate or
+# the `truenas_keyring` extension) and backs the `server_roles` (uid → roles) lookup; an embedder may
+# supply its own `CredentialSource` instead. GSSAPI is a native multi-round MIT krb5 acceptor.
+truenas-rpc-utils-unsafe = { path = "../truenas-rpc-utils-unsafe", optional = true, default-features = false }
 # The passwd lookup (the `nss` feature): resolve a SCRAM username → uid so authorization can key off
 # the uid, via `nix::unistd::User::from_name` (getpwnam_r) — no bespoke NSS FFI. Optional — an
 # embedder may supply its own username→uid resolver instead. Already in the lock (nix backs the
 # server's SCM_RIGHTS).
 nix = { version = "0.29", features = ["user"], optional = true }
-# Native GSSAPI/Kerberos acceptor (the `gssapi` feature): our own minimal FFI to the system MIT krb5
-# GSSAPI (no `libgssapi`/`bindgen`/`clang-sys`). The half-built `ServerCtx` is `Send` not `Sync`, so
-# `gssapi.rs` rides it across rounds inside a `Mutex` — no `unsafe` in this crate. Token base64 reuses
-# `openssl::base64` (GSSAPI tokens are standard padded base64), so the `gssapi` feature pulls openssl.
-truenas-gssapi = { path = "../truenas-gssapi", optional = true }
-
 [features]
 # SCRAM-SHA-512(-PLUS) challenge-response. Off by default.
 scram = ["dep:openssl"]
 # A kernel-keyring-backed `CredentialSource` for SCRAM (implies `scram`).
-keyring = ["scram", "dep:truenas-keyring"]
+keyring = ["scram", "truenas-rpc-utils-unsafe/keyring"]
 # A built-in passwd-backed username→uid resolver (`getpwnam` via nix) for keying authorization off the uid.
 nss = ["dep:nix"]
 # OIDC/OAuth ID-token verification: offline JWT signature + claim validation (over OpenSSL) against
 # IdP JWKS keys the embedder supplies (no HTTP client here). Off by default.
 oauth = ["dep:openssl"]
-# Native GSSAPI/Kerberos: in-process multi-round acceptor over our `truenas-gssapi` FFI (links the
-# system MIT krb5). Pulls openssl for the token base64. Off by default.
-gssapi = ["dep:truenas-gssapi", "dep:openssl"]
+# Native GSSAPI/Kerberos: in-process multi-round acceptor over `truenas-rpc-utils-unsafe`'s `gssapi`
+# module (links the system MIT krb5). Pulls openssl for the token base64. Off by default.
+gssapi = ["truenas-rpc-utils-unsafe/gssapi", "dep:openssl"]
 # Passthrough auth: hand the client fd to a local AF_UNIX broker (+ the broker-server mode). Pulls
 # the server crate's SCM_RIGHTS primitives (no new external dep). Off by default.
 passthrough = ["truenas-rpc-server/passthrough"]

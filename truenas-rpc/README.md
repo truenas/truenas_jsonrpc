@@ -55,7 +55,7 @@ handlers.
 ## Notes
 
 - `#![forbid(unsafe_code)]`.
-- Gated at 100% line coverage (`../coverage.sh`).
+- Gated at a near-total line-coverage floor (`../coverage.sh`, ≥99.5%).
 - Differential conformance against a committed frozen golden corpus (`tests/conformance.rs` +
   golden vectors).
 - Deliberate parity gaps live in `truenas-filter` (no `select`, no `~` regex).

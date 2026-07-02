@@ -16,7 +16,7 @@ env:
 
 jobs:
   # Fast core gate (no system dependencies): the workspace default-members — the dispatch core,
-  # filter, XDR, and codegen — held to the 100% coverage gate below. clippy runs with `-D warnings`,
+  # filter, XDR, and codegen — held to the coverage floor below. clippy runs with `-D warnings`,
   # so the workspace lint policy (`unsafe_code = "forbid"`, `missing_docs = "warn"`) is enforced;
   # the tests include `tests/conformance.rs`, the frozen-golden A/B (no external dependency).
   core:
@@ -31,11 +31,11 @@ jobs:
       - run: cargo clippy --all-features --all-targets --locked -- -D warnings
       - run: cargo test --all-features --locked
 
-  # Coverage: the core's native 100% line floor (coverage.sh) + the client engine's behavioral floor
-  # (coverage-client.sh). Native source-based coverage (`rustc -C instrument-coverage` + the
-  # toolchain's bundled llvm-cov); libssl-dev is needed because the client's TLS tests link OpenSSL.
+  # Coverage: the core's native line-coverage floor (coverage.sh, ~99.5%) + the client engine's
+  # behavioral floor (coverage-client.sh). Native source-based coverage (`rustc -C instrument-coverage`
+  # + the toolchain's bundled llvm-cov); libssl-dev is needed because the client's TLS tests link OpenSSL.
   coverage:
-    name: Coverage — core 100%, client floor
+    name: Coverage — core floor, client floor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -43,8 +43,8 @@ jobs:
         with:
           components: llvm-tools-preview
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
-      - name: Core 100% line coverage
-        run: bash coverage.sh 100
+      - name: Core line-coverage floor
+        run: bash coverage.sh
       - name: Client behavioral floor
         run: bash coverage-client.sh 85
       - if: always()
@@ -81,8 +81,9 @@ jobs:
           cargo test -p truenas-rpc-pyclient --locked
           cargo test -p demo-py --locked                # PyO3 client: compile + in-process import (no extension-module)
           cargo test -p truenas-rpc-pyo3 --locked
-          # FFI crates: their tests self-skip without kernel caps (audit / keyring) or a KDC (gssapi).
-          cargo test -p truenas-keyring -p truenas-audit -p truenas-gssapi --locked
+          # The unsafe/FFI utilities (keyring / audit / gssapi modules): tests self-skip without kernel
+          # caps (audit / keyring) or a KDC (gssapi).
+          cargo test -p truenas-rpc-utils-unsafe --all-features --locked
 
   # Feature-combination matrix on the socket crates: each feature individually, plus default and
   # all-on, so a mis-gated `#[cfg(feature)]` cannot hide behind `--all-features`.

@@ -11,9 +11,10 @@ rust-version.workspace = true
 
 [dependencies]
 truenas-rpc = { path = "../../truenas-rpc" }
-# Audit is on by default in generated servers (demo.json has no `audit` block), so the
-# generated `register`/`make_audit_sink` reference the kernel-audit backend.
-truenas-audit = { path = "../../truenas-audit" }
+# Audit is on by default in generated servers (demo.json has no `audit` block), so the generated
+# `register`/`make_audit_sink` reference the kernel-audit backend (the `audit` module of the
+# workspace's opt-in unsafe/FFI crate).
+truenas-rpc-utils-unsafe = { path = "../../truenas-rpc-utils-unsafe", default-features = false, features = ["audit"] }
 # The generated client (`client_gen.rs`, included in the lib) targets the client runtime crate.
 truenas-rpc-client = { path = "../../truenas-rpc-client" }
 serde = { workspace = true }

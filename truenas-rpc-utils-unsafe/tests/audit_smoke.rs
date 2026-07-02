@@ -3,15 +3,16 @@
 //! audit socket is unavailable or `CAP_AUDIT_WRITE` is missing, the drain thread no-ops the send
 //! (records are still consumed, never dropped at this volume) — so the test passes everywhere; an
 //! actual on-disk record (verified with `ausearch -m TRUSTED_APP`) needs the cap + a live auditd.
+#![cfg(feature = "audit")]
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::json;
-use truenas_audit::{AuditPrincipal, LinuxAuditSink};
 use truenas_rpc::{
     AuditOutcome, AuditSink, JsonRpcError, JsonRpcProtocol, NullOutbound, RequestInfo, Session,
 };
+use truenas_rpc_utils_unsafe::audit::{AuditPrincipal, LinuxAuditSink};
 
 #[test]
 fn audit_drives_through_the_sink_without_panicking() {

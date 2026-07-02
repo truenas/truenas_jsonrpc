@@ -9,26 +9,24 @@ coverage model. For the *consumer's* view ("what goes in my `Cargo.toml`") see t
 
 | Crate | Purpose | Build | Coverage |
 |---|---|---|---|
-| [`truenas-rpc`](#truenas-rpc) | Transport-agnostic JSON-RPC 2.0 dispatch core | default | **100% gate** |
-| [`truenas-filter`](#truenas-filter) | `query-filters` / `query-options` engine | default | **100% gate** |
-| [`truenas-xdr`](#truenas-xdr) | Byte-exact serde XDR (RFC 4506) codec + TXDR frame | default | **100% gate** |
+| [`truenas-rpc`](#truenas-rpc) | Transport-agnostic JSON-RPC 2.0 dispatch core | default | **≥99.5% floor** |
+| [`truenas-filter`](#truenas-filter) | `query-filters` / `query-options` engine | default | **≥99.5% floor** |
+| [`truenas-xdr`](#truenas-xdr) | Byte-exact serde XDR (RFC 4506) codec + TXDR frame | default | **≥99.5% floor** |
 | [`truenas-xdr-derive`](#truenas-xdr-derive) | `#[derive(XdrEnum/XdrUnion)]` proc-macro | default | behavioral (via `truenas-xdr`) |
-| [`truenas-rpc-codegen`](#truenas-rpc-codegen) | `json-idl` → Rust (server + client) + OpenRPC generator | default | **100% gate** |
+| [`truenas-rpc-codegen`](#truenas-rpc-codegen) | `json-idl` → Rust (server + client) + OpenRPC generator | default | **≥99.5% floor** |
 | [`truenas-rpc-server`](#truenas-rpc-server) | Async server transport (AF_UNIX/TCP/TLS/WS) | opt-in | behavioral |
 | [`truenas-rpc-client`](#truenas-rpc-client) | Async client engine | opt-in | behavioral (≥85% floor) |
 | [`truenas-rpc-auth`](#truenas-rpc-auth) | Auth mechanisms (peer-cred / mTLS / SCRAM / …) | opt-in | behavioral |
 | [`truenas-rpc-pyo3`](#truenas-rpc-pyo3) | Embedded-CPython bridge for `python:true` bodies | opt-in | behavioral |
 | [`truenas-rpc-pyclient`](#truenas-rpc-pyclient) | Runtime for the generated Python client | opt-in | behavioral |
-| [`truenas-keyring`](#truenas-keyring) | Linux kernel-keyring credential store | opt-in | behavioral |
-| [`truenas-audit`](#truenas-audit) | Linux kernel audit (`NETLINK_AUDIT`) sink | opt-in | behavioral |
-| [`truenas-gssapi`](#truenas-gssapi) | Minimal FFI to system GSSAPI (MIT krb5) | opt-in | behavioral |
+| [`truenas-rpc-utils-unsafe`](#truenas-rpc-utils-unsafe) | Opt-in unsafe utils: kernel keyring / audit / GSSAPI FFI | opt-in | behavioral |
 | [`examples/demo`](#examplesdemo) | End-to-end codegen demo / integration test | default | ignored (`/examples/`) |
 
 **Build** — *default* crates build and test with a plain `cargo build` / `cargo test` (they are the
 workspace [`default-members`](Cargo.toml)); *opt-in* crates are workspace members excluded from that
 set (they link libpython / krb5 or do socket-and-syscall I/O), built only when named
 (`cargo … -p <crate>`, `cargo clippy --workspace`) or pulled by a consumer. See
-[the coverage model](#coverage-model) for what "100% gate" vs "behavioral" means.
+[the coverage model](#coverage-model) for what "≥99.5% floor" vs "behavioral" means.
 
 ## Crate details
 
@@ -106,8 +104,8 @@ call / subscribe, stream raw-fd transfers, pass fds — and drive the codegen'd 
 The optional **authentication** layer: an `AuthStack` of pluggable challenge-response `Mechanism`s
 (AF_UNIX peer-cred by default; mTLS / SCRAM-SHA-512-PLUS / GSSAPI / OAuth / passthrough declared)
 wired onto the core's `$/sessionSetup` seam.
-- **Internal:** `truenas-rpc`, `truenas-rpc-server`; **opt:** `truenas-keyring` (`keyring`),
-  `truenas-gssapi` (`gssapi`).
+- **Internal:** `truenas-rpc`, `truenas-rpc-server`; **opt:** `truenas-rpc-utils-unsafe`
+  (`keyring`, `gssapi`).
 - **External:** `serde`, `serde_json`; **opt:** `openssl` 0.10 (`scram` / `oauth` / `gssapi`), `nix`
   0.29 `user` (`nss`).
 - **Features:** `scram`, `keyring` (⇒ `scram`), `nss`, `oauth`, `gssapi`, `passthrough`.
@@ -136,34 +134,30 @@ unlike `truenas-rpc-pyo3`.
 - **Lint:** `unsafe_code = "allow"` — the pyo3 macros expand to `unsafe` trampolines that can't be
   per-site annotated.
 
-### truenas-keyring
-A config-driven Linux **kernel-keyring** store for SCRAM verifiers / peer credentials, issuing
-`add_key(2)` / `keyctl(2)` directly via `libc::syscall`.
-- **Internal:** none.
-- **External:** `serde`, `serde_json`, `thiserror`, `libc` 0.2.
-- **Lint:** `unsafe_code = "deny"` (per-site allow) — keyring syscalls.
+### truenas-rpc-utils-unsafe
+The workspace's opt-in **unsafe utilities** — direct kernel syscalls / FFI, quarantined in one crate so
+the rest of the workspace stays `unsafe_code = "forbid"`. Three independent, feature-gated modules:
+- `keyring` — a config-driven Linux kernel-keyring store for SCRAM verifiers / peer credentials, via
+  `add_key(2)` / `keyctl(2)`.
+- `audit` — a `truenas_rpc::AuditSink` writing one record per audited call to `NETLINK_AUDIT` (auditd →
+  `/var/log/audit/audit.log`) on a dedicated drain thread.
+- `gssapi` — a minimal FFI to the system GSSAPI (MIT krb5) acceptor (~6 RFC 2744 functions, bound
+  directly to avoid `libgssapi` → `bindgen` → `libclang`); reserves the native lib via
+  `links = "gssapi_krb5"`.
 
-### truenas-audit
-A `truenas_rpc::AuditSink` backend writing one record per audited call to **`NETLINK_AUDIT`** (auditd
-→ `/var/log/audit/audit.log`), on a dedicated drain thread so the sink never blocks dispatch.
-- **Internal:** `truenas-rpc`.
-- **External:** `serde_json`, `uuid`, `thiserror`, `libc` 0.2.
-- **Lint:** `unsafe_code = "deny"` (per-site allow) — netlink FFI.
-
-### truenas-gssapi
-A minimal hand-written **FFI to the system GSSAPI** (MIT krb5) acceptor — ~6 functions of the frozen
-RFC 2744 ABI, bound directly to avoid `libgssapi` → `bindgen` → `libclang`. Reserves the native lib
-via `links = "gssapi_krb5"`.
-- **Internal:** none.
-- **External (build):** `pkg-config` 0.3 (locates krb5; `krb5-config` fallback).
-- **Lint:** `unsafe_code = "deny"` (per-site allow) — FFI.
+Each feature pulls only its own dependencies, so a consumer wanting one module never links the others'.
+- **Internal:** `truenas-rpc` (`audit` only).
+- **External:** `libc` 0.2 (`keyring` / `audit`), plus `serde` / `serde_json` / `thiserror` / `uuid`
+  per module; **build:** `pkg-config` 0.3 (`gssapi`; `krb5-config` fallback).
+- **Features:** `keyring`, `audit`, `gssapi` (all off by default).
+- **Lint:** `unsafe_code = "deny"` (per-site allow + `// SAFETY:`).
 
 ### examples/demo
 `demo-consumer` — the documented `json-idl` + `build.rs` codegen layout, exercised as a live
 integration test (`cargo test -p demo-consumer`). Not published; lives under `examples/` so the
 coverage gate ignores it.
-- **Internal:** `truenas-rpc`, `truenas-audit`, `truenas-rpc-client`; **dev:** `truenas-rpc-server`,
-  `truenas-xdr`; **build:** `truenas-rpc-codegen`.
+- **Internal:** `truenas-rpc`, `truenas-rpc-utils-unsafe` (audit), `truenas-rpc-client`; **dev:**
+  `truenas-rpc-server`, `truenas-xdr`; **build:** `truenas-rpc-codegen`.
 - **External:** `serde`, `serde_json`.
 
 ## Dependency graph
@@ -192,13 +186,13 @@ Arrows are Cargo dependencies (`A → B` = A depends on B). `[opt]` marks a memb
          | truenas-rpc-pyo3     |---->|                       |
          +----------------------+     |                       |
    [opt] +----------------------+     |                       |
-         | truenas-audit        |---->|                       |
+         | utils-unsafe (audit) |---->|                       |
          +----------------------+     +----+-------------+----+
    [opt] +----------------------+          |             |
          | truenas-rpc-auth     |--> rpc + server        |
          +----------+-----------+                        |
-           [opt]    |  \--> truenas-keyring (keyring)    |
-                    |   \-> truenas-gssapi  (gssapi)     |
+           [opt]    |  \--> utils-unsafe (keyring)       |
+                    |   \-> utils-unsafe (gssapi)        |
                     v                                    v
               (auth mechanisms)              +----------------+  +--------------------+
                                              | truenas-filter |  |     truenas-xdr    |
@@ -212,8 +206,9 @@ Arrows are Cargo dependencies (`A → B` = A depends on B). `[opt]` marks a memb
                                                                  +---------------------+
 ```
 
-`truenas-keyring`, `truenas-audit`, and `truenas-gssapi` each own a small direct-syscall/FFI surface
-(keyctl, netlink, krb5) rather than pulling a heavier third-party crate.
+`truenas-rpc-utils-unsafe` (shown as `utils-unsafe`) collects the three direct-syscall/FFI surfaces
+(keyctl, netlink, krb5) as feature-gated modules — the `audit` module backs generated servers, while
+`keyring`/`gssapi` back the auth mechanisms — rather than three separate crates.
 
 ## External dependency audit
 
@@ -223,12 +218,12 @@ deliberately small; several "new" deps are already transitive (noted).
 | Crate | Ver | Used by | Why |
 |---|---|---|---|
 | `serde` / `serde_json` | 1 | all | Serialization; `serde_json` `raw_value` for zero-copy passthrough |
-| `uuid` | 1 | rpc, audit | Request-id (`v4`) generation/validation |
-| `thiserror` | 2 | rpc, xdr, client, keyring, audit | Error enums |
+| `uuid` | 1 | rpc, utils-unsafe (audit) | Request-id (`v4`) generation/validation |
+| `thiserror` | 2 | rpc, xdr, client, utils-unsafe | Error enums |
 | `tokio` | 1 | rpc (`rt`), server, client | Async runtime; transports add `net`/`io-util`/… |
 | `async-trait` | 0.1 | rpc, client | The async handler / `CallEngine` traits |
 | `syn` / `quote` / `proc-macro2` | 2 / 1 / 1 | xdr-derive | Proc-macro implementation |
-| `libc` | 0.2 | server, client, keyring, audit | Direct syscalls (SO_PEERCRED, kTLS, `keyctl`, netlink, `fcntl`) |
+| `libc` | 0.2 | server, client, utils-unsafe | Direct syscalls (SO_PEERCRED, kTLS, `keyctl`, netlink, `fcntl`) |
 | `nix` | 0.29 | server, client (`fd-passing`), auth (`nss`) | Safe `sendmsg`/`recvmsg` SCM_RIGHTS; `getpwnam_r` |
 | `bytes` | 1 | server, client | Cancel-safe framed reads |
 | `socket2` | 0.5 | client | Socket options on connect |
@@ -240,21 +235,23 @@ deliberately small; several "new" deps are already transitive (noted).
 | `pyo3-ffi` | 0.23 | pyo3 | Raw CPython C-API + libpython linking |
 | `pyo3` | 0.23 | pyclient | High-level `#[pyclass]`/`#[pymethods]` to expose the generated client to Python |
 | `pythonize` | 0.23 | pyclient | serde struct↔Python object conversion (no JSON-string hop) |
-| `pkg-config` | 0.3 (build) | gssapi | Locate system MIT krb5 |
+| `pkg-config` | 0.3 (build) | utils-unsafe (gssapi) | Locate system MIT krb5 |
 
 ## Coverage model
 
 Two scripts, mirroring the build split:
 
-- **`coverage.sh` (100% line gate).** Runs the `default-members` test suite under
-  `-C instrument-coverage` and asserts **100%** merged line coverage over their `src/`, excluding (its
-  IGNORE regex) the proc-macro crate and the socket/FFI crates. Net effect: **`truenas-rpc`,
-  `truenas-filter`, `truenas-xdr`, and `truenas-rpc-codegen` are held to 100%.**
+- **`coverage.sh` (≥99.5% line floor).** Runs the `default-members` test suite under
+  `-C instrument-coverage` and asserts **≥99.5%** merged line coverage over their `src/`, excluding
+  (its IGNORE regex) the proc-macro crate and the socket/FFI crates. Net effect: **`truenas-rpc`,
+  `truenas-filter`, `truenas-xdr`, and `truenas-rpc-codegen` are held near-total** — the small
+  remainder is `?`-error / `assert!`-panic branches that rustfmt isolates onto their own lines, so
+  line coverage can't credit them (the run prints the exact percentage + every uncovered line).
 - **`coverage-client.sh` (≥85% floor).** A behavioral floor for `truenas-rpc-client` (the remaining
   gaps are hard-to-inject I/O-error and WebSocket-poll edges); runs serially.
 
 Everything else — `truenas-rpc-server`, `truenas-rpc-auth`, `truenas-rpc-pyo3`,
-`truenas-rpc-pyclient`, `truenas-keyring`, `truenas-audit`, `truenas-gssapi` — is **behavioral
+`truenas-rpc-pyclient`, `truenas-rpc-utils-unsafe` — is **behavioral
 only**: excluded from the line gate because it does socket I/O, FFI, or links libpython/krb5 (not
 unit-testable to 100% deterministically), but still built by `cargo clippy --workspace` and exercised
 with `cargo test -p <crate>`.

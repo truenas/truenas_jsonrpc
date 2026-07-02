@@ -4,8 +4,8 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-use crate::error::Error;
-use crate::keyring::{CLIENT_KEYS, SERVER_KEYS, SERVER_ROLES};
+use super::error::Error;
+use super::store::{CLIENT_KEYS, SERVER_KEYS, SERVER_ROLES};
 
 /// Which kernel keyring is the root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]

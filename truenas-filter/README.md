@@ -38,4 +38,4 @@ The engine builds a `serde_json::Value` view of each row only for the fields a q
 
 ## Dependencies
 
-`serde`, `serde_json`. `#![forbid(unsafe_code)]`; 100% line-coverage gated.
+`serde`, `serde_json`. `#![forbid(unsafe_code)]`; near-total line-coverage gated.
