@@ -175,13 +175,16 @@ needs no `server_gen.rs`**. The generated `<Name>Client<E>` is generic over a
 - `…​.emit_server()` → `$OUT_DIR/server_gen.rs` (the `Handlers` trait + `register`)
 - `…​.emit_client()` → `$OUT_DIR/client_gen.rs` (the typed client)
 - `…​.emit_openrpc()` → `$OUT_DIR/openrpc.json`
+- `…​.emit_pyclient()` → `$OUT_DIR/pyclient_gen.rs` — an **optional** Python-consumable client (a PyO3
+  extension module wrapping the typed client, over the `truenas-rpc-pyclient` runtime). Include
+  `types_gen.rs` + `client_gen.rs` + `pyclient_gen.rs` in a `cdylib`; see [`examples/demo-py`](../examples/demo-py)
 
 A relative `json_idl` is resolved against `CARGO_MANIFEST_DIR` (a build script's CWD is not
 reliable). Each `emit_*` prints `cargo:rerun-if-changed` for the directory **and** every
 discovered `*.json`, so edits trigger regeneration. `.out_dir(dir)` overrides `$OUT_DIR`.
 
 A standalone CLI is shipped as an example:
-`cargo run --example codegen -- <types|server|client|openrpc> <json-idl-dir> [--out FILE]`.
+`cargo run --example codegen -- <types|server|client|openrpc|pyclient> <json-idl-dir> [--out FILE]`.
 
 ### Packaging caveat
 
