@@ -284,6 +284,10 @@ or threads; everything around it is the transport's job. The full layer model is
 
 ## Crates
 
+> The **complete inventory** — every crate's internal/external dependencies, feature flags, and
+> coverage status, plus an external-dependency audit — is in **[CRATES.md](CRATES.md)**. This section
+> is the consumer's quick view: what you actually name.
+
 This is a workspace of focused crates; a consumer names only what it needs — the dispatch core,
 plus a **server** or **client** crate, and a build-dependency on the codegen. The split mirrors the
 [layer stack](ARCHITECTURE.md#layers). What actually goes in your `Cargo.toml`:
@@ -309,19 +313,11 @@ plus a **server** or **client** crate, and a build-dependency on the codegen. Th
   embedded CPython interpreter. It is excluded from the workspace's default members, so a default
   `cargo build` links **zero** libpython.
 
-The remaining crates are **internal** — pulled in transitively by `truenas-rpc`, so you don't
-name them. Each is self-contained with a smaller dependency set, so it's *also* usable standalone
-if you want just that piece:
-
-- **`truenas-filter`** — the `query-filters` / `query-options` **engine** (deps: `serde` +
-  `serde_json`), matching the TrueNAS middleware's `truenas_pyfilter` C filter engine. Re-exported
-  through `truenas-rpc`.
-- **`truenas-xdr`** — a serde **XDR (RFC 4506) codec** + the TXDR binary frame (deps: `serde` +
-  `thiserror`), driving the binary wire inside the core's dispatch. Its `derive` feature adds
-  `#[derive(XdrEnum/XdrUnion)]`.
-- **`truenas-xdr-derive`** — the proc-macro crate behind that `derive` feature. A proc-macro
-  *must* be its own crate (a language rule), so you never depend on it directly — you enable
-  `truenas-xdr`'s `derive` feature and the macros are re-exported for you.
+The remaining crates are **internal** — `truenas-filter` (the query engine, re-exported through
+`truenas-rpc`), `truenas-xdr` + `truenas-xdr-derive` (the XDR codec + its `derive` proc-macro), and
+the syscall/FFI backends (`truenas-keyring`, `truenas-audit`, `truenas-gssapi`). You don't name them
+directly; each is self-contained (a small dependency set) and documented in
+[CRATES.md](CRATES.md#crate-details).
 
 ## Dependency graph
 
@@ -369,7 +365,8 @@ pulled only for that capability. A **server** names `truenas-rpc-server` + `true
 
 `truenas-rpc-codegen` runs at build time only; it is never linked into the runtime — its
 *generated code* uses `truenas-rpc`. `truenas-rpc` re-exports the `truenas-filter` API, so
-a filterable handler needs only the core crate.
+a filterable handler needs only the core crate. The graph above is the primary-crate subset; the
+**complete** graph (auth, keyring, audit, gssapi) is in [CRATES.md](CRATES.md#dependency-graph).
 
 ## Parity & proof
 
