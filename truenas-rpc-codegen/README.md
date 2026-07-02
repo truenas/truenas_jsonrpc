@@ -89,12 +89,12 @@ record to the kernel audit subsystem (auditd → `/var/log/audit/audit.log`, que
 my-truenas-service/
 ├── json-idl/              # the spec(s) — the single source of truth
 │   └── myservice.json
-├── server-gen/            # generated server code (build.rs → emit_server)
+├── server-gen/            # generated server code (build.rs → emit_types + emit_server)
 │   ├── build.rs
-│   └── src/lib.rs         #   include!(concat!(env!("OUT_DIR"), "/server_gen.rs"));
-├── client-gen/            # generated client code (build.rs → emit_client + emit_openrpc)
+│   └── src/lib.rs         #   include! types_gen.rs, then server_gen.rs
+├── client-gen/            # generated client code (build.rs → emit_types + emit_client [+ emit_openrpc])
 │   ├── build.rs
-│   └── src/lib.rs         #   include!(concat!(env!("OUT_DIR"), "/client_gen.rs"));
+│   └── src/lib.rs         #   include! types_gen.rs, then client_gen.rs
 └── server/                # YOUR crate: impl Handlers + wire up JsonRpcProtocol
     └── src/main.rs
 ```
@@ -117,16 +117,21 @@ truenas-rpc-codegen = "..."
 fn main() {
     let json_idl = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../json-idl");
     truenas_rpc_codegen::Build::new()
+        .json_idl(json_idl.clone())
+        .emit_types()                  // writes $OUT_DIR/types_gen.rs (the shared $defs structs)
+        .expect("json-idl -> types codegen failed");
+    truenas_rpc_codegen::Build::new()
         .json_idl(json_idl)
-        .emit_server()                 // writes $OUT_DIR/server_gen.rs
+        .emit_server()                 // writes $OUT_DIR/server_gen.rs (Handlers trait + register)
         .expect("json-idl -> server codegen failed");
-    // emit_server() also prints cargo:rerun-if-changed for the dir + each *.json.
+    // each emit_* prints cargo:rerun-if-changed for the dir + each *.json.
 }
 ```
 
-`server-gen/src/lib.rs`:
+`server-gen/src/lib.rs` — the shared `$defs` structs first, then the server bindings over them:
 
 ```rust
+include!(concat!(env!("OUT_DIR"), "/types_gen.rs"));
 include!(concat!(env!("OUT_DIR"), "/server_gen.rs"));
 ```
 
@@ -157,15 +162,18 @@ fn build() -> JsonRpcProtocol<MyState> {
 }
 ```
 
-`client-gen` is symmetric (`.emit_client()`, plus `.emit_openrpc()` to also drop an
-`openrpc.json` for `$/describe`). The generated client is transport-agnostic: implement the
-emitted `Transport` trait over your connection (WebSocket / Unix / TCP) and call the typed
-`async fn` per method.
+`client-gen` is symmetric (`.emit_types()` + `.emit_client()`, plus `.emit_openrpc()` to also drop
+an `openrpc.json` for `$/describe`). Include `types_gen.rs` + `client_gen.rs` — a **standalone client
+needs no `server_gen.rs`**. The generated `<Name>Client<E>` is generic over a
+`truenas_rpc_client::CallEngine`: connect a `truenas_rpc_client::JsonRpcClient` (AF_UNIX / TCP / kTLS
+/ WebSocket) and wrap it (`Client::new(engine)`), then call the typed `async fn` per method.
 
 ## The `Build` API
 
-- `Build::new().json_idl(dir).emit_server()` → `$OUT_DIR/server_gen.rs`
-- `…​.emit_client()` → `$OUT_DIR/client_gen.rs`
+- `Build::new().json_idl(dir).emit_types()` → `$OUT_DIR/types_gen.rs` — the shared `$defs` structs;
+  **required** by both the server and the client modules
+- `…​.emit_server()` → `$OUT_DIR/server_gen.rs` (the `Handlers` trait + `register`)
+- `…​.emit_client()` → `$OUT_DIR/client_gen.rs` (the typed client)
 - `…​.emit_openrpc()` → `$OUT_DIR/openrpc.json`
 
 A relative `json_idl` is resolved against `CARGO_MANIFEST_DIR` (a build script's CWD is not
@@ -173,7 +181,7 @@ reliable). Each `emit_*` prints `cargo:rerun-if-changed` for the directory **and
 discovered `*.json`, so edits trigger regeneration. `.out_dir(dir)` overrides `$OUT_DIR`.
 
 A standalone CLI is shipped as an example:
-`cargo run --example codegen -- <server|client|openrpc> <json-idl-dir> [--out FILE]`.
+`cargo run --example codegen -- <types|server|client|openrpc> <json-idl-dir> [--out FILE]`.
 
 ### Packaging caveat
 

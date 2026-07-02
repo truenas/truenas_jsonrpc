@@ -1,7 +1,7 @@
 //! End-to-end raw-fd **transfer** over a real Unix socket: the server negotiates, runs the
 //! `$/transferReady` (+ `$/transferGo`) handshake, hands the blocking fd to the `transfer`
 //! callback, and writes the final response — exercising the connection takeover, the writer
-//! gate, and the blocking byte-stream helpers. (SCM_RIGHTS fd passing is a later sub-phase.)
+//! gate, and the blocking byte-stream helpers — plus SCM_RIGHTS fd passing (`send_fds` / `recv_fds`).
 
 use std::io::Read;
 use std::os::fd::{AsRawFd, RawFd};

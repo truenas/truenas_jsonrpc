@@ -2,9 +2,8 @@
 
 Design notes for a pluggable **framing** layer — **layer 2** of the stack in
 [ARCHITECTURE.md](ARCHITECTURE.md#layers) — so header-carrying binary protocols (SMB DSI,
-NFS/ONC-RPC record marking) could replace the hardcoded 4-byte length prefix. This is the Tier-3
-"Gap 2" of [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md) — captured here, **not built**.
-It is design-only; no code is committed for it.
+NFS/ONC-RPC record marking) could replace the hardcoded 4-byte length prefix. It is captured here as
+a design note — **not built**; no code is committed for it.
 
 ## Where the layers sit today
 
@@ -26,8 +25,8 @@ socket bytes ──[framing]──> opaque body ──[codec sniff]──> typed
 - **The existing binary (XDR) wire is _not_ a second framing.** It rides the *same* length prefix; its
   magic + version + `proc_id` + 16-byte request id live **inside** the opaque body as an XDR envelope
   (`truenas-xdr/src/frame.rs`), recovered by the codec from the body. So today there is exactly one
-  framing and the "binary wire" is purely a codec choice. The [`Codec` seam](PROTOCOL_SPINE_ASSESSMENT.md)
-  (landed) sits at the codec arrow; the dispatch op-table is `HashMap<u32>` (XDR proc-id) /
+  framing and the "binary wire" is purely a codec choice. The codec seam (the `WireParams` / `Encode`
+  split, landed) sits at the codec arrow; the dispatch op-table is `HashMap<u32>` (XDR proc-id) /
   `HashMap<Arc<str>>` (JSON name) sharing one `Arc<Method>` (`protocol.rs:650-651`).
 
 ## Why header-carrying protocols don't fit the current seam

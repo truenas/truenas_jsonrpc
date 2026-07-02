@@ -125,17 +125,25 @@ or threads; everything around it is the transport's job. The full layer model is
 
 ## Crates
 
-This is a workspace of focused crates, but **a consumer depends on only one of them at runtime.**
-The split mirrors the [layer stack](ARCHITECTURE.md#layers) (and, for two of them, is a hard
-requirement — see below), not a per-crate dependency you take on. What actually goes in your
-`Cargo.toml`:
+This is a workspace of focused crates; a consumer names only what it needs — the dispatch core,
+plus a **server** or **client** crate, and a build-dependency on the codegen. The split mirrors the
+[layer stack](ARCHITECTURE.md#layers). What actually goes in your `Cargo.toml`:
 
-- **`truenas-rpc`** — *your only runtime dependency.* The transport-agnostic **dispatch core**:
-  envelope parse/validation, the session lifecycle + gate, the authorize → handler → audit
+- **`truenas-rpc`** — the transport-agnostic **dispatch core** (every server *and* client depends on
+  it): envelope parse/validation, the session lifecycle + gate, the authorize → handler → audit
   pipeline, the `$/` control messages, pub/sub (`SERVER_CLIENT` subscriptions), and filterable
   (query) methods. Sync handlers run on `spawn_blocking`; async handlers are awaited. It
   **re-exports the filter API** (`tnfilter`, `Filtered`, `CompiledFilters`, …), so you
   `use truenas_rpc::…` for filtering too.
+- **`truenas-rpc-server`** — the async **server transport**: AF_UNIX / TCP / kTLS / WebSocket
+  listeners, framing, the connection/session registry, and SCM_RIGHTS fd passing. Pair it with the
+  core to serve a `JsonRpcProtocol`.
+- **`truenas-rpc-client`** — the async **client engine**: connect over AF_UNIX / TCP / kTLS /
+  WebSocket (`ws` / `wss` / ws-over-unix), authenticate (SCRAM-SHA-512-PLUS + mTLS / OAuth / bearer /
+  peer-cred), call / subscribe, stream raw-fd transfers, and pass fds — driving the codegen'd typed
+  client. TLS / WebSocket / SCRAM / fd-passing are opt-in features.
+- **`truenas-rpc-auth`** — *optional* **authentication** mechanisms (peer-cred / mTLS / SCRAM /
+  GSSAPI / OAuth / passthrough) wired onto the server's `$/sessionSetup` seam.
 - **`truenas-rpc-codegen`** — a **build-dependency** (never a runtime one): the `json-idl/`
   → Rust generator, run from `build.rs` (see [Code generation](#code-generation-truenas-rpc-codegen)).
 - **`truenas-rpc-pyo3`** — **optional**, only if you run `python:true` handler bodies in an
@@ -159,8 +167,8 @@ if you want just that piece:
 ## Dependency graph
 
 Arrows are Cargo dependencies (`A --> B` means A depends on B). `[opt]` marks an optional add-on,
-pulled only for that capability. A typical consumer names only `truenas-rpc` (runtime) and
-`truenas-rpc-codegen` (build-dependency); the rest are transitive or opt-in.
+pulled only for that capability. A **server** names `truenas-rpc-server` + `truenas-rpc`; a
+**client** names `truenas-rpc-client`; both add `truenas-rpc-codegen` as a build-dependency.
 
 ```text
                           consumer service crate
@@ -176,7 +184,11 @@ pulled only for that capability. A typical consumer names only `truenas-rpc` (ru
                                                   v
     +------------------------+ [opt]   +-----------------------+
     | truenas-rpc-server |-------->|    truenas-rpc    |
-    | (AF_UNIX / TCP)        |         |    (dispatch core)    |
+    | (AF_UNIX/TCP/TLS/WS)   |         |    (dispatch core)    |
+    +------------------------+         |                       |
+    +------------------------+ [opt]   |                       |
+    | truenas-rpc-client |-------->|                       |
+    | (client engine)        |         |                       |
     +------------------------+         |                       |
     +------------------------+ [opt]   |                       |
     | truenas-rpc-pyo3   |-------->|                       |

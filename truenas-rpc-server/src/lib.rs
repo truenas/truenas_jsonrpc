@@ -9,7 +9,7 @@
 //!
 //! The wire is a 4-byte big-endian length prefix framing compact JSON (see [`framing`]).
 //! AF_UNIX and plain TCP need no dependency beyond
-//! tokio's networking; TLS/kTLS and WebSocket arrive behind opt-in features in later phases.
+//! tokio's networking; TLS/kTLS and WebSocket are available behind opt-in features.
 //!
 //! This crate is excluded from the workspace default members (its socket / kTLS / SCM_RIGHTS
 //! I/O can't be unit-tested deterministically; it's covered behaviorally), so the core builds

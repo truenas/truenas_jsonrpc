@@ -1,6 +1,7 @@
-//! Byte-stream transports (AF_UNIX + TCP). The concrete stream is split into owned read/write halves
-//! at connect time, each boxed as a trait object — so the engine is generic over the *protocol*, not
-//! the transport. TLS / WebSocket arrive behind features later (mirroring the server).
+//! Transports. AF_UNIX + plain TCP are the byte-stream base; kTLS and WebSocket (`ws` / `wss` /
+//! ws-over-unix) layer over them behind opt-in features (see `tls.rs` / `ws.rs`). Each connection is
+//! split into owned read/write halves at connect time, boxed as trait objects — so the engine is
+//! generic over the *protocol*, not the transport.
 
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::Duration;

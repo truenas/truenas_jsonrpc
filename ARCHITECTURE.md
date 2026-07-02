@@ -23,7 +23,7 @@ strata, bottom → top:
 |---|---|---|---|
 | 1 | **Transport** | Owns the file descriptor: accept loop, read/write event loop, TLS/kTLS, peer-cred identity, raw-fd (`sendfile`/`SCM_RIGHTS`) transfer, WebSocket. Moves opaque bytes. | `truenas-rpc-server`: `connection.rs`, `server.rs`, `tls.rs`, `peer.rs` (`Transport`, `Peer`), `scm.rs`, `transfer.rs`, `ws.rs` |
 | 2 | **Framing** | Delimits one message in the byte stream (today: a 4-byte big-endian length prefix; one WebSocket message = one frame). Yields an opaque body. | `truenas-rpc-server`: `framing.rs` (`frame_into`, `FrameError`), `connection.rs::take_frame` |
-| 3 | **Codec** | Bytes ↔ typed params/result for a wire. Both current wires are serde-driven (JSON via `serde_json`; the TXDR binary wire via `truenas-xdr`), but the layer is *not defined as* serde — a hand-written body parser is equally a codec. | `truenas-rpc`: `method.rs` (`Codec` / `WireParams` / `WireReply`); the `truenas-xdr` crate |
+| 3 | **Codec** | Bytes ↔ typed params/result for a wire. Both current wires are serde-driven (JSON via `serde_json`; the TXDR binary wire via `truenas-xdr`), but the layer is *not defined as* serde — a hand-written body parser is equally a codec. | `truenas-rpc`: `method.rs` (`WireParams` / `Encode`); the `truenas-xdr` crate |
 | 4 | **Envelope** | The per-message header: request id, method name / opcode, error taxonomy, request↔reply correlation. On the JSON wire a top-level array is a JSON-RPC 2.0 batch — several requests in one frame (§3, §9). | `truenas-rpc`: `envelope.rs` |
 | 5 | **Dispatch** | Routes a decoded, authorized request to its handler through an O(1) keyed table — JSON by method name (`HashMap<Arc<str>>`), XDR by proc-id (`HashMap<u32>`), both sharing one `Arc<Method>`. Wire-neutral. | `truenas-rpc`: `protocol.rs` (`dispatch` / `dispatch_xdr`, the registries, `Dispatched`), `method.rs` (`Method` / `MethodImpl`) |
 | — | → **Handler** | The consumer's `Fn(Accepts, &RequestCtx) -> Result<Returns>`. | consumer code |
@@ -48,8 +48,7 @@ Two layer boundaries are deliberately **negotiable**, not clean cuts — name th
 - **Envelope ↔ Dispatch (per-protocol vs reusable).** The dispatch op-table (`Service`) is wire-neutral
   and reusable; the envelope + control-plane are per-protocol. A new protocol reuses the op-table but
   brings its own envelope and control verbs — this is the **`ProtocolEngine`** extension point (§10),
-  with the ONC RPC engine as the worked example. (A per-engine control plane, Gap 4 in
-  [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md), is still deferred.)
+  with the ONC RPC engine as the worked example. (A per-engine control plane is still deferred.)
 
 Two deliberate choices: **Framing is its own layer** (not folded into transport) so it can be made pluggable
 per protocol — see [FRAMING.md](FRAMING.md); and the **Control-plane** is what makes this more than bare
@@ -535,6 +534,6 @@ and sits *outside* the byte-stream `Wire` seam (its own `serve_websocket*` metho
 `NetworkWire` if it authenticates network clients), or wrap a pre-built engine in `CustomWire`.
 **Deferred, by design (no
 consumer yet):** a per-engine control plane (the `$/` verbs
-are JSON-RPC-specific — Gap 4 in [PROTOCOL_SPINE_ASSESSMENT.md](PROTOCOL_SPINE_ASSESSMENT.md)), and
+are JSON-RPC-specific), and
 server→client push over a binary wire (the core's pub/sub emits JSON notifications, so a binary event
 path waits for a protocol that actually needs one).

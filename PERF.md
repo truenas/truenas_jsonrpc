@@ -2,7 +2,7 @@
 
 The dispatch hot path is the load-bearing cost of the server. Changes to it — especially the
 `ProtocolEngine` seam refactor — must not regress throughput. A prior naive pluggable-codec attempt
-caused a ~3–4× drop; the fix (the enum-based `Codec` seam) was validated **free** by A/B benchmarking.
+caused a ~3–4× drop; the fix (the enum-based codec seam, `WireParams`/`Encode`) was validated **free** by A/B benchmarking.
 This note is the standing gate: **A/B every hot-path change against a baseline and root-cause any
 movement beyond run-to-run noise.**
 
@@ -35,7 +35,8 @@ rustc -O --edition 2021 bench/unix_ab/driver.rs -o bench/unix_ab/driver  # the l
 
 ## Baseline (dev box; commit `4cbd05f`; best-of-3, `taskset -c 0-7`)
 
-Re-measure locally before trusting these — they anchor the *shape*, not absolute hardware numbers.
+These are pinned to an early commit (`4cbd05f`) — **re-measure on current `HEAD`** before trusting
+them; they anchor the *shape* of an A/B, not absolute hardware numbers.
 
 **The async/inline cells are the primary gate.** The async path has no `spawn_blocking` thread hop to
 mask a per-request regression (a boxed future, an extra alloc, lost inlining), so a "fuckup" shows

@@ -1,5 +1,5 @@
 //! The [`Mechanism`] trait — one challenge-response step. Concrete mechanisms (mTLS, SCRAM,
-//! GSSAPI, passthrough) implement it in later phases; the stack routes to them by wire tag.
+//! GSSAPI, passthrough) implement it; the stack routes to them by wire tag.
 
 use crate::channel::Channel;
 use crate::outcome::{AuthProgress, Outcome};

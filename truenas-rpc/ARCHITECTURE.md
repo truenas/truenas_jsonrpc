@@ -17,8 +17,9 @@ array → `INVALID_REQUEST`).
 **Status.** This crate is the transport-agnostic **dispatch core**. The required spine —
 `$/sessionSetup` authentication and the normal method-call pipeline — is implemented and
 proven by a differential conformance test against a committed golden corpus (§12).
-Filterable/query methods, pub/sub fan-out, raw-fd transfers, the audit queue, and the
-transport/server/client crates are **planned** (§13).
+Filterable/query methods, pub/sub fan-out, raw-fd transfers, and the audit queue are implemented in
+this crate; the transport (`truenas-rpc-server` / `-client`), authentication (`truenas-rpc-auth`), and
+codegen (`truenas-rpc-codegen`) crates build on it (§13).
 
 ## 1. Crate vs transport — the boundary
 
@@ -320,21 +321,21 @@ against the frozen golden — the gating proof of wire-stability. It is mutation
 (deliberately breaking the core must fail it) and runs in CI
 (`.github/workflows/rust.yml`); line coverage is gated at **100%**.
 
-## 13. Not yet implemented (planned)
+## 13. Where the rest of the stack lives
 
-Tracked against the full-parity plan; the wire contract for each is in the root doc:
+The wire contract for each is in the root doc; here is where each capability is implemented:
 
-- **Filterable/query methods** (`query-filters`/`query-options`) and the `truenas-filter`
+- **Filterable/query methods** (`query-filters`/`query-options`) — this crate + the `truenas-filter`
   engine (root §7).
-- **Pub/sub** — `SERVER_CLIENT` subscribe dispatch + `send_notification` fan-out (it is a
-  no-op stub today); `$/cancelRequest` dropping a subscription.
+- **Pub/sub** — `SERVER_CLIENT` subscribe dispatch + `send_notification` fan-out in this crate;
+  `$/cancelRequest` drops a subscription.
 - **Raw-fd transfer / SCM_RIGHTS** — a `Dispatched::Transfer` directive + the
-  `$/transferReady`/`$/transferGo` handshake (root §6).
-- **Audit queue** (off-path audit drain) — auditing is inline today.
-- **Transports** — the `truenas-rpc-server` / `-client` crates (AF_UNIX, TCP, TLS,
-  WebSocket, kTLS) that satisfy §10.
-- **Codegen** — a proc-macro for method definition and an OpenRPC-driven typed-client
-  generator.
+  `$/transferReady`/`$/transferGo` handshake here (root §6); the fd hand-off in `truenas-rpc-server`.
+- **Audit queue** (off-path audit drain) — `truenas-audit`.
+- **Transports** — `truenas-rpc-server` / `truenas-rpc-client` (AF_UNIX, TCP, kTLS, WebSocket)
+  satisfy §10.
+- **Codegen** — `truenas-rpc-codegen` emits typed server + client bindings (source **text**, not a
+  proc-macro) plus an OpenRPC document from `json-idl`.
 
 ## 14. Notable design choices
 
@@ -347,7 +348,7 @@ Tracked against the full-parity plan; the wire contract for each is in the root 
 3. **Closures, not a handler trait**; **two-phase erasure** (decode-before-authz);
    **`Arc<AtomicBool>`** cancel flag; **`RwLock`** session-internal (not write-once);
    **atomic** lifecycle.
-4. The **client** (planned) is **async-native** (§13).
+4. The **client** (`truenas-rpc-client`) is **async-native** (§13).
 
 ## 15. Error codes (reference)
 
