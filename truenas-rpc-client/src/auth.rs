@@ -83,6 +83,42 @@ enum AuthResponse {
     Expired,
 }
 
+/// One parsed setup/continue step: the driver either finishes (established or refused) or must answer
+/// a challenge.
+enum Step {
+    Established { session_id: String, user_info: Option<Value>, extra: Option<Value> },
+    Challenge(Value),
+    Refused(AuthOutcome),
+}
+
+fn interpret(result: &[u8]) -> Result<Step, ClientError> {
+    let parsed: AuthResult = serde_json::from_slice(result)
+        .map_err(|e| ClientError::Decode(format!("$/sessionSetup result: {e}")))?;
+    Ok(match parsed.response {
+        AuthResponse::Success { session_id, user_info, extra } => {
+            Step::Established { session_id, user_info, extra }
+        }
+        AuthResponse::Challenge { data } => Step::Challenge(data),
+        AuthResponse::OtpRequired { username } => Step::Refused(AuthOutcome::OtpRequired { username }),
+        AuthResponse::Denied => Step::Refused(AuthOutcome::Denied),
+        AuthResponse::AuthErr => Step::Refused(AuthOutcome::AuthErr),
+        AuthResponse::Expired => Step::Refused(AuthOutcome::Expired),
+    })
+}
+
+/// Interpret a **single-shot** setup/continue result (no challenge is expected).
+fn single(result: &[u8]) -> Result<AuthOutcome, ClientError> {
+    match interpret(result)? {
+        Step::Established { session_id, user_info, .. } => {
+            Ok(AuthOutcome::Established { session_id, user_info })
+        }
+        Step::Refused(outcome) => Ok(outcome),
+        Step::Challenge(_) => {
+            Err(ClientError::Auth("unexpected challenge for a single-shot mechanism".into()))
+        }
+    }
+}
+
 impl<P: Authenticates> Client<P> {
     /// Drive `mechanism` to completion over `$/sessionSetup` (+ `$/sessionSetupContinue`): send its
     /// first message, answer each `CHALLENGE`, and on `SUCCESS` verify the server's final payload
@@ -96,26 +132,60 @@ impl<P: Authenticates> Client<P> {
         let params = to_raw(&json!({ "mechanism": first }))?;
         let mut result = self.authenticate(Some(&*params)).await?;
         loop {
-            let parsed: AuthResult = serde_json::from_slice(&result)
-                .map_err(|e| ClientError::Decode(format!("$/sessionSetup result: {e}")))?;
-            match parsed.response {
-                AuthResponse::Success { session_id, user_info, extra } => {
+            match interpret(&result)? {
+                Step::Established { session_id, user_info, extra } => {
                     mechanism.verify(extra.as_ref())?;
                     return Ok(AuthOutcome::Established { session_id, user_info });
                 }
-                AuthResponse::Challenge { data } => {
+                Step::Challenge(data) => {
                     let next = mechanism.respond(&data)?;
                     let params = to_raw(&json!({ "mechanism": next }))?;
                     result = self.authenticate_continue(Some(&*params)).await?;
                 }
-                AuthResponse::OtpRequired { username } => {
-                    return Ok(AuthOutcome::OtpRequired { username })
-                }
-                AuthResponse::Denied => return Ok(AuthOutcome::Denied),
-                AuthResponse::AuthErr => return Ok(AuthOutcome::AuthErr),
-                AuthResponse::Expired => return Ok(AuthOutcome::Expired),
+                Step::Refused(outcome) => return Ok(outcome),
             }
         }
+    }
+
+    /// AF_UNIX **peer-cred**: an empty `$/sessionSetup` (no mechanism); the server authenticates from
+    /// the connecting process's uid. Single-shot.
+    pub async fn authenticate_peercred(&self) -> Result<AuthOutcome, ClientError> {
+        let params = to_raw(&json!({}))?;
+        single(&self.authenticate(Some(&*params)).await?)
+    }
+
+    /// **mTLS**: use the client certificate presented in the TLS handshake as the identity.
+    pub async fn authenticate_mtls(&self) -> Result<AuthOutcome, ClientError> {
+        self.authenticate_with(Single(json!({ "mechanism": "CLIENT_CERTIFICATE" }))).await
+    }
+
+    /// **OAuth/OIDC**: present a validated ID token (a JWT); the server verifies it offline.
+    pub async fn authenticate_oauth(&self, id_token: &str) -> Result<AuthOutcome, ClientError> {
+        self.authenticate_with(Single(json!({ "mechanism": "OAUTH", "token": id_token }))).await
+    }
+
+    /// A single-use **bearer token** minted by an external SPNEGO edge.
+    pub async fn authenticate_bearer(&self, token: &str) -> Result<AuthOutcome, ClientError> {
+        self.authenticate_with(Single(json!({ "mechanism": "GSSAPI_BEARER_TOKEN", "token": token }))).await
+    }
+
+    /// Continue with a one-time **second factor** after a primary factor returned
+    /// [`AuthOutcome::OtpRequired`] (a `$/sessionSetupContinue`).
+    pub async fn authenticate_otp(&self, otp_token: &str) -> Result<AuthOutcome, ClientError> {
+        let params =
+            to_raw(&json!({ "mechanism": { "mechanism": "OTP_TOKEN", "otp_token": otp_token } }))?;
+        single(&self.authenticate_continue(Some(&*params)).await?)
+    }
+}
+
+/// A single-shot mechanism: send `obj` once; a server challenge is a protocol error.
+struct Single(Value);
+impl Mechanism for Single {
+    fn first(&mut self) -> Result<Value, ClientError> {
+        Ok(self.0.clone())
+    }
+    fn respond(&mut self, _data: &Value) -> Result<Value, ClientError> {
+        Err(ClientError::Auth("this mechanism does not support a challenge".into()))
     }
 }
 
