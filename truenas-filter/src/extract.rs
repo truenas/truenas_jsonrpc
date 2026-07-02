@@ -98,7 +98,9 @@ pub(crate) fn build_view<E: Serialize>(item: &E, needed: &Needed) -> Result<Valu
     match needed {
         Needed::Nothing => Ok(Value::Null),
         Needed::Full => full_view(item),
-        Needed::Keys(keys) => match item.serialize(FieldExtractor { needed: keys.as_slice() }) {
+        Needed::Keys(keys) => match item.serialize(FieldExtractor {
+            needed: keys.as_slice(),
+        }) {
             Ok(view) => Ok(view),
             // The row isn't a struct (e.g. a dynamic `Value` object via `serialize_map`, or a
             // scalar/array row) — fall back to the full materialization, which is correct for
@@ -203,7 +205,10 @@ impl<'a> Serializer for FieldExtractor<'a> {
         _name: &'static str,
         _len: usize,
     ) -> Result<StructPruner<'a>, ExtractError> {
-        Ok(StructPruner { needed: self.needed, out: Map::new() })
+        Ok(StructPruner {
+            needed: self.needed,
+            out: Map::new(),
+        })
     }
 
     // Everything else is "not a struct" → caller falls back to a full `to_value`. (Maps,
@@ -346,13 +351,31 @@ mod tests {
                 if ks.len() == 2 && ks.iter().any(|k| &**k == "a") && ks.iter().any(|k| &**k == "b")
         ));
         // Nested, indexed, wildcard, and escaped-dot single keys each force Full.
-        assert!(matches!(needed(json!([["a.b", "=", 1]]), json!({})), Needed::Full));
-        assert!(matches!(needed(json!([["0", "=", 1]]), json!({})), Needed::Full));
-        assert!(matches!(needed(json!([["*", "=", 1]]), json!({})), Needed::Full));
-        assert!(matches!(needed(json!([["a\\.b", "=", 1]]), json!({})), Needed::Full));
-        assert!(matches!(needed(json!([]), json!({"order_by": ["a.b"]})), Needed::Full));
+        assert!(matches!(
+            needed(json!([["a.b", "=", 1]]), json!({})),
+            Needed::Full
+        ));
+        assert!(matches!(
+            needed(json!([["0", "=", 1]]), json!({})),
+            Needed::Full
+        ));
+        assert!(matches!(
+            needed(json!([["*", "=", 1]]), json!({})),
+            Needed::Full
+        ));
+        assert!(matches!(
+            needed(json!([["a\\.b", "=", 1]]), json!({})),
+            Needed::Full
+        ));
+        assert!(matches!(
+            needed(json!([]), json!({"order_by": ["a.b"]})),
+            Needed::Full
+        ));
         // Once Full, a later simple key is short-circuited (exercises the `if full` guard).
-        assert!(matches!(needed(json!([["a.b", "=", 1], ["c", "=", 2]]), json!({})), Needed::Full));
+        assert!(matches!(
+            needed(json!([["a.b", "=", 1], ["c", "=", 2]]), json!({})),
+            Needed::Full
+        ));
     }
 
     /// A two-field struct (hand-written `Serialize` — this crate doesn't pull in serde derive).
@@ -391,18 +414,39 @@ mod tests {
     fn build_view_branches() {
         let keys = Needed::Keys(vec![Box::from("a")]);
         // Struct fast path keeps only `a`, drops `b`.
-        assert_eq!(build_view(&Row { a: 1, b: 2 }, &keys).unwrap(), json!({"a": 1}));
+        assert_eq!(
+            build_view(&Row { a: 1, b: 2 }, &keys).unwrap(),
+            json!({"a": 1})
+        );
         // Nothing → free null view; Full → whole row.
-        assert_eq!(build_view(&Row { a: 1, b: 2 }, &Needed::Nothing).unwrap(), Value::Null);
-        assert_eq!(build_view(&Row { a: 1, b: 2 }, &Needed::Full).unwrap(), json!({"a": 1, "b": 2}));
+        assert_eq!(
+            build_view(&Row { a: 1, b: 2 }, &Needed::Nothing).unwrap(),
+            Value::Null
+        );
+        assert_eq!(
+            build_view(&Row { a: 1, b: 2 }, &Needed::Full).unwrap(),
+            json!({"a": 1, "b": 2})
+        );
         // A dynamic Value object isn't a struct → falls back to to_value (full, correct).
-        assert_eq!(build_view(&json!({"a": 1, "b": 2}), &keys).unwrap(), json!({"a": 1, "b": 2}));
+        assert_eq!(
+            build_view(&json!({"a": 1, "b": 2}), &keys).unwrap(),
+            json!({"a": 1, "b": 2})
+        );
         // A failing field on the struct fast path, and a failing row on the full path, both
         // surface as Eval. When the failing field `a` isn't among the needed keys it is never
         // serialized, so `Holder` extracts cleanly to an empty object.
-        assert!(matches!(build_view(&Holder, &keys), Err(FilterError::Eval(_))));
-        assert_eq!(build_view(&Holder, &Needed::Keys(vec![Box::from("z")])).unwrap(), json!({}));
-        assert!(matches!(build_view(&Fails, &Needed::Full), Err(FilterError::Eval(_))));
+        assert!(matches!(
+            build_view(&Holder, &keys),
+            Err(FilterError::Eval(_))
+        ));
+        assert_eq!(
+            build_view(&Holder, &Needed::Keys(vec![Box::from("z")])).unwrap(),
+            json!({})
+        );
+        assert!(matches!(
+            build_view(&Fails, &Needed::Full),
+            Err(FilterError::Eval(_))
+        ));
     }
 
     #[test]
@@ -451,6 +495,9 @@ mod tests {
     #[test]
     fn error_display_and_kind() {
         assert_eq!(ExtractError::NotStruct.to_string(), "row is not a struct");
-        assert_eq!(<ExtractError as SerError>::custom("nope").to_string(), "nope");
+        assert_eq!(
+            <ExtractError as SerError>::custom("nope").to_string(),
+            "nope"
+        );
     }
 }

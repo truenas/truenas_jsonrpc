@@ -36,7 +36,11 @@ impl Spec {
         let raw: model::Spec = serde_json::from_str(json)
             .map_err(|e| CodegenError::at(origin, format!("invalid json-idl: {e}")))?;
         validate::validate(&raw, origin)?;
-        Ok(Spec { raw, sources: Vec::new(), origin: origin.to_string() })
+        Ok(Spec {
+            raw,
+            sources: Vec::new(),
+            origin: origin.to_string(),
+        })
     }
 
     /// Load + validate every `*.json` in `dir` (lexicographic order), merging their `$defs`
@@ -50,12 +54,19 @@ impl Spec {
             .collect();
         files.sort();
         if files.is_empty() {
-            return Err(CodegenError::new(format!("no *.json json-idl specs in {}", dir.display())));
+            return Err(CodegenError::new(format!(
+                "no *.json json-idl specs in {}",
+                dir.display()
+            )));
         }
         let mut merged: Option<model::Spec> = None;
         for f in &files {
             let text = std::fs::read_to_string(f)?;
-            let name = f.file_name().and_then(|n| n.to_str()).unwrap_or("<spec>").to_string();
+            let name = f
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("<spec>")
+                .to_string();
             let parsed: model::Spec = serde_json::from_str(&text)
                 .map_err(|e| CodegenError::at(name.clone(), format!("invalid json-idl: {e}")))?;
             match &mut merged {
@@ -66,7 +77,11 @@ impl Spec {
         let raw = merged.expect("files is non-empty");
         let origin = dir.display().to_string();
         validate::validate(&raw, &origin)?;
-        Ok(Spec { raw, sources: files, origin })
+        Ok(Spec {
+            raw,
+            sources: files,
+            origin,
+        })
     }
 
     /// The source files (for `build.rs` `cargo:rerun-if-changed`).
@@ -78,13 +93,19 @@ impl Spec {
 fn merge(acc: &mut model::Spec, other: model::Spec, origin: &str) -> Result<()> {
     for (k, v) in other.defs.0 {
         if acc.defs.contains_key(&k) {
-            return Err(CodegenError::at(origin, format!("duplicate $def {k:?} across spec files")));
+            return Err(CodegenError::at(
+                origin,
+                format!("duplicate $def {k:?} across spec files"),
+            ));
         }
         acc.defs.0.push((k, v));
     }
     for (k, v) in other.methods.0 {
         if acc.methods.contains_key(&k) {
-            return Err(CodegenError::at(origin, format!("duplicate method {k:?} across spec files")));
+            return Err(CodegenError::at(
+                origin,
+                format!("duplicate method {k:?} across spec files"),
+            ));
         }
         acc.methods.0.push((k, v));
     }
@@ -184,8 +205,10 @@ impl Build {
     }
 
     fn resolved_json_idl(&self) -> Result<PathBuf> {
-        let p =
-            self.json_idl.clone().ok_or_else(|| CodegenError::new("Build::json_idl(..) was not set"))?;
+        let p = self
+            .json_idl
+            .clone()
+            .ok_or_else(|| CodegenError::new("Build::json_idl(..) was not set"))?;
         if p.is_absolute() {
             Ok(p)
         } else if let Some(manifest) = std::env::var_os("CARGO_MANIFEST_DIR") {
@@ -201,7 +224,9 @@ impl Build {
         }
         std::env::var_os("OUT_DIR")
             .map(PathBuf::from)
-            .ok_or_else(|| CodegenError::new("OUT_DIR is not set (call from build.rs, or set out_dir)"))
+            .ok_or_else(|| {
+                CodegenError::new("OUT_DIR is not set (call from build.rs, or set out_dir)")
+            })
     }
 
     fn emit(&self, file: &str, generate: impl Fn(&Spec) -> Result<String>) -> Result<PathBuf> {
@@ -226,7 +251,9 @@ impl Build {
 pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
     let sub = args.first().map(String::as_str);
     let dir = args.get(1).ok_or_else(|| {
-        CodegenError::new("usage: <types|server|client|openrpc|pyclient> <json-idl-dir> [--out FILE]")
+        CodegenError::new(
+            "usage: <types|server|client|openrpc|pyclient> <json-idl-dir> [--out FILE]",
+        )
     })?;
     let out_file = match args.get(2).map(String::as_str) {
         Some("--out") => Some(

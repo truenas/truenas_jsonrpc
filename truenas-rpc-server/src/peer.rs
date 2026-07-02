@@ -93,9 +93,15 @@ impl ForwardedOrigin {
             .get("x-real-remote-port")
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse().ok());
-        let secure =
-            headers.get("x-https").and_then(|v| v.to_str().ok()).is_some_and(|s| s.trim() == "on");
-        Some(ForwardedOrigin { addr: addr.to_string(), port, secure })
+        let secure = headers
+            .get("x-https")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|s| s.trim() == "on");
+        Some(ForwardedOrigin {
+            addr: addr.to_string(),
+            port,
+            secure,
+        })
     }
 }
 
@@ -196,7 +202,11 @@ pub(crate) fn peer_cred(fd: std::os::fd::RawFd) -> Option<Ucred> {
     // `len`; both out-params are valid for the call and the size matches `SO_PEERCRED`.
     #[allow(unsafe_code)]
     unsafe {
-        let mut cred = libc::ucred { pid: 0, uid: 0, gid: 0 };
+        let mut cred = libc::ucred {
+            pid: 0,
+            uid: 0,
+            gid: 0,
+        };
         let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
         let rc = libc::getsockopt(
             fd,
@@ -205,7 +215,11 @@ pub(crate) fn peer_cred(fd: std::os::fd::RawFd) -> Option<Ucred> {
             std::ptr::addr_of_mut!(cred).cast::<libc::c_void>(),
             &mut len,
         );
-        (rc == 0).then_some(Ucred { pid: cred.pid, uid: cred.uid, gid: cred.gid })
+        (rc == 0).then_some(Ucred {
+            pid: cred.pid,
+            uid: cred.uid,
+            gid: cred.gid,
+        })
     }
 }
 
@@ -226,7 +240,11 @@ pub(crate) fn set_blocking(fd: std::os::fd::RawFd, blocking: bool) -> std::io::R
         if flags < 0 {
             return Err(std::io::Error::last_os_error());
         }
-        let next = if blocking { flags & !libc::O_NONBLOCK } else { flags | libc::O_NONBLOCK };
+        let next = if blocking {
+            flags & !libc::O_NONBLOCK
+        } else {
+            flags | libc::O_NONBLOCK
+        };
         if libc::fcntl(fd, libc::F_SETFL, next) < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -259,7 +277,11 @@ mod tests {
         .unwrap();
         assert_eq!(
             o,
-            ForwardedOrigin { addr: "203.0.113.7".into(), port: Some(54321), secure: true }
+            ForwardedOrigin {
+                addr: "203.0.113.7".into(),
+                port: Some(54321),
+                secure: true
+            }
         );
         assert_eq!(o.render(), "203.0.113.7:54321");
     }
@@ -277,7 +299,9 @@ mod tests {
 
     #[test]
     fn forwarded_origin_is_none_without_an_address() {
-        assert!(ForwardedOrigin::from_real_remote_headers(&headers(&[("X-Https", "on")])).is_none());
+        assert!(
+            ForwardedOrigin::from_real_remote_headers(&headers(&[("X-Https", "on")])).is_none()
+        );
         assert!(ForwardedOrigin::from_real_remote_headers(&HeaderMap::new()).is_none());
     }
 }

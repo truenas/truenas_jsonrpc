@@ -50,12 +50,20 @@ pub struct JsonRpcError {
 impl JsonRpcError {
     /// Build from a known [`ErrorCode`].
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        Self { code: code.code(), message: message.into(), data: None }
+        Self {
+            code: code.code(),
+            message: message.into(),
+            data: None,
+        }
     }
 
     /// Build with an arbitrary integer code (custom server-error range).
     pub fn custom(code: i32, message: impl Into<String>) -> Self {
-        Self { code, message: message.into(), data: None }
+        Self {
+            code,
+            message: message.into(),
+            data: None,
+        }
     }
 
     /// Attach structured `data` to the error.

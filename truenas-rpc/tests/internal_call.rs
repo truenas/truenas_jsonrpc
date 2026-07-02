@@ -12,9 +12,9 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AsyncRpcMethod, AuditOutcome, CompiledFilters, CompiledOptions, FilterableRpcMethod,
-    Filtered, JsonRpcError, RpcMethod, JsonRpcProtocol, JsonRpcProtocolBuilder, RequestInfo,
-    MethodDef, NullOutbound, RequestCtx, Roles, Session, SubscriptionDef,
+    AsyncRpcMethod, AuditOutcome, CompiledFilters, CompiledOptions, FilterableRpcMethod, Filtered,
+    JsonRpcError, JsonRpcProtocol, JsonRpcProtocolBuilder, MethodDef, NullOutbound, RequestCtx,
+    RequestInfo, Roles, RpcMethod, Session, SubscriptionDef,
 };
 
 const OP_ADD: u32 = 2001; // sync
@@ -209,7 +209,11 @@ async fn call(proto: &JsonRpcProtocol<()>, s: &Arc<Session<()>>, method: &str) -
         "params": { "a": 2, "b": 40 },
     })
     .to_string();
-    let reply = proto.dispatch(wire.as_bytes(), s).await.into_bytes().unwrap();
+    let reply = proto
+        .dispatch(wire.as_bytes(), s)
+        .await
+        .into_bytes()
+        .unwrap();
     serde_json::from_slice(&reply).unwrap()
 }
 
@@ -227,12 +231,18 @@ async fn in_process_calls_succeed_sync_async_and_by_name() {
 async fn gate_applies_by_default_and_elevation_bypasses_it() {
     let proto = base().build();
     let s = session(&proto); // fresh session: no ADMIN role granted
-    // Caller-privileged: the guarded op's gate denies (fail-safe).
+                             // Caller-privileged: the guarded op's gate denies (fail-safe).
     let denied = call(&proto, &s, "drv_guarded").await;
-    assert_eq!(denied["error"]["code"], -32000, "caller-privileged call must be gated");
+    assert_eq!(
+        denied["error"]["code"], -32000,
+        "caller-privileged call must be gated"
+    );
     // Elevated: bypasses the gate and runs.
     let elevated = call(&proto, &s, "drv_guarded_elev").await;
-    assert_eq!(elevated["result"]["sum"], 42, "elevated call bypasses the gate");
+    assert_eq!(
+        elevated["result"]["sum"], 42,
+        "elevated call bypasses the gate"
+    );
     let elevated_named = call(&proto, &s, "drv_named_elev").await;
     assert_eq!(elevated_named["result"]["sum"], 42);
 }
@@ -241,8 +251,14 @@ async fn gate_applies_by_default_and_elevation_bypasses_it() {
 async fn unknown_not_callable_and_panicking_ops_error() {
     let proto = base().build();
     let s = session(&proto);
-    assert_eq!(call(&proto, &s, "drv_notfound").await["error"]["code"], -32601);
-    assert_eq!(call(&proto, &s, "drv_named_notfound").await["error"]["code"], -32601);
+    assert_eq!(
+        call(&proto, &s, "drv_notfound").await["error"]["code"],
+        -32601
+    );
+    assert_eq!(
+        call(&proto, &s, "drv_named_notfound").await["error"]["code"],
+        -32601
+    );
     assert_eq!(call(&proto, &s, "drv_filt").await["error"]["code"], -32603); // filterable
     assert_eq!(call(&proto, &s, "drv_sub").await["error"]["code"], -32603); // subscription
     assert_eq!(call(&proto, &s, "drv_boom").await["error"]["code"], -32603); // panic → internal
@@ -253,10 +269,16 @@ async fn scatter_gather_runs_blocking_ops_in_parallel() {
     let proto = base().build();
     let s = session(&proto);
     let t = Instant::now();
-    assert_eq!(call(&proto, &s, "drv_series").await["result"]["sum"], K as i64);
+    assert_eq!(
+        call(&proto, &s, "drv_series").await["result"]["sum"],
+        K as i64
+    );
     let series = t.elapsed();
     let t = Instant::now();
-    assert_eq!(call(&proto, &s, "drv_scatter").await["result"]["sum"], K as i64);
+    assert_eq!(
+        call(&proto, &s, "drv_scatter").await["result"]["sum"],
+        K as i64
+    );
     let scatter = t.elapsed();
     // K blocking sleeps: series ≈ K·SLEEP, scatter ≈ SLEEP (parallel on the blocking pool). Generous
     // bound to avoid flakiness — scatter must be at least ~2x faster.
@@ -272,12 +294,17 @@ async fn elevated_internal_calls_are_unaudited_by_default_but_logged_under_polic
     let hits = Arc::new(AtomicUsize::new(0));
     let h = hits.clone();
     let proto = base()
-        .audit_sink(move |_r: &RequestInfo, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            h.fetch_add(1, Ordering::SeqCst);
-        })
+        .audit_sink(
+            move |_r: &RequestInfo, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+                h.fetch_add(1, Ordering::SeqCst);
+            },
+        )
         .build(); // audit_internal_elevated defaults to OFF
     let s = session(&proto);
-    assert_eq!(call(&proto, &s, "drv_guarded_elev").await["result"]["sum"], 42);
+    assert_eq!(
+        call(&proto, &s, "drv_guarded_elev").await["result"]["sum"],
+        42
+    );
     assert_eq!(hits.load(Ordering::SeqCst), 0, "no audit churn by default");
 
     // Opt-in policy ON: one record per elevated internal call.
@@ -285,14 +312,27 @@ async fn elevated_internal_calls_are_unaudited_by_default_but_logged_under_polic
     let h = hits.clone();
     let proto = base()
         .audit_internal_elevated(true)
-        .audit_sink(move |_r: &RequestInfo, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            h.fetch_add(1, Ordering::SeqCst);
-        })
+        .audit_sink(
+            move |_r: &RequestInfo, _o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+                h.fetch_add(1, Ordering::SeqCst);
+            },
+        )
         .build();
     let s = session(&proto);
-    assert_eq!(call(&proto, &s, "drv_guarded_elev").await["result"]["sum"], 42);
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "exactly one record per elevated call under policy");
+    assert_eq!(
+        call(&proto, &s, "drv_guarded_elev").await["result"]["sum"],
+        42
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "exactly one record per elevated call under policy"
+    );
     // A *caller-privileged* internal call is never audited, even under the policy.
     let _ = call(&proto, &s, "drv_sync").await;
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "caller-privileged calls stay unaudited");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "caller-privileged calls stay unaudited"
+    );
 }

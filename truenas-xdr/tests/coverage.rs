@@ -36,8 +36,14 @@ fn remaining_scalar_arms() {
     assert_eq!(from_bytes::<Unit>(&[]).unwrap(), Unit);
     assert_eq!(to_bytes(&NewType(9)).unwrap(), [0, 0, 0, 9]); // newtype is transparent
     assert_eq!(from_bytes::<NewType>(&[0, 0, 0, 9]).unwrap(), NewType(9));
-    assert_eq!(to_bytes(&Pair(-1, true)).unwrap(), [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 1]);
-    assert_eq!(from_bytes::<Pair>(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 1]).unwrap(), Pair(-1, true));
+    assert_eq!(
+        to_bytes(&Pair(-1, true)).unwrap(),
+        [0xff, 0xff, 0xff, 0xff, 0, 0, 0, 1]
+    );
+    assert_eq!(
+        from_bytes::<Pair>(&[0xff, 0xff, 0xff, 0xff, 0, 0, 0, 1]).unwrap(),
+        Pair(-1, true)
+    );
 }
 
 #[test]
@@ -100,7 +106,10 @@ fn stock_enum_round_trips_by_variant_index() {
         Stock::Unit,
         Stock::New(5),
         Stock::Tup(-1, true),
-        Stock::Strukt { a: 1, b: "x".to_string() },
+        Stock::Strukt {
+            a: 1,
+            b: "x".to_string(),
+        },
     ] {
         let bytes = to_bytes(&v).unwrap();
         assert_eq!(from_bytes::<Stock>(&bytes).unwrap(), v);
@@ -108,7 +117,10 @@ fn stock_enum_round_trips_by_variant_index() {
     // The discriminant is the declaration index.
     assert_eq!(to_bytes(&Stock::Unit).unwrap(), [0, 0, 0, 0]);
     assert_eq!(to_bytes(&Stock::New(5)).unwrap(), [0, 0, 0, 1, 0, 0, 0, 5]);
-    assert_eq!(to_bytes(&Stock::Tup(7, false)).unwrap(), [0, 0, 0, 2, 0, 0, 0, 7, 0, 0, 0, 0]);
+    assert_eq!(
+        to_bytes(&Stock::Tup(7, false)).unwrap(),
+        [0, 0, 0, 2, 0, 0, 0, 7, 0, 0, 0, 0]
+    );
 }
 
 // --- unsupported constructs --------------------------------------------------
@@ -142,7 +154,10 @@ fn unknown_length_sequence_is_unsupported() {
 #[test]
 fn self_describing_decode_is_unsupported() {
     // deserialize_any
-    assert!(matches!(from_bytes::<serde_json::Value>(&[0, 0, 0, 0]), Err(XdrError::Unsupported(_))));
+    assert!(matches!(
+        from_bytes::<serde_json::Value>(&[0, 0, 0, 0]),
+        Err(XdrError::Unsupported(_))
+    ));
     // deserialize_ignored_any
     assert!(matches!(
         from_bytes::<serde::de::IgnoredAny>(&[0, 0, 0, 0]),
@@ -163,17 +178,32 @@ fn self_describing_decode_is_unsupported() {
 
 #[test]
 fn integer_range_errors() {
-    assert!(matches!(from_bytes::<i8>(&to_bytes(&200i32).unwrap()), Err(XdrError::Range)));
-    assert!(matches!(from_bytes::<i16>(&to_bytes(&70000i32).unwrap()), Err(XdrError::Range)));
-    assert!(matches!(from_bytes::<u16>(&to_bytes(&70000u32).unwrap()), Err(XdrError::Range)));
+    assert!(matches!(
+        from_bytes::<i8>(&to_bytes(&200i32).unwrap()),
+        Err(XdrError::Range)
+    ));
+    assert!(matches!(
+        from_bytes::<i16>(&to_bytes(&70000i32).unwrap()),
+        Err(XdrError::Range)
+    ));
+    assert!(matches!(
+        from_bytes::<u16>(&to_bytes(&70000u32).unwrap()),
+        Err(XdrError::Range)
+    ));
     // 0xD800 is a lone surrogate — not a valid char scalar value.
-    assert!(matches!(from_bytes::<char>(&[0, 0, 0xD8, 0x00]), Err(XdrError::Range)));
+    assert!(matches!(
+        from_bytes::<char>(&[0, 0, 0xD8, 0x00]),
+        Err(XdrError::Range)
+    ));
 }
 
 #[test]
 fn invalid_utf8_string_is_an_error() {
     // len 1 + a 0xff byte (invalid UTF-8) + 3 pad.
-    assert!(matches!(from_bytes::<String>(&[0, 0, 0, 1, 0xff, 0, 0, 0]), Err(XdrError::Utf8)));
+    assert!(matches!(
+        from_bytes::<String>(&[0, 0, 0, 1, 0xff, 0, 0, 0]),
+        Err(XdrError::Utf8)
+    ));
 }
 
 #[test]
@@ -196,7 +226,10 @@ fn strict_mode_rejects_nonzero_padding_and_embedded_nul() {
 
     // VarOpaque pad is checked the same way.
     let opaque_bad_pad = [0, 0, 0, 1, 0x41, 0xff, 0xff, 0xff];
-    assert_eq!(from_bytes::<VarOpaque>(&opaque_bad_pad).unwrap(), VarOpaque(vec![0x41]));
+    assert_eq!(
+        from_bytes::<VarOpaque>(&opaque_bad_pad).unwrap(),
+        VarOpaque(vec![0x41])
+    );
     assert!(from_bytes_with::<VarOpaque>(&opaque_bad_pad, Strictness::Strict).is_err());
 }
 
@@ -213,7 +246,10 @@ fn writer_errors_map_to_xdr_error() {
             Ok(())
         }
     }
-    assert!(matches!(to_writer(FailWriter, &1u32), Err(XdrError::Message(_))));
+    assert!(matches!(
+        to_writer(FailWriter, &1u32),
+        Err(XdrError::Message(_))
+    ));
 }
 
 // --- the serde Error impls + every XdrError Display arm ----------------------
@@ -234,6 +270,12 @@ fn error_display_and_custom() {
         assert!(!format!("{v}").is_empty());
     }
     // Both serde `Error::custom` impls.
-    assert!(matches!(<XdrError as serde::ser::Error>::custom("s"), XdrError::Message(_)));
-    assert!(matches!(<XdrError as serde::de::Error>::custom("d"), XdrError::Message(_)));
+    assert!(matches!(
+        <XdrError as serde::ser::Error>::custom("s"),
+        XdrError::Message(_)
+    ));
+    assert!(matches!(
+        <XdrError as serde::de::Error>::custom("d"),
+        XdrError::Message(_)
+    ));
 }

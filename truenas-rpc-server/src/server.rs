@@ -18,9 +18,9 @@ use truenas_rpc::{JsonRpcError, JsonRpcProtocol, SessionId};
 
 use crate::engine::{ConnContext, ProtocolEngine};
 use crate::framing::DEFAULT_LIMIT;
-use crate::peer::{self, Peer, UnixTrust};
 #[cfg(feature = "websocket")]
 use crate::peer::ForwardedOrigin;
+use crate::peer::{self, Peer, UnixTrust};
 use crate::wire::{NetworkWire, Wire, WireHost};
 
 /// Listen on an AF_UNIX socket. `mode` is applied to the socket file after bind (`None`
@@ -38,7 +38,10 @@ pub struct UnixConfig {
 impl UnixConfig {
     /// An AF_UNIX config for `path`, defaulting the socket mode to `0o660` (owner+group rw).
     pub fn new(path: impl Into<PathBuf>) -> Self {
-        UnixConfig { path: path.into(), mode: Some(0o660) }
+        UnixConfig {
+            path: path.into(),
+            mode: Some(0o660),
+        }
     }
 
     /// Override the post-bind socket file mode (`None` leaves the umask default).
@@ -208,7 +211,9 @@ pub struct TruenasRpcServer<S> {
 
 impl<S> Clone for TruenasRpcServer<S> {
     fn clone(&self) -> Self {
-        TruenasRpcServer { shared: self.shared.clone() }
+        TruenasRpcServer {
+            shared: self.shared.clone(),
+        }
     }
 }
 
@@ -318,7 +323,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
 
     /// The local address a bound TCP listener ended up on — convenience for binding port 0 in
     /// tests, then connecting. Binds, returns the address, and yields the listener for serving.
-    pub async fn bind_tcp(addr: impl ToSocketAddrs) -> std::io::Result<(TcpListener, std::net::SocketAddr)> {
+    pub async fn bind_tcp(
+        addr: impl ToSocketAddrs,
+    ) -> std::io::Result<(TcpListener, std::net::SocketAddr)> {
         let listener = TcpListener::bind(addr).await?;
         let local = listener.local_addr()?;
         Ok((listener, local))
@@ -377,7 +384,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     ) -> Result<(), JsonRpcError> {
         match self.shared.protocols.get(protocol) {
             Some(p) => p.send_notification(topic, payload),
-            None => Err(JsonRpcError::internal(format!("no protocol named {protocol:?}"))),
+            None => Err(JsonRpcError::internal(format!(
+                "no protocol named {protocol:?}"
+            ))),
         }
     }
 

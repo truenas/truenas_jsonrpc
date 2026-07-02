@@ -76,7 +76,13 @@ impl Transfer {
         ready: Vec<u8>,
         complete: Complete,
     ) -> Self {
-        Transfer { rid, direction, af_unix, ready, complete }
+        Transfer {
+            rid,
+            direction,
+            af_unix,
+            ready,
+            complete,
+        }
     }
 
     /// The request id this transfer is finishing.

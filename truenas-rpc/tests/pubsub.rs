@@ -8,9 +8,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome,
-    Dispatched, IdGen, JsonRpcError, RpcMethod, JsonRpcProtocol, RequestInfo, MethodDef,
-    NullOutbound, Outbound, RequestCtx, Roles, Session, SessionId, SubscriptionDef,
+    AuditOutcome, Dispatched, IdGen, JsonRpcError, JsonRpcProtocol, MethodDef, NullOutbound,
+    Outbound, RequestCtx, RequestInfo, Roles, RpcMethod, Session, SessionId, SubscriptionDef,
 };
 
 const SID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6"; // a subscribe-request id
@@ -30,7 +29,10 @@ struct Event {
 struct VecSink(Arc<Mutex<Vec<Value>>>);
 impl Outbound for VecSink {
     fn send(&self, message: Vec<u8>) {
-        self.0.lock().unwrap().push(serde_json::from_slice(&message).unwrap());
+        self.0
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&message).unwrap());
     }
 }
 fn sink() -> (Arc<dyn Outbound>, Arc<Mutex<Vec<Value>>>) {
@@ -67,18 +69,30 @@ async fn call<S: Send + Sync + 'static>(
     match proto.dispatch(wire, s).await {
         Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
         Dispatched::Nothing => panic!("expected a reply"),
-        Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => unreachable!("transfer/passthrough directive unexpected in this test"),
+        Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => {
+            unreachable!("transfer/passthrough directive unexpected in this test")
+        }
     }
 }
 
-async fn subscribe(proto: &JsonRpcProtocol<()>, s: &Arc<Session<()>>, topic: &str, id: &str) -> String {
+async fn subscribe(
+    proto: &JsonRpcProtocol<()>,
+    s: &Arc<Session<()>>,
+    topic: &str,
+    id: &str,
+) -> String {
     let r = call(proto, s, &req(topic, Some(json!({})), Some(id))).await;
-    r["result"].as_str().expect("subscribe acks with a sub-id string").to_string()
+    r["result"]
+        .as_str()
+        .expect("subscribe acks with a sub-id string")
+        .to_string()
 }
 
 fn events_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("t", "1")
-        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new("events")))
+        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new(
+            "events",
+        )))
         .unwrap()
         .build()
 }
@@ -88,7 +102,9 @@ fn events_proto() -> JsonRpcProtocol<()> {
 #[tokio::test]
 async fn subscribe_returns_pinned_id() {
     let proto = JsonRpcProtocol::<()>::builder("t", "1")
-        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new("events")))
+        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new(
+            "events",
+        )))
         .unwrap()
         .id_gen(FixedId(PINNED.parse().unwrap()))
         .build();
@@ -112,7 +128,9 @@ async fn subscribe_bad_params_is_invalid_params() {
     // A topic whose subscribe params require fields (reusing Event); `{}` is missing them,
     // so INVALID_PARAMS — and it precedes authorization.
     let proto = JsonRpcProtocol::<()>::builder("t", "1")
-        .subscription(SubscriptionDef::<Event, Event>::new(MethodDef::new("strict")))
+        .subscription(SubscriptionDef::<Event, Event>::new(MethodDef::new(
+            "strict",
+        )))
         .unwrap()
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
@@ -124,7 +142,9 @@ async fn subscribe_bad_params_is_invalid_params() {
 async fn subscribe_denied_by_authz_registers_nothing() {
     let proto = JsonRpcProtocol::<()>::builder("t", "1")
         .roles(Roles::new(["AUTH"]))
-        .subscription(SubscriptionDef::<NoArgs, Event>::new(MethodDef::new("events").roles(["AUTH"])))
+        .subscription(SubscriptionDef::<NoArgs, Event>::new(
+            MethodDef::new("events").roles(["AUTH"]),
+        ))
         .unwrap()
         .build();
     let (out, buf) = sink();
@@ -132,7 +152,15 @@ async fn subscribe_denied_by_authz_registers_nothing() {
     let r = call(&proto, &s, &req("events", Some(json!({})), Some(SID))).await;
     assert_eq!(r["error"]["code"], -32000);
     // Nothing was registered, so a publish reaches no one.
-    proto.send_notification("events", &Event { seq: 1, msg: "x".into() }).unwrap();
+    proto
+        .send_notification(
+            "events",
+            &Event {
+                seq: 1,
+                msg: "x".into(),
+            },
+        )
+        .unwrap();
     assert!(buf.lock().unwrap().is_empty());
 }
 
@@ -145,9 +173,16 @@ async fn subscribe_is_audited() {
             MethodDef::new("events").audit_message("subscribed"),
         ))
         .unwrap()
-        .audit_sink(move |r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
-            cap.lock().unwrap().push(json!({ "method": r.method, "msg": msg }));
-        })
+        .audit_sink(
+            move |r: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  msg: Option<&str>| {
+                cap.lock()
+                    .unwrap()
+                    .push(json!({ "method": r.method, "msg": msg }));
+            },
+        )
         .id_gen(FixedId(PINNED.parse().unwrap()))
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
@@ -170,7 +205,15 @@ async fn fan_out_to_each_subscriber() {
     subscribe(&proto, &s1, "events", SID).await;
     subscribe(&proto, &s2, "events", SID).await;
 
-    proto.send_notification("events", &Event { seq: 1, msg: "hi".into() }).unwrap();
+    proto
+        .send_notification(
+            "events",
+            &Event {
+                seq: 1,
+                msg: "hi".into(),
+            },
+        )
+        .unwrap();
     let want = json!({"jsonrpc": "2.0", "method": "events", "params": {"seq": 1, "msg": "hi"}});
     assert_eq!(*b1.lock().unwrap(), vec![want.clone()]);
     assert_eq!(*b2.lock().unwrap(), vec![want]);
@@ -180,25 +223,50 @@ async fn fan_out_to_each_subscriber() {
 async fn publish_no_subscribers_is_ok() {
     let proto = events_proto();
     // No subscribers registered → Ok, nothing delivered.
-    proto.send_notification("events", &Event { seq: 1, msg: "x".into() }).unwrap();
+    proto
+        .send_notification(
+            "events",
+            &Event {
+                seq: 1,
+                msg: "x".into(),
+            },
+        )
+        .unwrap();
 }
 
 #[tokio::test]
 async fn publish_unknown_topic_errors() {
     let proto = events_proto();
-    assert!(proto.send_notification("nope", &Event { seq: 1, msg: "x".into() }).is_err());
+    assert!(proto
+        .send_notification(
+            "nope",
+            &Event {
+                seq: 1,
+                msg: "x".into()
+            }
+        )
+        .is_err());
 }
 
 #[tokio::test]
 async fn publish_to_client_server_method_errors() {
     let proto = JsonRpcProtocol::<()>::builder("t", "1")
-        .method(RpcMethod::new(MethodDef::new("ping"), |_a: NoArgs, _c: &RequestCtx<()>| {
-            Ok::<Value, JsonRpcError>(json!(null))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("ping"),
+            |_a: NoArgs, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+        ))
         .unwrap()
         .build();
     // "ping" is a normal CLIENT_SERVER method, not a subscribable topic.
-    assert!(proto.send_notification("ping", &Event { seq: 1, msg: "x".into() }).is_err());
+    assert!(proto
+        .send_notification(
+            "ping",
+            &Event {
+                seq: 1,
+                msg: "x".into()
+            }
+        )
+        .is_err());
 }
 
 #[tokio::test]
@@ -209,7 +277,9 @@ async fn publish_invalid_payload_errors() {
     subscribe(&proto, &s, "events", SID).await;
     // Payload doesn't match the topic's `notifies` type (missing `seq`) → error, and nothing
     // is delivered (validation precedes fan-out).
-    assert!(proto.send_notification("events", &json!({ "msg": "x" })).is_err());
+    assert!(proto
+        .send_notification("events", &json!({ "msg": "x" }))
+        .is_err());
     assert!(buf.lock().unwrap().is_empty());
 }
 
@@ -239,10 +309,27 @@ async fn unsubscribe_via_cancel_stops_delivery() {
     let s = proto.new_session(Some(()), out);
     let sub_id = subscribe(&proto, &s, "events", SID).await;
 
-    let c = call(&proto, &s, &req("$/cancelRequest", Some(json!({ "target_id": sub_id })), Some(CID))).await;
+    let c = call(
+        &proto,
+        &s,
+        &req(
+            "$/cancelRequest",
+            Some(json!({ "target_id": sub_id })),
+            Some(CID),
+        ),
+    )
+    .await;
     assert_eq!(c["result"], json!(true));
 
-    proto.send_notification("events", &Event { seq: 1, msg: "x".into() }).unwrap();
+    proto
+        .send_notification(
+            "events",
+            &Event {
+                seq: 1,
+                msg: "x".into(),
+            },
+        )
+        .unwrap();
     assert!(buf.lock().unwrap().is_empty());
 }
 
@@ -255,11 +342,28 @@ async fn cancelling_another_sessions_subscription_is_denied() {
     let b = proto.new_session(Some(()), Arc::new(NullOutbound));
     let sub_id = subscribe(&proto, &a, "events", SID).await;
 
-    let c = call(&proto, &b, &req("$/cancelRequest", Some(json!({ "target_id": sub_id })), Some(CID))).await;
+    let c = call(
+        &proto,
+        &b,
+        &req(
+            "$/cancelRequest",
+            Some(json!({ "target_id": sub_id })),
+            Some(CID),
+        ),
+    )
+    .await;
     assert_eq!(c["error"]["code"], -32000);
 
     // A's subscription is still active → the publish is delivered to A.
-    proto.send_notification("events", &Event { seq: 7, msg: "still".into() }).unwrap();
+    proto
+        .send_notification(
+            "events",
+            &Event {
+                seq: 7,
+                msg: "still".into(),
+            },
+        )
+        .unwrap();
     assert_eq!(buf_a.lock().unwrap().len(), 1);
 }
 
@@ -287,7 +391,15 @@ async fn close_session_drops_only_that_sessions_subs() {
     proto.close_session(&s1);
     assert_eq!(s1.lifecycle(), SessionLifecycle::Closed);
 
-    proto.send_notification("events", &Event { seq: 1, msg: "x".into() }).unwrap();
+    proto
+        .send_notification(
+            "events",
+            &Event {
+                seq: 1,
+                msg: "x".into(),
+            },
+        )
+        .unwrap();
     assert!(b1.lock().unwrap().is_empty()); // s1's subs were dropped
     assert_eq!(b2.lock().unwrap().len(), 1); // s2 still subscribed
 }
@@ -308,12 +420,21 @@ async fn concurrent_subscribe_then_publish() {
         let (p, o) = (proto.clone(), out.clone());
         handles.push(tokio::spawn(async move {
             let s = p.new_session(Some(()), o);
-            p.dispatch(&req("events", Some(json!({})), Some(SID)), &s).await;
+            p.dispatch(&req("events", Some(json!({})), Some(SID)), &s)
+                .await;
         }));
     }
     for h in handles {
         h.await.unwrap();
     }
-    proto.send_notification("events", &Event { seq: 1, msg: "x".into() }).unwrap();
+    proto
+        .send_notification(
+            "events",
+            &Event {
+                seq: 1,
+                msg: "x".into(),
+            },
+        )
+        .unwrap();
     assert_eq!(buf.lock().unwrap().len(), n);
 }

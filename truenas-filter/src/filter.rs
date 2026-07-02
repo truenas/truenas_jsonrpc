@@ -57,7 +57,11 @@ fn parse_op(s: &str) -> Result<(Op, bool), FilterError> {
         "!^" => Op::Nsw,
         "$" => Op::Ew,
         "!$" => Op::New,
-        _ => return Err(FilterError::Compile(format!("filter_list: unknown operator '{bare}'"))),
+        _ => {
+            return Err(FilterError::Compile(format!(
+                "filter_list: unknown operator '{bare}'"
+            )))
+        }
     };
     Ok((op, ci))
 }
@@ -145,7 +149,9 @@ fn compile_node(f: &Value, depth: usize) -> Result<Node, FilterError> {
             }
             Ok(Node::Or(children))
         }
-        n => Err(FilterError::Compile(format!("filter_list: invalid filter length {n}"))),
+        n => Err(FilterError::Compile(format!(
+            "filter_list: invalid filter length {n}"
+        ))),
     }
 }
 
@@ -186,7 +192,13 @@ fn compile_simple(arr: &[Value]) -> Result<Node, FilterError> {
         None
     };
 
-    Ok(Node::Simple(Simple { parts, op, ci, value, value_ci }))
+    Ok(Node::Simple(Simple {
+        parts,
+        op,
+        ci,
+        value,
+        value_ci,
+    }))
 }
 
 /// A compile-time casefold failure is a syntax error, not a runtime one — rewrap the
@@ -367,10 +379,18 @@ mod tests {
     #[test]
     fn eval_branch_edges() {
         // named field on a list → no match
-        assert!(!matches_all(&json!({"a": [1, 2]}), &one(json!(["a.x", "=", 1])).unwrap()).unwrap());
+        assert!(
+            !matches_all(&json!({"a": [1, 2]}), &one(json!(["a.x", "=", 1])).unwrap()).unwrap()
+        );
         // rin / rnin with a null source → false
-        assert!(!matches_all(&json!({"a": null}), &one(json!(["a", "rin", "x"])).unwrap()).unwrap());
-        assert!(!matches_all(&json!({"a": null}), &one(json!(["a", "rnin", "x"])).unwrap()).unwrap());
+        assert!(
+            !matches_all(&json!({"a": null}), &one(json!(["a", "rin", "x"])).unwrap()).unwrap()
+        );
+        assert!(!matches_all(
+            &json!({"a": null}),
+            &one(json!(["a", "rnin", "x"])).unwrap()
+        )
+        .unwrap());
     }
 
     #[test]
@@ -396,8 +416,13 @@ mod tests {
         for _ in 0..70 {
             node = Node::Or(vec![node]);
         }
-        let cf = CompiledFilters { filters: vec![node] };
-        assert!(matches!(matches_all(&json!({"x": 1}), &cf), Err(FilterError::Eval(_))));
+        let cf = CompiledFilters {
+            filters: vec![node],
+        };
+        assert!(matches!(
+            matches_all(&json!({"x": 1}), &cf),
+            Err(FilterError::Eval(_))
+        ));
     }
 
     #[test]

@@ -83,8 +83,8 @@ impl Mechanism for ScramClient {
         // The server returns `r=` as base64(raw-client-nonce ++ raw-server-nonce), so it echoes our
         // nonce in the first 32 raw bytes; use its combined value verbatim in the AuthMessage.
         let (combined, salt_b64, iters) = parse_server_first(server_first)?;
-        let salt =
-            decode_block(&salt_b64).map_err(|e| ClientError::Auth(format!("bad SCRAM salt: {e}")))?;
+        let salt = decode_block(&salt_b64)
+            .map_err(|e| ClientError::Auth(format!("bad SCRAM salt: {e}")))?;
 
         // c= is base64(GS2-header + channel-binding); this is what binds the exchange to the channel.
         let mut cbind = GS2.as_bytes().to_vec();
@@ -124,7 +124,9 @@ impl Mechanism for ScramClient {
         if got.len() == expected.len() && openssl::memcmp::eq(got.as_bytes(), expected.as_bytes()) {
             Ok(())
         } else {
-            Err(ClientError::Auth("server signature mismatch (mutual auth failed)".into()))
+            Err(ClientError::Auth(
+                "server signature mismatch (mutual auth failed)".into(),
+            ))
         }
     }
 }
@@ -143,7 +145,9 @@ fn parse_server_first(msg: &str) -> Result<(String, String, u32), ClientError> {
     }
     match (r, s, i) {
         (Some(r), Some(s), Some(i)) if i > 0 => Ok((r, s, i)),
-        _ => Err(ClientError::Auth(format!("malformed SCRAM server-first: {msg:?}"))),
+        _ => Err(ClientError::Auth(format!(
+            "malformed SCRAM server-first: {msg:?}"
+        ))),
     }
 }
 
@@ -157,8 +161,14 @@ fn escape(username: &str) -> String {
 /// `Hi(key, salt, i)` = PBKDF2-HMAC-SHA512 → the 64-byte SaltedPassword.
 fn salted_password(key: &[u8], salt: &[u8], iterations: u32) -> [u8; 64] {
     let mut out = [0u8; 64];
-    pbkdf2_hmac(key, salt, iterations as usize, MessageDigest::sha512(), &mut out)
-        .expect("PBKDF2-HMAC-SHA512");
+    pbkdf2_hmac(
+        key,
+        salt,
+        iterations as usize,
+        MessageDigest::sha512(),
+        &mut out,
+    )
+    .expect("PBKDF2-HMAC-SHA512");
     out
 }
 
@@ -167,14 +177,22 @@ fn hmac_sha512(key: &[u8], data: &[u8]) -> [u8; 64] {
     let pkey = PKey::hmac(key).expect("HMAC key");
     let mut signer = Signer::new(MessageDigest::sha512(), &pkey).expect("HMAC signer");
     signer.update(data).expect("HMAC update");
-    signer.sign_to_vec().expect("HMAC sign").try_into().expect("64-byte HMAC")
+    signer
+        .sign_to_vec()
+        .expect("HMAC sign")
+        .try_into()
+        .expect("64-byte HMAC")
 }
 
 /// `H(data)` = SHA-512 → 64 bytes.
 fn sha512(data: &[u8]) -> [u8; 64] {
     let mut h = Hasher::new(MessageDigest::sha512()).expect("SHA-512 hasher");
     h.update(data).expect("SHA-512 update");
-    h.finish().expect("SHA-512 finish").as_ref().try_into().expect("64-byte digest")
+    h.finish()
+        .expect("SHA-512 finish")
+        .as_ref()
+        .try_into()
+        .expect("64-byte digest")
 }
 
 /// `a XOR b`, 64 bytes.
@@ -200,7 +218,10 @@ mod tests {
             "sljMczeiN9kEqyOIrjoQ1QiBhnrmL++DtRdeyv+DHmQkkzoypbkzHIVA1iM/NVviC50dVpDKKlD3L2pv9KDdfw==",
         )
         .unwrap();
-        assert_eq!(salted_password(key, salt, 500_000).as_slice(), expected.as_slice());
+        assert_eq!(
+            salted_password(key, salt, 500_000).as_slice(),
+            expected.as_slice()
+        );
     }
 
     #[test]
@@ -211,8 +232,11 @@ mod tests {
     /// A well-formed server-first for a fresh `ScramClient` (echoes its nonce, a valid salt + iters).
     fn drive(client: &mut ScramClient) {
         let _first = client.first().unwrap();
-        let server_first =
-            format!("r={}srv,s={},i=4096", client.nonce_b64, encode_block(b"some-salt-bytes"));
+        let server_first = format!(
+            "r={}srv,s={},i=4096",
+            client.nonce_b64,
+            encode_block(b"some-salt-bytes")
+        );
         client.respond(&json!({ "message": server_first })).unwrap();
     }
 
@@ -221,7 +245,9 @@ mod tests {
         let mut c = ScramClient::new("alice", b"key", b"binding");
         drive(&mut c);
         // A wrong server signature is a mutual-auth failure (the client refuses).
-        assert!(c.verify(Some(&json!({ "scram": "v=not-the-right-signature" }))).is_err());
+        assert!(c
+            .verify(Some(&json!({ "scram": "v=not-the-right-signature" })))
+            .is_err());
         // A success with no server-final at all is also refused.
         assert!(c.verify(None).is_err());
     }
@@ -231,7 +257,9 @@ mod tests {
         let mut c = ScramClient::new("alice", b"key", b"binding");
         let _ = c.first().unwrap();
         // Missing the iteration count → not a usable server-first.
-        assert!(c.respond(&json!({ "message": "r=abc,s=c2FsdA==" })).is_err());
+        assert!(c
+            .respond(&json!({ "message": "r=abc,s=c2FsdA==" }))
+            .is_err());
         // Missing the `message` field entirely.
         assert!(c.respond(&json!({})).is_err());
     }

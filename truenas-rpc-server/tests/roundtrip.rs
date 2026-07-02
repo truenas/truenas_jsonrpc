@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpStream, UnixStream};
-use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc::{JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RpcMethod};
 use truenas_rpc_server::{framing, JsonRpc, TruenasRpcServer, UnixConfig};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
@@ -47,7 +47,10 @@ where
 {
     let bytes = serde_json::to_vec(&req).unwrap();
     stream.write_all(&framing::frame(&bytes)).await.unwrap();
-    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT).await.unwrap().unwrap();
+    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT)
+        .await
+        .unwrap()
+        .unwrap();
     serde_json::from_slice(&reply).unwrap()
 }
 
@@ -96,7 +99,9 @@ async fn unix_round_trip() {
 #[tokio::test]
 async fn tcp_round_trip() {
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tcp_listener(listener, JsonRpc).await })
@@ -111,7 +116,9 @@ async fn tcp_round_trip() {
 #[tokio::test]
 async fn negotiate_errors() {
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tcp_listener(listener, JsonRpc).await })
@@ -119,13 +126,21 @@ async fn negotiate_errors() {
 
     // A method call before `$/negotiate` → "negotiate a protocol first".
     let mut c = TcpStream::connect(addr).await.unwrap();
-    let r = call(&mut c, json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":1,"b":2}})).await;
+    let r = call(
+        &mut c,
+        json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":1,"b":2}}),
+    )
+    .await;
     assert_eq!(r["error"]["code"], -32002); // SESSION_NOT_ESTABLISHED
     assert_eq!(r["id"], UUID);
 
     // An unknown protocol → REQUEST_FAILED, reporting the available names.
     let mut c = TcpStream::connect(addr).await.unwrap();
-    let r = call(&mut c, json!({"jsonrpc":"2.0","method":"$/negotiate","id":"x","params":{"protocol":"nope"}})).await;
+    let r = call(
+        &mut c,
+        json!({"jsonrpc":"2.0","method":"$/negotiate","id":"x","params":{"protocol":"nope"}}),
+    )
+    .await;
     assert_eq!(r["error"]["code"], -32803); // REQUEST_FAILED
     assert_eq!(r["error"]["data"]["available"], json!(["main"]));
 
@@ -136,15 +151,25 @@ async fn negotiate_errors() {
 async fn network_auth_guard() {
     // A protocol with no `$/sessionSetup`, on a server that has NOT opted out.
     let unauth = || {
-        TruenasRpcServer::<()>::builder("test-server").protocol("main", proto()).build()
+        TruenasRpcServer::<()>::builder("test-server")
+            .protocol("main", proto())
+            .build()
     };
 
     // (1) A network transport refuses it (an unauthenticated remote client must not reach gated
     //     methods) — the serve call returns immediately with InvalidInput, naming the protocol.
-    let (listener, _addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
-    let err = unauth().serve_tcp_listener(listener, JsonRpc).await.unwrap_err();
+    let (listener, _addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
+    let err = unauth()
+        .serve_tcp_listener(listener, JsonRpc)
+        .await
+        .unwrap_err();
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
-    assert!(err.to_string().contains("main"), "error should name the protocol: {err}");
+    assert!(
+        err.to_string().contains("main"),
+        "error should name the protocol: {err}"
+    );
 
     // (2) AF_UNIX is exempt — the same unauthenticated server serves fine over a unix socket.
     let path = std::env::temp_dir().join(format!("tnrpc-{}-guard.sock", std::process::id()));

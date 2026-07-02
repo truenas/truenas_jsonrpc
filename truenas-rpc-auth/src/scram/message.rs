@@ -109,10 +109,19 @@ pub(super) fn parse_client_final(s: &str) -> Option<ClientFinal> {
         }
     }
     let without_proof = s.get(..s.rfind(",p=")?)?.to_string();
-    Some(ClientFinal { cbind_b64: c?, nonce_b64: r?, proof_b64: p?, without_proof })
+    Some(ClientFinal {
+        cbind_b64: c?,
+        nonce_b64: r?,
+        proof_b64: p?,
+        without_proof,
+    })
 }
 
 /// `AuthMessage = client-first-bare "," server-first "," client-final-without-proof`.
-pub(super) fn auth_message(client_first_bare: &str, server_first: &str, client_final_without_proof: &str) -> String {
+pub(super) fn auth_message(
+    client_first_bare: &str,
+    server_first: &str,
+    client_final_without_proof: &str,
+) -> String {
     format!("{client_first_bare},{server_first},{client_final_without_proof}")
 }

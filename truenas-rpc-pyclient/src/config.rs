@@ -17,13 +17,17 @@ impl PyEndpoint {
     /// An AF_UNIX endpoint at `path`.
     #[staticmethod]
     pub fn unix(path: String) -> Self {
-        PyEndpoint { inner: Endpoint::unix(path) }
+        PyEndpoint {
+            inner: Endpoint::unix(path),
+        }
     }
 
     /// A TCP endpoint at `addr` (`host:port`).
     #[staticmethod]
     pub fn tcp(addr: String) -> Self {
-        PyEndpoint { inner: Endpoint::tcp(addr) }
+        PyEndpoint {
+            inner: Endpoint::tcp(addr),
+        }
     }
 
     fn __repr__(&self) -> String {
@@ -63,7 +67,10 @@ impl PyClientConfig {
     }
 
     fn __repr__(&self) -> String {
-        format!("ClientConfig(tcp_keepalive={:?}, limit={})", self.inner.tcp_keepalive, self.inner.limit)
+        format!(
+            "ClientConfig(tcp_keepalive={:?}, limit={})",
+            self.inner.tcp_keepalive, self.inner.limit
+        )
     }
 }
 

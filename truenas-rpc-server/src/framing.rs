@@ -105,8 +105,20 @@ mod tests {
         let mut buf = frame(b"{\"a\":1}");
         buf.extend_from_slice(&frame(b""));
         let mut r: &[u8] = &buf;
-        assert_eq!(read_message(&mut r, DEFAULT_LIMIT).await.unwrap().as_deref(), Some(&b"{\"a\":1}"[..]));
-        assert_eq!(read_message(&mut r, DEFAULT_LIMIT).await.unwrap().as_deref(), Some(&b""[..]));
+        assert_eq!(
+            read_message(&mut r, DEFAULT_LIMIT)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(&b"{\"a\":1}"[..])
+        );
+        assert_eq!(
+            read_message(&mut r, DEFAULT_LIMIT)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(&b""[..])
+        );
         assert_eq!(read_message(&mut r, DEFAULT_LIMIT).await.unwrap(), None); // clean EOF
     }
 

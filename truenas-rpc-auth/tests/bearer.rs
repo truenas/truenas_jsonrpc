@@ -23,7 +23,10 @@ struct Stub(Mutex<HashMap<String, (String, bool)>>);
 impl Stub {
     fn with(entries: &[(&str, &str, bool)]) -> Self {
         Stub(Mutex::new(
-            entries.iter().map(|(t, u, e)| (t.to_string(), (u.to_string(), *e))).collect(),
+            entries
+                .iter()
+                .map(|(t, u, e)| (t.to_string(), (u.to_string(), *e)))
+                .collect(),
         ))
     }
 }
@@ -68,7 +71,10 @@ fn server(source: Stub, registry: Roles) -> JsonRpcProtocol<AuthSession> {
 /// A secure (kTLS) channel — the only direct-TLS posture that may authenticate.
 fn tls_session(proto: &JsonRpcProtocol<AuthSession>) -> Arc<Session<AuthSession>> {
     let peer = Peer {
-        tls: Some(TlsPeer { peer_cert: None, channel_binding: None }),
+        tls: Some(TlsPeer {
+            peer_cert: None,
+            channel_binding: None,
+        }),
         posture: Some(TransportPosture::KernelTls),
         ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
     };
@@ -99,13 +105,19 @@ fn rtype(v: &Value) -> &str {
 #[tokio::test]
 async fn a_valid_bearer_token_authenticates_resolves_roles_and_is_consumed() {
     let registry = Roles::new(["ops"]);
-    let proto = server(Stub::with(&[("tok-alice", "alice", false)]), registry.clone());
+    let proto = server(
+        Stub::with(&[("tok-alice", "alice", false)]),
+        registry.clone(),
+    );
     let s = tls_session(&proto);
 
     let r = setup(&proto, &s, json!("tok-alice")).await;
     assert_eq!(rtype(&r), "SUCCESS", "{r}");
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
-    assert_eq!(r["result"]["response"]["session_id"].as_str().unwrap(), s.id().to_string());
+    assert_eq!(
+        r["result"]["response"]["session_id"].as_str().unwrap(),
+        s.id().to_string()
+    );
     assert_eq!(
         s.with_internal(|a| a.unwrap().identity().cloned()),
         Some(json!({ "username": "alice" }))
@@ -116,7 +128,10 @@ async fn a_valid_bearer_token_authenticates_resolves_roles_and_is_consumed() {
         let c = c.unwrap();
         (c.description.clone(), c.uid)
     });
-    assert_eq!(cred, ("GSSAPI_BEARER_TOKEN user=alice".to_string(), Some(1000)));
+    assert_eq!(
+        cred,
+        ("GSSAPI_BEARER_TOKEN user=alice".to_string(), Some(1000))
+    );
 
     // Replay: the token was consumed, so a fresh session presenting it again is rejected.
     let s2 = tls_session(&proto);
@@ -127,7 +142,10 @@ async fn a_valid_bearer_token_authenticates_resolves_roles_and_is_consumed() {
 
 #[tokio::test]
 async fn an_expired_bearer_token_is_rejected() {
-    let proto = server(Stub::with(&[("tok-old", "alice", true)]), Roles::new(["ops"]));
+    let proto = server(
+        Stub::with(&[("tok-old", "alice", true)]),
+        Roles::new(["ops"]),
+    );
     let s = tls_session(&proto);
     let r = setup(&proto, &s, json!("tok-old")).await;
     assert_eq!(rtype(&r), "EXPIRED", "{r}");
@@ -136,7 +154,10 @@ async fn an_expired_bearer_token_is_rejected() {
 
 #[tokio::test]
 async fn an_unknown_bearer_token_is_auth_err() {
-    let proto = server(Stub::with(&[("tok-alice", "alice", false)]), Roles::new(["ops"]));
+    let proto = server(
+        Stub::with(&[("tok-alice", "alice", false)]),
+        Roles::new(["ops"]),
+    );
     let s = tls_session(&proto);
     let r = setup(&proto, &s, json!("nope")).await;
     assert_eq!(rtype(&r), "AUTH_ERR");
@@ -145,7 +166,10 @@ async fn an_unknown_bearer_token_is_auth_err() {
 
 #[tokio::test]
 async fn a_missing_token_field_is_auth_err() {
-    let proto = server(Stub::with(&[("tok-alice", "alice", false)]), Roles::new(["ops"]));
+    let proto = server(
+        Stub::with(&[("tok-alice", "alice", false)]),
+        Roles::new(["ops"]),
+    );
     let s = tls_session(&proto);
     let r = setup(&proto, &s, Value::Null).await; // no "token" field
     assert_eq!(rtype(&r), "AUTH_ERR");
@@ -156,7 +180,10 @@ async fn a_missing_token_field_is_auth_err() {
 async fn a_postureless_connection_cannot_present_a_bearer_token() {
     // Plain TCP (no declared posture) is refused before the mechanism runs — a bearer secret may
     // only cross a confidential, posture-bearing channel.
-    let proto = server(Stub::with(&[("tok-alice", "alice", false)]), Roles::new(["ops"]));
+    let proto = server(
+        Stub::with(&[("tok-alice", "alice", false)]),
+        Roles::new(["ops"]),
+    );
     let s = proto.new_session(
         AuthSession::from_peer(&Peer::tcp("127.0.0.1:9000".parse().unwrap())),
         Arc::new(NullOutbound),

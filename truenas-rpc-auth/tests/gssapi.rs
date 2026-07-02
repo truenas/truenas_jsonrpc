@@ -24,14 +24,21 @@ fn server() -> JsonRpcProtocol<AuthSession> {
 
 fn tls_session(proto: &JsonRpcProtocol<AuthSession>) -> Arc<Session<AuthSession>> {
     let peer = Peer {
-        tls: Some(TlsPeer { peer_cert: None, channel_binding: None }),
+        tls: Some(TlsPeer {
+            peer_cert: None,
+            channel_binding: None,
+        }),
         posture: Some(TransportPosture::KernelTls),
         ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
     };
     proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))
 }
 
-async fn setup(proto: &JsonRpcProtocol<AuthSession>, s: &Arc<Session<AuthSession>>, token: Value) -> Value {
+async fn setup(
+    proto: &JsonRpcProtocol<AuthSession>,
+    s: &Arc<Session<AuthSession>>,
+    token: Value,
+) -> Value {
     let mut mechanism = json!({ "mechanism": "GSSAPI" });
     if !token.is_null() {
         mechanism["token"] = token;

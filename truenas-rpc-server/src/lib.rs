@@ -15,9 +15,9 @@
 //! I/O can't be unit-tested deterministically; it's covered behaviorally), so the core builds
 //! and tests without it.
 
-pub mod framing;
 mod connection;
 mod engine;
+pub mod framing;
 mod negotiate;
 mod oncrpc;
 mod peer;
@@ -35,7 +35,7 @@ pub use engine::{AsyncStream, ConnContext, ProtocolEngine};
 pub use oncrpc::OncRpc;
 pub use peer::{ForwardedOrigin, Peer, TlsPeer, Transport, TransportPosture, Ucred, UnixTrust};
 pub use server::{TruenasRpcServer, TruenasRpcServerBuilder, UnixConfig};
-pub use transfer::FileTransferExt;
-pub use wire::{CustomWire, JsonRpc, NetworkWire, Wire, WireHost};
 #[cfg(feature = "tls")]
 pub use tls::{TlsConfig, TlsMode};
+pub use transfer::FileTransferExt;
+pub use wire::{CustomWire, JsonRpc, NetworkWire, Wire, WireHost};

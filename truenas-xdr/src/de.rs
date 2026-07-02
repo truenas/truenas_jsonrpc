@@ -2,9 +2,7 @@
 //! every `deserialize_*` reads exactly the bytes its target type asks for). `deserialize_any`
 //! / `deserialize_ignored_any` / `deserialize_identifier` are unsupported (no self-description).
 
-use serde::de::{
-    DeserializeSeed, EnumAccess, IntoDeserializer, SeqAccess, VariantAccess, Visitor,
-};
+use serde::de::{DeserializeSeed, EnumAccess, IntoDeserializer, SeqAccess, VariantAccess, Visitor};
 use serde::Deserializer;
 
 use crate::{pad4, Strictness, XdrError};
@@ -22,7 +20,12 @@ pub struct XdrDeserializer<'de> {
 impl<'de> XdrDeserializer<'de> {
     /// Construct a deserializer over `input` with the given strictness.
     pub fn new(input: &'de [u8], mode: Strictness) -> Self {
-        Self { input, pos: 0, mode, fixed_pending: false }
+        Self {
+            input,
+            pos: 0,
+            mode,
+            fixed_pending: false,
+        }
     }
 
     /// The bytes not yet consumed (used by the `frame` module to slice params/results).
@@ -36,7 +39,9 @@ impl<'de> XdrDeserializer<'de> {
         // (untestable) overflow arm.
         let end = self.pos.saturating_add(n);
         if end > self.input.len() {
-            return Err(XdrError::Eof { need: end - self.input.len() });
+            return Err(XdrError::Eof {
+                need: end - self.input.len(),
+            });
         }
         let slice = &self.input[self.pos..end];
         self.pos = end;
@@ -49,7 +54,9 @@ impl<'de> XdrDeserializer<'de> {
     }
     fn read_u64(&mut self) -> Result<u64, XdrError> {
         let b = self.take(8)?;
-        Ok(u64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]))
+        Ok(u64::from_be_bytes([
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+        ]))
     }
 
     /// Consume the zero pad after a `len`-byte opaque/string field. In strict mode a
@@ -94,7 +101,9 @@ impl<'de> Deserializer<'de> for &mut XdrDeserializer<'de> {
     type Error = XdrError;
 
     fn deserialize_any<V: Visitor<'de>>(self, _v: V) -> Result<V::Value, XdrError> {
-        Err(XdrError::Unsupported("deserialize_any (XDR is not self-describing)"))
+        Err(XdrError::Unsupported(
+            "deserialize_any (XDR is not self-describing)",
+        ))
     }
     fn deserialize_ignored_any<V: Visitor<'de>>(self, v: V) -> Result<V::Value, XdrError> {
         self.deserialize_any(v)
@@ -190,7 +199,10 @@ impl<'de> Deserializer<'de> for &mut XdrDeserializer<'de> {
     }
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, XdrError> {
         let count = self.read_u32()? as usize;
-        visitor.visit_seq(SeqReader { de: self, remaining: count })
+        visitor.visit_seq(SeqReader {
+            de: self,
+            remaining: count,
+        })
     }
     fn deserialize_tuple<V: Visitor<'de>>(
         self,
@@ -202,7 +214,10 @@ impl<'de> Deserializer<'de> for &mut XdrDeserializer<'de> {
             let bytes = self.read_fixed(len)?;
             return visitor.visit_borrowed_bytes(bytes);
         }
-        visitor.visit_seq(SeqReader { de: self, remaining: len })
+        visitor.visit_seq(SeqReader {
+            de: self,
+            remaining: len,
+        })
     }
     fn deserialize_tuple_struct<V: Visitor<'de>>(
         self,
@@ -210,7 +225,10 @@ impl<'de> Deserializer<'de> for &mut XdrDeserializer<'de> {
         len: usize,
         visitor: V,
     ) -> Result<V::Value, XdrError> {
-        visitor.visit_seq(SeqReader { de: self, remaining: len })
+        visitor.visit_seq(SeqReader {
+            de: self,
+            remaining: len,
+        })
     }
     fn deserialize_map<V: Visitor<'de>>(self, _visitor: V) -> Result<V::Value, XdrError> {
         Err(XdrError::Unsupported("map"))
@@ -221,7 +239,10 @@ impl<'de> Deserializer<'de> for &mut XdrDeserializer<'de> {
         fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, XdrError> {
-        visitor.visit_seq(SeqReader { de: self, remaining: fields.len() })
+        visitor.visit_seq(SeqReader {
+            de: self,
+            remaining: fields.len(),
+        })
     }
     fn deserialize_enum<V: Visitor<'de>>(
         self,
@@ -230,7 +251,10 @@ impl<'de> Deserializer<'de> for &mut XdrDeserializer<'de> {
         visitor: V,
     ) -> Result<V::Value, XdrError> {
         let tag = self.read_u32()?;
-        visitor.visit_enum(EnumReader { de: self, variant_index: tag })
+        visitor.visit_enum(EnumReader {
+            de: self,
+            variant_index: tag,
+        })
     }
 
     fn is_human_readable(&self) -> bool {
@@ -286,18 +310,20 @@ impl<'de> VariantAccess<'de> for EnumReader<'_, 'de> {
     fn newtype_variant_seed<T: DeserializeSeed<'de>>(self, seed: T) -> Result<T::Value, XdrError> {
         seed.deserialize(&mut *self.de)
     }
-    fn tuple_variant<V: Visitor<'de>>(
-        self,
-        len: usize,
-        visitor: V,
-    ) -> Result<V::Value, XdrError> {
-        visitor.visit_seq(SeqReader { de: self.de, remaining: len })
+    fn tuple_variant<V: Visitor<'de>>(self, len: usize, visitor: V) -> Result<V::Value, XdrError> {
+        visitor.visit_seq(SeqReader {
+            de: self.de,
+            remaining: len,
+        })
     }
     fn struct_variant<V: Visitor<'de>>(
         self,
         fields: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, XdrError> {
-        visitor.visit_seq(SeqReader { de: self.de, remaining: fields.len() })
+        visitor.visit_seq(SeqReader {
+            de: self.de,
+            remaining: fields.len(),
+        })
     }
 }

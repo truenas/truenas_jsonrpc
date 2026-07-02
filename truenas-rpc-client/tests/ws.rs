@@ -36,7 +36,10 @@ fn server() -> TruenasRpcServer<()> {
 
 async fn add(client: &JsonRpcClient, a: i64, b: i64) -> i64 {
     let bytes = client
-        .call(&JsonRpcMethod::Name("math.add".into()), &serde_json::to_vec(&AddArgs { a, b }).unwrap())
+        .call(
+            &JsonRpcMethod::Name("math.add".into()),
+            &serde_json::to_vec(&AddArgs { a, b }).unwrap(),
+        )
         .await
         .unwrap();
     serde_json::from_slice::<AddResult>(&bytes).unwrap().sum
@@ -45,7 +48,9 @@ async fn add(client: &JsonRpcClient, a: i64, b: i64) -> i64 {
 #[tokio::test]
 async fn ws_round_trip_and_transfer_refused() {
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = tokio::spawn(async move { srv.serve_websocket_listener(listener).await });
 
     let (client, neg, _notifs) = JsonRpcClient::connect_negotiate(
@@ -56,16 +61,24 @@ async fn ws_round_trip_and_transfer_refused() {
     .await
     .unwrap();
     assert_eq!(neg.protocol, "main");
-    assert!(client.channel_binding().is_none(), "plain ws has no TLS channel binding");
+    assert!(
+        client.channel_binding().is_none(),
+        "plain ws has no TLS channel binding"
+    );
     assert_eq!(add(&client, 2, 40).await, 42);
 
     // A raw-fd transfer is refused over WebSocket — no plaintext fd to lend. The client bails before
     // sending anything, so the callback never runs.
     let err = client
-        .transfer(&JsonRpcMethod::Name("x.download".into()), b"{}", |_ht| Ok(()))
+        .transfer(&JsonRpcMethod::Name("x.download".into()), b"{}", |_ht| {
+            Ok(())
+        })
         .await
         .unwrap_err();
-    assert!(matches!(err, ClientError::NoTransfer), "expected NoTransfer, got {err:?}");
+    assert!(
+        matches!(err, ClientError::NoTransfer),
+        "expected NoTransfer, got {err:?}"
+    );
 
     task.abort();
 }
@@ -79,14 +92,23 @@ async fn ws_over_unix_round_trip() {
     let srv = server();
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     // The `nginx -> ws-over-unix` path: a trusted-local AF_UNIX WebSocket listener.
-    let task = tokio::spawn(async move { srv.serve_websocket_unix_listener(listener, UnixTrust::Local).await });
-
-    let (client, neg, _notifs) =
-        JsonRpcClient::connect_negotiate(&Endpoint::ws_unix(path.clone()), "main", ClientConfig::default())
+    let task = tokio::spawn(async move {
+        srv.serve_websocket_unix_listener(listener, UnixTrust::Local)
             .await
-            .unwrap();
+    });
+
+    let (client, neg, _notifs) = JsonRpcClient::connect_negotiate(
+        &Endpoint::ws_unix(path.clone()),
+        "main",
+        ClientConfig::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(neg.protocol, "main");
-    assert!(client.channel_binding().is_none(), "ws-over-unix has no TLS channel binding");
+    assert!(
+        client.channel_binding().is_none(),
+        "ws-over-unix has no TLS channel binding"
+    );
     assert_eq!(add(&client, 20, 22).await, 42);
 
     task.abort();
@@ -103,7 +125,9 @@ async fn wss_round_trip() {
     // `wss` is always userspace TLS on the server (the WebSocket library owns the stream).
     let tls = TlsConfig::from_pem(&cert, &key, TlsMode::Userspace).unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = tokio::spawn(async move { srv.serve_wss_listener(listener, tls).await });
 
     let (client, neg, _notifs) = JsonRpcClient::connect_negotiate(
@@ -147,8 +171,13 @@ fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
     b.set_subject_name(&name).unwrap();
     b.set_issuer_name(&name).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     b.sign(&key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }

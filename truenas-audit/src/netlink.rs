@@ -44,8 +44,13 @@ impl AuditSocket {
     pub(crate) fn open() -> io::Result<AuditSocket> {
         // SAFETY: socket(2) with constant args; returns a fresh fd or -1 (errno set).
         #[allow(unsafe_code)]
-        let raw =
-            unsafe { libc::socket(libc::PF_NETLINK, libc::SOCK_RAW | libc::SOCK_CLOEXEC, NETLINK_AUDIT) };
+        let raw = unsafe {
+            libc::socket(
+                libc::PF_NETLINK,
+                libc::SOCK_RAW | libc::SOCK_CLOEXEC,
+                NETLINK_AUDIT,
+            )
+        };
         if raw < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -67,7 +72,10 @@ impl AuditSocket {
         // libaudit sends `strlen(msg)+1` — the payload is NUL-terminated.
         let payload_len = msg.len() + 1;
         if NLMSG_HDRLEN + payload_len > MAX_AUDIT_MESSAGE_LENGTH {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "audit record exceeds 8970 bytes"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "audit record exceeds 8970 bytes",
+            ));
         }
         self.seq = self.seq.wrapping_add(1).max(1); // never 0
 
@@ -109,7 +117,11 @@ impl AuditSocket {
     /// promptly, so this is only a safety net) is treated as delivered rather than wedging the
     /// drain thread.
     fn read_ack(&self) -> io::Result<SendStatus> {
-        let mut pfd = libc::pollfd { fd: self.fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let mut pfd = libc::pollfd {
+            fd: self.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
         // SAFETY: poll(2) with one valid pollfd for 1s; writes only `revents`.
         #[allow(unsafe_code)]
         let pr = unsafe { libc::poll(&mut pfd, 1, 1000) };

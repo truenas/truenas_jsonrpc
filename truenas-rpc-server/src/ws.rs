@@ -23,7 +23,7 @@ use truenas_rpc::{Dispatched, ErrorCode};
 
 use crate::connection::{self, BoundConn};
 use crate::peer::{self, Peer, UnixTrust};
-use crate::server::{TruenasRpcServer, ServerShared};
+use crate::server::{ServerShared, TruenasRpcServer};
 
 impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// Accept WebSocket connections on a bound TCP `listener` until an accept error occurs. A
@@ -35,7 +35,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
             let _ = tcp.set_nodelay(true);
             let shared = self.shared.clone();
             tokio::spawn(async move {
-                let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else { return };
+                let Ok(ws) = tokio_tungstenite::accept_async(tcp).await else {
+                    return;
+                };
                 serve_ws(ws, Peer::tcp(addr), shared).await;
             });
         }
@@ -75,21 +77,25 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
                 // the proxy's). Otherwise the plain handshake — no headers are read/trusted.
                 let ws = if trust == UnixTrust::Proxied && shared.forwarded_extractor.is_some() {
                     let mut headers: Option<HeaderMap> = None;
-                    let capture = |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
-                        headers = Some(req.headers().clone());
-                        Ok(resp)
-                    };
+                    let capture =
+                        |req: &Request, resp: Response| -> Result<Response, ErrorResponse> {
+                            headers = Some(req.headers().clone());
+                            Ok(resp)
+                        };
                     let Ok(ws) = tokio_tungstenite::accept_hdr_async(stream, capture).await else {
                         return;
                     };
-                    if let (Some(h), Some(extract)) = (headers, shared.forwarded_extractor.as_ref()) {
+                    if let (Some(h), Some(extract)) = (headers, shared.forwarded_extractor.as_ref())
+                    {
                         if let Some(fwd) = extract(&peer, &h) {
                             peer = peer.with_forwarded(fwd);
                         }
                     }
                     ws
                 } else {
-                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+                    let Ok(ws) = tokio_tungstenite::accept_async(stream).await else {
+                        return;
+                    };
                     ws
                 };
                 serve_ws(ws, peer, shared).await;
@@ -122,7 +128,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
                 };
                 // Surface the verified client cert + channel binding before the WS handshake consumes the stream.
                 let (cert, binding) = crate::tls::tls_facts(tls_stream.ssl());
-                let Ok(ws) = tokio_tungstenite::accept_async(tls_stream).await else { return };
+                let Ok(ws) = tokio_tungstenite::accept_async(tls_stream).await else {
+                    return;
+                };
                 serve_ws(ws, crate::tls::tls_peer(addr, cert, binding, None), shared).await;
             });
         }
@@ -202,7 +210,9 @@ where
                                 takeover.request_id(),
                                 ErrorCode::RequestFailed.code(),
                                 "Request failed",
-                                Some(json!("passthrough authentication is not supported over WebSocket")),
+                                Some(json!(
+                                    "passthrough authentication is not supported over WebSocket"
+                                )),
                             ));
                         }
                         // `$/sessions` has no fd dependency, so WebSocket fulfills it like the

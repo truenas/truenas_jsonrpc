@@ -78,10 +78,15 @@ pub(crate) enum Encode<'a> {
 impl Encode<'_> {
     /// Serialize `value` as the framed reply (or, for [`Encode::XdrBody`], the bare result body),
     /// appended to `out`. The run-side half of the seam.
-    fn write_result<R: ?Sized + Serialize>(self, value: &R, out: &mut Vec<u8>) -> Result<(), JsonRpcError> {
+    fn write_result<R: ?Sized + Serialize>(
+        self,
+        value: &R,
+        out: &mut Vec<u8>,
+    ) -> Result<(), JsonRpcError> {
         match self {
-            Encode::Json(id) => crate::envelope::success_into(out, id, value)
-                .map_err(|e| JsonRpcError::new(ErrorCode::InternalError, format!("Invalid result: {e}"))),
+            Encode::Json(id) => crate::envelope::success_into(out, id, value).map_err(|e| {
+                JsonRpcError::new(ErrorCode::InternalError, format!("Invalid result: {e}"))
+            }),
             Encode::Xdr(rid) => truenas_xdr::frame::build_reply_ok_into(out, rid, value)
                 .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}"))),
             Encode::XdrBody => truenas_xdr::to_writer(&mut *out, value)
@@ -105,8 +110,8 @@ where
     match params {
         WireParams::Json(p) => Ok((Box::new(decode_params::<A>(p)?), Value::Null)),
         WireParams::Xdr(b) => {
-            let accepts: A =
-                truenas_xdr::from_bytes(b).map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+            let accepts: A = truenas_xdr::from_bytes(b)
+                .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
             let value = if want_value {
                 serde_json::to_value(&accepts).unwrap_or(Value::Null)
             } else {
@@ -332,7 +337,12 @@ where
     S: Send + Sync + 'static,
     A: DeserializeOwned + Serialize + Send + 'static,
     E: Serialize + 'static,
-    F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
+    F: Fn(
+            A,
+            &RequestCtx<S>,
+            &CompiledFilters,
+            &CompiledOptions,
+        ) -> Result<Filtered<E>, JsonRpcError>
         + Send
         + Sync,
 {
@@ -412,7 +422,9 @@ where
         _decoded: Box<dyn Any + Send>,
         _cx: &RequestCtx<S>,
     ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
-        Err(JsonRpcError::internal("filterable methods are not internally callable"))
+        Err(JsonRpcError::internal(
+            "filterable methods are not internally callable",
+        ))
     }
 }
 
@@ -529,7 +541,9 @@ where
         decoded: &(dyn Any + Send),
         cx: &RequestCtx<S>,
     ) -> Result<Box<RawValue>, JsonRpcError> {
-        let accepts = decoded.downcast_ref::<A>().expect("decoded params type matches the method");
+        let accepts = decoded
+            .downcast_ref::<A>()
+            .expect("decoded params type matches the method");
         let interim = (self.negotiate)(accepts, cx)?;
         encode_result(&interim)
     }
@@ -538,7 +552,9 @@ where
         decoded: Box<dyn Any + Send>,
         ft: &dyn FileTransfer,
     ) -> Result<Box<RawValue>, JsonRpcError> {
-        let accepts = *decoded.downcast::<A>().expect("decoded params type matches the method");
+        let accepts = *decoded
+            .downcast::<A>()
+            .expect("decoded params type matches the method");
         let result = (self.transfer)(accepts, ft)?;
         encode_result(&result)
     }
@@ -724,7 +740,10 @@ impl<S> Method<S> {
     /// A python-backed method: carries only the method's flags (name/audit/roles/
     /// secret_fields); the body runs via the [`crate::PyDispatcher`] seam.
     pub(crate) fn python(def: MethodDef) -> Self {
-        Method { meta: def.into_meta(MessageDirection::ClientServer), imp: MethodImpl::Python }
+        Method {
+            meta: def.into_meta(MessageDirection::ClientServer),
+            imp: MethodImpl::Python,
+        }
     }
 }
 
@@ -750,7 +769,10 @@ impl<F> RpcMethod<F> {
     {
         Method {
             meta: self.def.into_meta(MessageDirection::ClientServer),
-            imp: MethodImpl::Sync(Box::new(ClosureSync { f: self.handler, _p: PhantomData })),
+            imp: MethodImpl::Sync(Box::new(ClosureSync {
+                f: self.handler,
+                _p: PhantomData,
+            })),
         }
     }
 }
@@ -778,7 +800,10 @@ impl<F> AsyncRpcMethod<F> {
     {
         Method {
             meta: self.def.into_meta(MessageDirection::ClientServer),
-            imp: MethodImpl::Async(Box::new(ClosureAsync { f: self.handler, _p: PhantomData })),
+            imp: MethodImpl::Async(Box::new(ClosureAsync {
+                f: self.handler,
+                _p: PhantomData,
+            })),
         }
     }
 }
@@ -796,7 +821,10 @@ impl<A, N> SubscriptionDef<A, N> {
     /// Begin a subscribable topic from a [`MethodDef`]. `A` is the subscribe-request param
     /// type, `N` the published-notification payload type.
     pub fn new(def: MethodDef) -> Self {
-        Self { def, _p: PhantomData }
+        Self {
+            def,
+            _p: PhantomData,
+        }
     }
 
     pub(crate) fn erase<S>(self) -> Method<S>
@@ -832,7 +860,11 @@ impl<A, E, F> FilterableRpcMethod<A, E, F> {
     /// Pair a [`MethodDef`] with a filterable handler. The handler is
     /// `Fn(Accepts, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered, JsonRpcError>`.
     pub fn new(def: MethodDef, handler: F) -> Self {
-        Self { def, handler, _p: PhantomData }
+        Self {
+            def,
+            handler,
+            _p: PhantomData,
+        }
     }
 
     pub(crate) fn erase<S>(self) -> Method<S>
@@ -840,7 +872,12 @@ impl<A, E, F> FilterableRpcMethod<A, E, F> {
         S: Send + Sync + 'static,
         A: DeserializeOwned + Serialize + Send + 'static,
         E: Serialize + 'static,
-        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
+        F: Fn(
+                A,
+                &RequestCtx<S>,
+                &CompiledFilters,
+                &CompiledOptions,
+            ) -> Result<Filtered<E>, JsonRpcError>
             + Send
             + Sync
             + 'static,
@@ -882,7 +919,14 @@ impl<A, N, R, FN, FT> RpcFdTransferMethod<A, N, R, FN, FT> {
     /// Pair a [`MethodDef`] with a transfer `direction` and the `negotiate` / `transfer`
     /// callbacks.
     pub fn new(def: MethodDef, direction: TransferDirection, negotiate: FN, transfer: FT) -> Self {
-        Self { def, direction, negotiate, transfer, af_unix: false, _p: PhantomData }
+        Self {
+            def,
+            direction,
+            negotiate,
+            transfer,
+            af_unix: false,
+            _p: PhantomData,
+        }
     }
 
     pub(crate) fn erase<S>(self) -> Method<S>
@@ -968,13 +1012,21 @@ mod tests {
     fn encode_json_matches_two_step() {
         let value = (1i64, "x".to_string());
         let mut out = Vec::new();
-        Encode::Json(Some("id-1")).write_result(&value, &mut out).unwrap();
-        assert_eq!(out, crate::envelope::success(Some("id-1"), &encode_result(&value).unwrap()));
+        Encode::Json(Some("id-1"))
+            .write_result(&value, &mut out)
+            .unwrap();
+        assert_eq!(
+            out,
+            crate::envelope::success(Some("id-1"), &encode_result(&value).unwrap())
+        );
 
         // Notification id (None) → `"id":null`.
         let mut out2 = Vec::new();
         Encode::Json(None).write_result(&value, &mut out2).unwrap();
-        assert_eq!(out2, crate::envelope::success(None, &encode_result(&value).unwrap()));
+        assert_eq!(
+            out2,
+            crate::envelope::success(None, &encode_result(&value).unwrap())
+        );
     }
 
     #[test]
@@ -985,7 +1037,10 @@ mod tests {
         // Framed: envelope + result (the wire reply).
         let mut framed = Vec::new();
         Encode::Xdr(rid).write_result(&value, &mut framed).unwrap();
-        assert_eq!(framed, frame::build_reply_ok(rid, &truenas_xdr::to_bytes(&value).unwrap()).unwrap());
+        assert_eq!(
+            framed,
+            frame::build_reply_ok(rid, &truenas_xdr::to_bytes(&value).unwrap()).unwrap()
+        );
 
         // Bare body (the `run_proc` / op-table reuse path): just the XDR result, no envelope.
         let mut body = Vec::new();
@@ -1001,7 +1056,9 @@ mod tests {
         bad.insert(vec![1u8, 2], 3i32); // non-string map key → serde_json refuses
 
         let mut out = Vec::new();
-        let je = Encode::Json(Some("id")).write_result(&bad, &mut out).unwrap_err();
+        let je = Encode::Json(Some("id"))
+            .write_result(&bad, &mut out)
+            .unwrap_err();
         assert_eq!(je.code, ErrorCode::InternalError.code());
 
         let mut xb = Vec::new();

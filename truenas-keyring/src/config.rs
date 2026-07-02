@@ -81,7 +81,9 @@ impl KeyringConfig {
                 return Err(Error::Config("a subkeyring name is empty".into()));
             }
             if name.contains('\0') {
-                return Err(Error::Config(format!("subkeyring name {name:?} contains a NUL byte")));
+                return Err(Error::Config(format!(
+                    "subkeyring name {name:?} contains a NUL byte"
+                )));
             }
             if name == SERVER_KEYS || name == CLIENT_KEYS || name == SERVER_ROLES {
                 return Err(Error::Config(format!(

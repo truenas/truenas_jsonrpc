@@ -10,9 +10,8 @@ use serde::Deserialize;
 use serde_json::value::{to_raw_value, RawValue};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome,
-    Dispatched, FileTransfer, JsonRpcError, JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound,
-    Session, SessionLifecycle, SetupHandoff, SetupOutcome,
+    AuditOutcome, Dispatched, FileTransfer, JsonRpcError, JsonRpcProtocol, MethodDef, NullOutbound,
+    RequestInfo, Session, SessionLifecycle, SetupHandoff, SetupOutcome,
 };
 
 const RID: &str = "11111111-2222-3333-4444-555555555555";
@@ -40,11 +39,16 @@ fn proto(captured: Option<Captured>) -> JsonRpcProtocol<()> {
         |a: Args, _s: &Arc<Session<()>>| {
             Ok(match a.mode.as_str() {
                 // A takeover handler that finishes synchronously after all.
-                "commit" => SetupOutcome::Commit(SessionLifecycle::Established, json!({ "via": "commit" })),
+                "commit" => {
+                    SetupOutcome::Commit(SessionLifecycle::Established, json!({ "via": "commit" }))
+                }
                 // Hand off → authenticated (asserts it sees the server-supplied fd).
                 "ok" => SetupOutcome::Takeover(SetupHandoff::new(true, |ft: &dyn FileTransfer| {
                     assert_eq!(ft.as_raw_fd(), 42);
-                    Ok((SessionLifecycle::Established, raw(json!({ "ident": "alice" }))))
+                    Ok((
+                        SessionLifecycle::Established,
+                        raw(json!({ "ident": "alice" })),
+                    ))
                 })),
                 // Hand off → established but a null reply (no external identity), and no fd hand-off.
                 "null" => SetupOutcome::Takeover(SetupHandoff::new(false, |_ft| {
@@ -58,10 +62,19 @@ fn proto(captured: Option<Captured>) -> JsonRpcProtocol<()> {
         },
     );
     let b = match captured {
-        Some(cap) => b.audit_sink(move |r: &RequestInfo, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            let error = outcome.error().map(|e| json!({ "code": e.code, "message": e.message }));
-            cap.lock().unwrap().push(json!({ "params": r.params, "error": error }));
-        }),
+        Some(cap) => b.audit_sink(
+            move |r: &RequestInfo,
+                  outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                let error = outcome
+                    .error()
+                    .map(|e| json!({ "code": e.code, "message": e.message }));
+                cap.lock()
+                    .unwrap()
+                    .push(json!({ "params": r.params, "error": error }));
+            },
+        ),
         None => b,
     };
     b.build()
@@ -81,7 +94,11 @@ fn setup_req(mode: &str) -> Vec<u8> {
         .into_bytes()
 }
 
-async fn dispatch_takeover(proto: &JsonRpcProtocol<()>, s: &Arc<Session<()>>, mode: &str) -> truenas_rpc::SetupTakeover {
+async fn dispatch_takeover(
+    proto: &JsonRpcProtocol<()>,
+    s: &Arc<Session<()>>,
+    mode: &str,
+) -> truenas_rpc::SetupTakeover {
     match proto.dispatch(&setup_req(mode), s).await {
         Dispatched::Passthrough(t) => t,
         _ => panic!("expected a Dispatched::Passthrough directive"),
@@ -131,7 +148,11 @@ async fn takeover_error_leaves_the_session_unauthenticated() {
 async fn a_passthrough_directive_has_no_reply_bytes() {
     let proto = proto(None);
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    assert!(proto.dispatch(&setup_req("ok"), &s).await.into_bytes().is_none());
+    assert!(proto
+        .dispatch(&setup_req("ok"), &s)
+        .await
+        .into_bytes()
+        .is_none());
     // dropped without running → still uncommitted
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }
@@ -140,7 +161,11 @@ async fn a_passthrough_directive_has_no_reply_bytes() {
 async fn a_takeover_handler_may_commit_synchronously() {
     let proto = proto(None);
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let bytes = proto.dispatch(&setup_req("commit"), &s).await.into_bytes().unwrap();
+    let bytes = proto
+        .dispatch(&setup_req("commit"), &s)
+        .await
+        .into_bytes()
+        .unwrap();
     let reply: Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(reply["result"], json!({ "via": "commit" }));
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);

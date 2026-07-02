@@ -42,7 +42,11 @@ fn sock_path(tag: &str) -> PathBuf {
 }
 
 fn unix_channel(uid: u32) -> Channel {
-    Channel::from_peer(&Peer::unix(Some(Ucred { pid: 1000, uid, gid: uid })))
+    Channel::from_peer(&Peer::unix(Some(Ucred {
+        pid: 1000,
+        uid,
+        gid: uid,
+    })))
 }
 
 /// A kTLS peer — a secure direct-TLS posture with a passable plaintext fd.
@@ -56,7 +60,12 @@ fn ktls_peer() -> Peer {
 
 /// A reverse-proxied AF_UNIX peer — the nginx-over-unix case (peer-cred is the proxy's).
 fn proxied_unix_peer(uid: u32) -> Peer {
-    Peer::unix(Some(Ucred { pid: 1000, uid, gid: uid })).with_posture(TransportPosture::ProxiedUnix)
+    Peer::unix(Some(Ucred {
+        pid: 1000,
+        uid,
+        gid: uid,
+    }))
+    .with_posture(TransportPosture::ProxiedUnix)
 }
 
 // --- the broker wire, end to end ----------------------------------------------------------------
@@ -137,7 +146,8 @@ fn broker_denial_maps_to_reject() {
 fn passthrough_with_no_broker_is_auth_err() {
     let (conn_fd, _client_end) = UnixStream::pair().unwrap();
     let ctx = BrokerContext::from_channel(&unix_channel(0));
-    let (outcome, _) = Passthrough::new("/nonexistent/tn-broker.sock").handoff(conn_fd.as_raw_fd(), &ctx);
+    let (outcome, _) =
+        Passthrough::new("/nonexistent/tn-broker.sock").handoff(conn_fd.as_raw_fd(), &ctx);
     assert!(matches!(outcome, Outcome::Reject(RejectKind::AuthErr)));
 }
 
@@ -155,7 +165,9 @@ fn broker_context_from_channel_round_trips() {
     assert_eq!(unix, back);
 
     // A plain TCP channel: no peercred, not encrypted.
-    let tcp = BrokerContext::from_channel(&Channel::from_peer(&Peer::tcp("127.0.0.1:9000".parse().unwrap())));
+    let tcp = BrokerContext::from_channel(&Channel::from_peer(&Peer::tcp(
+        "127.0.0.1:9000".parse().unwrap(),
+    )));
     assert_eq!(tcp.transport, "tcp");
     assert!(tcp.peercred.is_none());
     assert!(!tcp.encrypted);
@@ -217,12 +229,23 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
     let stack = AuthStack::builder()
         .passthrough(path.clone())
         .roles(registry.clone())
-        .role_source(
-            |uid, mech| if (uid, mech) == (1000, "SCRAM") { vec!["vm_read".into()] } else { vec![] },
-        )
+        .role_source(|uid, mech| {
+            if (uid, mech) == (1000, "SCRAM") {
+                vec!["vm_read".into()]
+            } else {
+                vec![]
+            }
+        })
         .build();
     let proto = install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build();
-    let s = session(&proto, &Peer::unix(Some(Ucred { pid: 1, uid: 1000, gid: 1000 })));
+    let s = session(
+        &proto,
+        &Peer::unix(Some(Ucred {
+            pid: 1,
+            uid: 1000,
+            gid: 1000,
+        })),
+    );
 
     // dispatch → a passthrough takeover directive; nothing committed yet.
     let wire = serde_json::to_vec(&json!({
@@ -246,7 +269,10 @@ async fn passthrough_over_unix_takes_over_and_authenticates() {
     client_end.read_exact(&mut buf).unwrap();
     assert_eq!(&buf, b"hello-from-broker");
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
-    assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "uid": 1000 })));
+    assert_eq!(
+        s.with_internal(|a| a.unwrap().identity().cloned()),
+        Some(json!({ "uid": 1000 }))
+    );
     // Roles are resolved on the passthrough path too — from (uid 1000, broker mechanism `SCRAM`).
     assert_eq!(s.granted_roles(), registry.get("vm_read").unwrap());
 

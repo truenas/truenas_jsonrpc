@@ -54,7 +54,11 @@ fn xdr_enum_rejects_unknown_discriminant() {
 
 #[test]
 fn sctrl_union_matches_freebsd_golden() {
-    let grab = CtrlArg::Grab(GrabArg { number: 5, dir: Dir::Both, stamp: "hi".to_string() });
+    let grab = CtrlArg::Grab(GrabArg {
+        number: 5,
+        dir: Dir::Both,
+        stamp: "hi".to_string(),
+    });
     #[rustfmt::skip]
     let golden = [
         0,0,0,4,           // CtrlArg discriminant: grab = 4
@@ -72,10 +76,19 @@ fn sctrl_union_matches_freebsd_golden() {
 #[test]
 fn union_void_arm_is_tag_only() {
     assert_eq!(to_bytes(&CtrlArg::Reset).unwrap(), [0, 0, 0, 0]);
-    assert_eq!(from_bytes::<CtrlArg>(&[0, 0, 0, 0]).unwrap(), CtrlArg::Reset);
+    assert_eq!(
+        from_bytes::<CtrlArg>(&[0, 0, 0, 0]).unwrap(),
+        CtrlArg::Reset
+    );
     // A data arm with a single payload word.
-    assert_eq!(to_bytes(&CtrlArg::Record(7)).unwrap(), [0, 0, 0, 1, 0, 0, 0, 7]);
-    assert_eq!(from_bytes::<CtrlArg>(&[0, 0, 0, 1, 0, 0, 0, 7]).unwrap(), CtrlArg::Record(7));
+    assert_eq!(
+        to_bytes(&CtrlArg::Record(7)).unwrap(),
+        [0, 0, 0, 1, 0, 0, 0, 7]
+    );
+    assert_eq!(
+        from_bytes::<CtrlArg>(&[0, 0, 0, 1, 0, 0, 0, 7]).unwrap(),
+        CtrlArg::Record(7)
+    );
     assert_eq!(to_bytes(&CtrlArg::Pause).unwrap(), [0, 0, 0, 2]);
 }
 

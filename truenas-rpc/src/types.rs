@@ -48,7 +48,6 @@ pub struct RequestInfo {
     pub roles: Vec<String>,
 }
 
-
 /// Server identity for the `$/serverInfo` probe (LSP `serverInfo`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ServerInfo {

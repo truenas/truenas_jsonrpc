@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_rpc::{
-    JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx, RoleMask, Session,
+    JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RoleMask, RpcMethod, Session,
     SessionLifecycle,
 };
 use truenas_rpc_server::{framing, JsonRpc, TruenasRpcServer, UnixConfig};
@@ -20,19 +20,23 @@ struct Empty {}
 /// A protocol whose `$/sessionSetup` grants FULL_ADMIN, so this connection can call `$/sessions`.
 fn admin_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("admin", "1")
-        .session_setup(MethodDef::new("$/sessionSetup"), |_a: Empty, s: &Session<()>| {
-            s.set_roles(RoleMask::FULL_ADMIN);
-            Ok::<_, JsonRpcError>((SessionLifecycle::Established, json!({ "ok": true })))
-        })
+        .session_setup(
+            MethodDef::new("$/sessionSetup"),
+            |_a: Empty, s: &Session<()>| {
+                s.set_roles(RoleMask::FULL_ADMIN);
+                Ok::<_, JsonRpcError>((SessionLifecycle::Established, json!({ "ok": true })))
+            },
+        )
         .build()
 }
 
 /// A second, unrelated protocol — its connections just need to register a session.
 fn other_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("other", "1")
-        .method(RpcMethod::new(MethodDef::new("ping"), |_a: Empty, _c: &RequestCtx<()>| {
-            Ok::<_, JsonRpcError>(json!({ "pong": true }))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("ping"),
+            |_a: Empty, _c: &RequestCtx<()>| Ok::<_, JsonRpcError>(json!({ "pong": true })),
+        ))
         .unwrap()
         .build()
 }
@@ -48,7 +52,10 @@ fn server() -> TruenasRpcServer<()> {
 async fn call<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, req: Value) -> Value {
     let bytes = serde_json::to_vec(&req).unwrap();
     stream.write_all(&framing::frame(&bytes)).await.unwrap();
-    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT).await.unwrap().unwrap();
+    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT)
+        .await
+        .unwrap()
+        .unwrap();
     serde_json::from_slice(&reply).unwrap()
 }
 
@@ -62,7 +69,11 @@ async fn negotiate<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, proto: &st
 }
 
 async fn list_sessions<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S) -> Vec<Value> {
-    let resp = call(stream, json!({"jsonrpc":"2.0","method":"$/sessions","id":RID})).await;
+    let resp = call(
+        stream,
+        json!({"jsonrpc":"2.0","method":"$/sessions","id":RID}),
+    )
+    .await;
     assert_eq!(resp["id"], RID);
     resp["result"].as_array().expect("a sessions array").clone()
 }
@@ -83,25 +94,43 @@ async fn sessions_lists_every_protocol_server_wide() {
     // Connection 2: an admin on `admin` (setup → FULL_ADMIN).
     let mut admin = UnixStream::connect(&path).await.unwrap();
     negotiate(&mut admin, "admin").await;
-    let setup =
-        call(&mut admin, json!({"jsonrpc":"2.0","method":"$/sessionSetup","id":RID,"params":{}})).await;
+    let setup = call(
+        &mut admin,
+        json!({"jsonrpc":"2.0","method":"$/sessionSetup","id":RID,"params":{}}),
+    )
+    .await;
     assert_eq!(setup["result"]["ok"], true, "setup → FULL_ADMIN: {setup}");
 
     // `$/sessions` lists sessions from BOTH protocols.
     let list = list_sessions(&mut admin).await;
     assert_eq!(list.len(), 2, "one session per protocol: {list:?}");
-    let protocols: Vec<&str> = list.iter().map(|e| e["protocol"].as_str().unwrap()).collect();
-    assert!(protocols.contains(&"admin") && protocols.contains(&"other"), "got {protocols:?}");
+    let protocols: Vec<&str> = list
+        .iter()
+        .map(|e| e["protocol"].as_str().unwrap())
+        .collect();
+    assert!(
+        protocols.contains(&"admin") && protocols.contains(&"other"),
+        "got {protocols:?}"
+    );
 
     // The enriched default entry, populated server-side from the peer: both sessions arrived over
     // AF_UNIX, so each carries a peer-cred `origin` and a secure transport; `current` marks the
     // admin caller's own entry and only it.
     let admin_entry = list.iter().find(|e| e["protocol"] == "admin").unwrap();
     let other_entry = list.iter().find(|e| e["protocol"] == "other").unwrap();
-    assert!(admin_entry["origin"].as_str().unwrap().starts_with("unix:uid="), "got {admin_entry}");
+    assert!(
+        admin_entry["origin"]
+            .as_str()
+            .unwrap()
+            .starts_with("unix:uid="),
+        "got {admin_entry}"
+    );
     assert_eq!(admin_entry["secure_transport"], true);
     assert_eq!(other_entry["secure_transport"], true);
-    assert_eq!(admin_entry["current"], true, "the caller marks its own entry current");
+    assert_eq!(
+        admin_entry["current"], true,
+        "the caller marks its own entry current"
+    );
     assert_eq!(other_entry["current"], false);
 
     // Drop connection 1 → its session disappears from the listing.
@@ -126,7 +155,11 @@ async fn sessions_denied_for_non_admin() {
     // Negotiate `admin` but DON'T set up → no roles → `$/sessions` is Not authorized.
     let mut c = UnixStream::connect(&path).await.unwrap();
     negotiate(&mut c, "admin").await;
-    let denied = call(&mut c, json!({"jsonrpc":"2.0","method":"$/sessions","id":RID})).await;
+    let denied = call(
+        &mut c,
+        json!({"jsonrpc":"2.0","method":"$/sessions","id":RID}),
+    )
+    .await;
     assert_eq!(denied["error"]["message"], "Not authorized");
 
     handle.abort();

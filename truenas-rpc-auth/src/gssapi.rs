@@ -46,7 +46,10 @@ impl Gssapi {
     /// A GSSAPI acceptor over the host keytab, mapping principals with [`default_principal_map`]
     /// (strip the realm, reject service principals) and **not** enforcing channel binding.
     pub fn new() -> Self {
-        Self { principal_map: Box::new(default_principal_map), bind_channel: false }
+        Self {
+            principal_map: Box::new(default_principal_map),
+            bind_channel: false,
+        }
     }
 
     /// Override the principal→`(identity, authorization principal)` mapping (e.g. for cross-realm or
@@ -105,7 +108,11 @@ impl Mechanism for Gssapi {
             }
         };
 
-        let binding = if self.bind_channel { channel.channel_binding.as_deref() } else { None };
+        let binding = if self.bind_channel {
+            channel.channel_binding.as_deref()
+        } else {
+            None
+        };
         let out = match ctx.step(&token, binding) {
             Ok(out) => out,
             Err(_) => return Outcome::Reject(RejectKind::AuthErr), // bad/forged/expired token
@@ -121,7 +128,12 @@ impl Mechanism for Gssapi {
             };
             // A final (non-empty) token is the mutual-auth reply the client verifies.
             let extra = (!out.is_empty()).then(|| json!({ "token": encode_block(&out) }));
-            Outcome::Authenticated { identity, principal, user_info: None, extra }
+            Outcome::Authenticated {
+                identity,
+                principal,
+                user_info: None,
+                extra,
+            }
         } else {
             // Another round: hand the server's output token back as the challenge (empty → "").
             Outcome::Challenge {
@@ -129,7 +141,12 @@ impl Mechanism for Gssapi {
                     mechanism: GSSAPI_TAG.to_string(),
                     data: json!({ "token": encode_block(&out) }),
                 },
-                next: AuthProgress::new(GSSAPI_TAG, GssPending { ctx: Mutex::new(ctx) }),
+                next: AuthProgress::new(
+                    GSSAPI_TAG,
+                    GssPending {
+                        ctx: Mutex::new(ctx),
+                    },
+                ),
             }
         }
     }
@@ -146,7 +163,10 @@ pub fn default_principal_map(principal: &str) -> Option<(Identity, Principal)> {
     if user.is_empty() {
         return None;
     }
-    Some((json!({ "username": user, "principal": principal }), Principal::User(user.to_string())))
+    Some((
+        json!({ "username": user, "principal": principal }),
+        Principal::User(user.to_string()),
+    ))
 }
 
 impl AuthStackBuilder {

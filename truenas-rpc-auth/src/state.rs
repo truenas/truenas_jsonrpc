@@ -32,7 +32,10 @@ impl AuthSession {
     /// Build the per-connection state from the connected [`Peer`] — the `state_from_peer` hook.
     /// Always `Some` (an unauthenticated session over whatever channel the peer arrived on).
     pub fn from_peer(peer: &Peer) -> Option<Self> {
-        Some(Self { channel: Channel::from_peer(peer), state: AuthSessionState::Unauthenticated })
+        Some(Self {
+            channel: Channel::from_peer(peer),
+            state: AuthSessionState::Unauthenticated,
+        })
     }
 
     /// The authenticated identity, or `None` if not yet `Established`.

@@ -28,7 +28,10 @@ pub(crate) struct ConnFacts {
 impl ConnFacts {
     /// A plaintext byte-stream transport (AF_UNIX / plain TCP): transfer-capable, no channel binding.
     fn plaintext(fd: RawFd) -> Self {
-        ConnFacts { transfer_fd: Some(fd), channel_binding: None }
+        ConnFacts {
+            transfer_fd: Some(fd),
+            channel_binding: None,
+        }
     }
 }
 
@@ -62,36 +65,74 @@ pub(crate) async fn connect_endpoint(
         // blocking, so off the reactor), then run the whole connection over the raw kernel-encrypted
         // fd. Plaintext to us → transfer-capable (`Some(fd)`), and it carries the channel binding.
         #[cfg(feature = "tls")]
-        Endpoint::Tls { addr, server_name, tls } => {
+        Endpoint::Tls {
+            addr,
+            server_name,
+            tls,
+        } => {
             let std_tcp = connect_tcp(addr, tcp_keepalive).await?.into_std()?;
             let tls = tls.clone();
             let server_name = server_name.clone();
-            let (std_tcp, channel_binding) =
-                tokio::task::spawn_blocking(move || crate::tls::ktls_connect(&tls, &server_name, std_tcp))
-                    .await
-                    .map_err(|e| std::io::Error::other(e.to_string()))??;
+            let (std_tcp, channel_binding) = tokio::task::spawn_blocking(move || {
+                crate::tls::ktls_connect(&tls, &server_name, std_tcp)
+            })
+            .await
+            .map_err(|e| std::io::Error::other(e.to_string()))??;
             std_tcp.set_nonblocking(true)?;
             let fd = std_tcp.as_raw_fd();
             let (r, w) = TcpStream::from_std(std_tcp)?.into_split();
-            Ok((Box::new(r), Box::new(w), ConnFacts { transfer_fd: Some(fd), channel_binding }))
+            Ok((
+                Box::new(r),
+                Box::new(w),
+                ConnFacts {
+                    transfer_fd: Some(fd),
+                    channel_binding,
+                },
+            ))
         }
         // WebSocket: one JSON-RPC frame per message; the library owns the wire → no plaintext fd, so
         // transfer is refused. `wss` still surfaces the channel binding (from its userspace TLS).
         #[cfg(feature = "websocket")]
         Endpoint::Ws { addr, path } => {
             let (r, w) = crate::ws::connect_ws(addr, path, tcp_keepalive).await?;
-            Ok((r, w, ConnFacts { transfer_fd: None, channel_binding: None }))
+            Ok((
+                r,
+                w,
+                ConnFacts {
+                    transfer_fd: None,
+                    channel_binding: None,
+                },
+            ))
         }
         #[cfg(feature = "websocket")]
         Endpoint::WsUnix { path } => {
             let (r, w) = crate::ws::connect_ws_unix(path).await?;
-            Ok((r, w, ConnFacts { transfer_fd: None, channel_binding: None }))
+            Ok((
+                r,
+                w,
+                ConnFacts {
+                    transfer_fd: None,
+                    channel_binding: None,
+                },
+            ))
         }
         #[cfg(all(feature = "tls", feature = "websocket"))]
-        Endpoint::Wss { addr, server_name, path, tls } => {
+        Endpoint::Wss {
+            addr,
+            server_name,
+            path,
+            tls,
+        } => {
             let (r, w, channel_binding) =
                 crate::ws::connect_wss(tls, addr, server_name, path, tcp_keepalive).await?;
-            Ok((r, w, ConnFacts { transfer_fd: None, channel_binding }))
+            Ok((
+                r,
+                w,
+                ConnFacts {
+                    transfer_fd: None,
+                    channel_binding,
+                },
+            ))
         }
     }
 }

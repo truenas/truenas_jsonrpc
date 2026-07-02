@@ -45,7 +45,10 @@ fn rust_and_python_keyring_interop() {
         Ok(r) => r,
         Err(e) => return eprintln!("keyring unavailable ({e}); skipping interop"),
     };
-    if ring.add_key(KeyType::User, "from_rust", b"rust-payload").is_err() {
+    if ring
+        .add_key(KeyType::User, "from_rust", b"rust-payload")
+        .is_err()
+    {
         let _ = session.unlink_key(ring.serial());
         return eprintln!("keyring add unavailable; skipping interop");
     }
@@ -69,12 +72,24 @@ print("PY_OK")
         let _ = session.unlink_key(ring.serial());
         return eprintln!("python keyring access failed (skipping interop):\n{stderr}");
     }
-    assert!(stdout.contains("PY_OK"), "unexpected python output:\n{stdout}\n{stderr}");
+    assert!(
+        stdout.contains("PY_OK"),
+        "unexpected python output:\n{stdout}\n{stderr}"
+    );
 
     // Rust reads the key python wrote, and describes it.
-    let found = ring.search(KeyType::User, "from_py").unwrap().expect("from_py present");
-    let Found::Key(key) = found else { panic!("from_py should be a non-keyring key") };
-    assert_eq!(key.read_data().unwrap(), b"py-payload", "Rust read of the Python-written key");
+    let found = ring
+        .search(KeyType::User, "from_py")
+        .unwrap()
+        .expect("from_py present");
+    let Found::Key(key) = found else {
+        panic!("from_py should be a non-keyring key")
+    };
+    assert_eq!(
+        key.read_data().unwrap(),
+        b"py-payload",
+        "Rust read of the Python-written key"
+    );
     let desc = key.describe().unwrap();
     assert_eq!(desc.key_type, "user");
     assert_eq!(desc.description, "from_py");

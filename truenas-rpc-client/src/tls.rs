@@ -48,7 +48,9 @@ pub struct ClientTls {
 impl std::fmt::Debug for ClientTls {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // The connector holds key material — keep it opaque.
-        f.debug_struct("ClientTls").field("verify_hostname", &self.verify_hostname).finish_non_exhaustive()
+        f.debug_struct("ClientTls")
+            .field("verify_hostname", &self.verify_hostname)
+            .finish_non_exhaustive()
     }
 }
 
@@ -60,7 +62,10 @@ impl ClientTls {
         let mut b = SslConnector::builder(SslMethod::tls()).expect("openssl TLS connector");
         b.set_verify(SslVerifyMode::NONE);
         b.set_options(SslOptions::from_bits_retain(SSL_OP_ENABLE_KTLS));
-        ClientTls { connector: Arc::new(b.build()), verify_hostname: false }
+        ClientTls {
+            connector: Arc::new(b.build()),
+            verify_hostname: false,
+        }
     }
 
     /// A builder for a verifying client: custom trust roots and/or an mTLS client certificate.
@@ -127,7 +132,10 @@ impl ClientTlsBuilder {
         } else {
             true
         };
-        Ok(ClientTls { connector: Arc::new(b.build()), verify_hostname })
+        Ok(ClientTls {
+            connector: Arc::new(b.build()),
+            verify_hostname,
+        })
     }
 }
 
@@ -143,9 +151,14 @@ pub(crate) fn ktls_connect(
 ) -> std::io::Result<(std::net::TcpStream, Option<Vec<u8>>)> {
     tcp.set_nonblocking(false)?;
     let fd = tcp.as_raw_fd();
-    let mut config = tls.connector.configure().map_err(|e| io_other(e.to_string()))?;
+    let mut config = tls
+        .connector
+        .configure()
+        .map_err(|e| io_other(e.to_string()))?;
     config.set_verify_hostname(tls.verify_hostname);
-    let ssl = config.into_ssl(server_name).map_err(|e| io_other(e.to_string()))?;
+    let ssl = config
+        .into_ssl(server_name)
+        .map_err(|e| io_other(e.to_string()))?;
 
     // SAFETY: a socket BIO over `fd` with BIO_NOCLOSE does not own/close the fd; SSL takes ownership
     // of the BIO (freed on SSL_free). `fd` (owned by `tcp`) outlives `ssl` here.
@@ -162,12 +175,16 @@ pub(crate) fn ktls_connect(
         // SAFETY: reading the error code for the just-used SSL object.
         #[allow(unsafe_code)]
         let err = unsafe { openssl_sys::SSL_get_error(ssl.as_ptr(), rc) };
-        return Err(io_other(format!("TLS handshake failed (SSL_connect={rc}, ssl_error={err})")));
+        return Err(io_other(format!(
+            "TLS handshake failed (SSL_connect={rc}, ssl_error={err})"
+        )));
     }
 
     let cipher = ssl.current_cipher().map(|c| c.name()).unwrap_or("");
     if !cipher.contains("GCM") && !cipher.contains("CHACHA20") {
-        return Err(io_other(format!("kTLS requires an AES-GCM/ChaCha20 cipher; got {cipher:?}")));
+        return Err(io_other(format!(
+            "kTLS requires an AES-GCM/ChaCha20 cipher; got {cipher:?}"
+        )));
     }
     confirm_ktls(fd)?;
     // The `tls-server-end-point` channel binding, from the server's cert — read before `SSL_free`.
@@ -189,7 +206,7 @@ fn tls_server_end_point(cert: &X509Ref) -> Option<Vec<u8>> {
     let sig_nid = cert.signature_algorithm().object().nid();
     let digest_nid = sig_nid.signature_algorithms()?.digest;
     let md = match digest_nid {
-        Nid::UNDEF => return None,                       // no single hash → undefined
+        Nid::UNDEF => return None, // no single hash → undefined
         Nid::MD5 | Nid::SHA1 => MessageDigest::sha256(), // RFC 5929: weak hash → SHA-256
         nid => MessageDigest::from_nid(nid)?,
     };
@@ -205,12 +222,24 @@ pub(crate) async fn userspace_connect(
     tls: &ClientTls,
     server_name: &str,
     tcp: tokio::net::TcpStream,
-) -> std::io::Result<(tokio_openssl::SslStream<tokio::net::TcpStream>, Option<Vec<u8>>)> {
-    let mut config = tls.connector.configure().map_err(|e| io_other(e.to_string()))?;
+) -> std::io::Result<(
+    tokio_openssl::SslStream<tokio::net::TcpStream>,
+    Option<Vec<u8>>,
+)> {
+    let mut config = tls
+        .connector
+        .configure()
+        .map_err(|e| io_other(e.to_string()))?;
     config.set_verify_hostname(tls.verify_hostname);
-    let ssl = config.into_ssl(server_name).map_err(|e| io_other(e.to_string()))?;
-    let mut stream = tokio_openssl::SslStream::new(ssl, tcp).map_err(|e| io_other(e.to_string()))?;
-    std::pin::Pin::new(&mut stream).connect().await.map_err(|e| io_other(e.to_string()))?;
+    let ssl = config
+        .into_ssl(server_name)
+        .map_err(|e| io_other(e.to_string()))?;
+    let mut stream =
+        tokio_openssl::SslStream::new(ssl, tcp).map_err(|e| io_other(e.to_string()))?;
+    std::pin::Pin::new(&mut stream)
+        .connect()
+        .await
+        .map_err(|e| io_other(e.to_string()))?;
     let binding = channel_binding(stream.ssl());
     Ok((stream, binding))
 }

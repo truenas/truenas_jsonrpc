@@ -56,7 +56,9 @@ pub struct Passthrough {
 impl Passthrough {
     /// Build the mechanism, forwarding to the broker at `broker`.
     pub fn new(broker: impl Into<PathBuf>) -> Self {
-        Self { broker: broker.into() }
+        Self {
+            broker: broker.into(),
+        }
     }
 
     /// Perform the hand-off for a client connection whose plaintext fd is `client_fd`: connect the
@@ -75,7 +77,11 @@ impl Passthrough {
     }
 }
 
-fn handoff_io(broker: &Path, client_fd: RawFd, ctx: &BrokerContext) -> std::io::Result<BrokerVerdict> {
+fn handoff_io(
+    broker: &Path,
+    client_fd: RawFd,
+    ctx: &BrokerContext,
+) -> std::io::Result<BrokerVerdict> {
     let stream = UnixStream::connect(broker)?;
     protocol::request(&stream, client_fd, ctx)
 }
@@ -89,7 +95,12 @@ impl Mechanism for Passthrough {
         &[]
     }
 
-    fn step(&self, _payload: &serde_json::Value, _channel: &Channel, _progress: Option<AuthProgress>) -> Outcome {
+    fn step(
+        &self,
+        _payload: &serde_json::Value,
+        _channel: &Channel,
+        _progress: Option<AuthProgress>,
+    ) -> Outcome {
         // Passthrough can't finish inside `step` — it needs the connection's plaintext fd with the
         // reader *paused* (the broker reads/writes that fd). So signal a takeover: the auth stack
         // turns this into a `SetupOutcome::Takeover` the server runs once it has gated the
@@ -129,7 +140,12 @@ pub(crate) fn takeover(
         let credential = crate::stack::credential_of(&outcome, mech, uid);
         let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
             Some(auth) => crate::stack::commit(auth, outcome, session_id),
-            None => (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }),
+            None => (
+                SessionLifecycle::None,
+                AuthResult {
+                    response: AuthResponse::AuthErr,
+                },
+            ),
         });
         session.set_roles(granted);
         if let Some(cred) = credential {

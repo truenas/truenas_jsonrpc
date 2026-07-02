@@ -32,7 +32,9 @@ impl Framing for LengthPrefix {
         }
         let len = u32::from_be_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
         if len > limit {
-            return Err(ClientError::Decode(format!("inbound frame ({len} bytes) exceeds limit {limit}")));
+            return Err(ClientError::Decode(format!(
+                "inbound frame ({len} bytes) exceeds limit {limit}"
+            )));
         }
         if acc.len() < HEADER + len {
             return Ok(None);
@@ -73,7 +75,10 @@ impl Default for JsonRpcRuntime {
     fn default() -> Self {
         // One random draw per connection (amortized over every call it makes). The low 64 bits of a
         // v4 UUID are fully random (the version/variant bits sit higher), so take those as the prefix.
-        JsonRpcRuntime { framing: LengthPrefix, prefix: Uuid::new_v4().as_u128() as u64 }
+        JsonRpcRuntime {
+            framing: LengthPrefix,
+            prefix: Uuid::new_v4().as_u128() as u64,
+        }
     }
 }
 
@@ -108,7 +113,10 @@ impl ProtocolRuntime for JsonRpcRuntime {
         // and sends nothing back. `target_id` is the target call's id — the canonical UUID the
         // request went out under (`Uuid`'s `Display` is the canonical hyphenated lowercase form).
         let params = format!(r#"{{"target_id":"{target}"}}"#);
-        Some(encode_json_notification("$/cancelRequest", params.as_bytes()))
+        Some(encode_json_notification(
+            "$/cancelRequest",
+            params.as_bytes(),
+        ))
     }
 
     fn parse_inbound(&self, frame: &[u8]) -> Result<Inbound<Self>, ClientError> {
@@ -195,10 +203,14 @@ fn parse_json_reply(frame: &[u8]) -> Result<Inbound<JsonRpcRuntime>, ClientError
 
     let env: Env = serde_json::from_slice(frame).map_err(|e| ClientError::Decode(e.to_string()))?;
     if let Some(id) = env.id {
-        let key =
-            Uuid::parse_str(&id).map_err(|e| ClientError::Decode(format!("bad reply id {id:?}: {e}")))?;
+        let key = Uuid::parse_str(&id)
+            .map_err(|e| ClientError::Decode(format!("bad reply id {id:?}: {e}")))?;
         let result = match env.error {
-            Some(e) => Err(JsonRpcError { code: e.code, message: e.message, data: e.data }),
+            Some(e) => Err(JsonRpcError {
+                code: e.code,
+                message: e.message,
+                data: e.data,
+            }),
             None => Ok(raw_bytes(env.result)),
         };
         Ok(Inbound::Reply { key, result })
@@ -207,14 +219,25 @@ fn parse_json_reply(frame: &[u8]) -> Result<Inbound<JsonRpcRuntime>, ClientError
         // Both `$/progress` and `$/transferReady` are correlated by `params.id` (the target call),
         // not a topic — route them to that call, not the general notification stream.
         if method == "$/progress" {
-            Ok(Inbound::Progress { key: notification_target(&payload)?, payload })
+            Ok(Inbound::Progress {
+                key: notification_target(&payload)?,
+                payload,
+            })
         } else if method == "$/transferReady" {
-            Ok(Inbound::TransferReady { key: notification_target(&payload)?, payload })
+            Ok(Inbound::TransferReady {
+                key: notification_target(&payload)?,
+                payload,
+            })
         } else {
-            Ok(Inbound::Notification { topic: method, payload })
+            Ok(Inbound::Notification {
+                topic: method,
+                payload,
+            })
         }
     } else {
-        Err(ClientError::Decode("inbound message has neither id nor method".to_string()))
+        Err(ClientError::Decode(
+            "inbound message has neither id nor method".to_string(),
+        ))
     }
 }
 
@@ -228,7 +251,8 @@ fn notification_target(payload: &[u8]) -> Result<Uuid, ClientError> {
     }
     let t: Target = serde_json::from_slice(payload)
         .map_err(|e| ClientError::Decode(format!("$/progress params: {e}")))?;
-    Uuid::parse_str(&t.id).map_err(|e| ClientError::Decode(format!("bad $/progress id {:?}: {e}", t.id)))
+    Uuid::parse_str(&t.id)
+        .map_err(|e| ClientError::Decode(format!("bad $/progress id {:?}: {e}", t.id)))
 }
 
 /// A decoded `$/progress` update (the JSON-RPC progress shape). Decode a payload from
@@ -259,18 +283,23 @@ fn parse_xdr_reply(frame: &[u8]) -> Result<Inbound<JsonRpcRuntime>, ClientError>
     let result = if reply.status == frame::STATUS_OK {
         Ok(reply.body.to_vec())
     } else {
-        let (_code, detail) =
-            frame::parse_error_payload(reply.body).map_err(|e| ClientError::Decode(e.to_string()))?;
+        let (_code, detail) = frame::parse_error_payload(reply.body)
+            .map_err(|e| ClientError::Decode(e.to_string()))?;
         let e: WireError =
             serde_json::from_slice(&detail).map_err(|e| ClientError::Decode(e.to_string()))?;
-        Err(JsonRpcError { code: e.code, message: e.message, data: e.data })
+        Err(JsonRpcError {
+            code: e.code,
+            message: e.message,
+            data: e.data,
+        })
     };
     Ok(Inbound::Reply { key, result })
 }
 
 /// The raw JSON text of a `RawValue` member, or `null` when absent.
 fn raw_bytes(v: Option<Box<RawValue>>) -> Vec<u8> {
-    v.map(|r| r.get().as_bytes().to_vec()).unwrap_or_else(|| b"null".to_vec())
+    v.map(|r| r.get().as_bytes().to_vec())
+        .unwrap_or_else(|| b"null".to_vec())
 }
 
 // --- Capabilities ------------------------------------------------------------------------------
@@ -317,7 +346,10 @@ impl Cancels for JsonRpcRuntime {
         // A no-id `$/cancelRequest` notification; `target_id` is the server-assigned id to cancel
         // (JSON-escaped, since a subscription id is an opaque string).
         let target = serde_json::to_string(target_id).unwrap_or_else(|_| "\"\"".to_string());
-        encode_json_notification("$/cancelRequest", format!(r#"{{"target_id":{target}}}"#).as_bytes())
+        encode_json_notification(
+            "$/cancelRequest",
+            format!(r#"{{"target_id":{target}}}"#).as_bytes(),
+        )
     }
 }
 
@@ -340,10 +372,15 @@ impl Transfers for JsonRpcRuntime {
             "download" => TransferDirection::Download,
             "upload" => TransferDirection::Upload,
             other => {
-                return Err(ClientError::Decode(format!("unknown transfer direction {other:?}")))
+                return Err(ClientError::Decode(format!(
+                    "unknown transfer direction {other:?}"
+                )))
             }
         };
-        let result = r.result.map(|v| v.get().as_bytes().to_vec()).unwrap_or_else(|| b"null".to_vec());
+        let result = r
+            .result
+            .map(|v| v.get().as_bytes().to_vec())
+            .unwrap_or_else(|| b"null".to_vec());
         Ok((direction, result))
     }
 
@@ -410,7 +447,9 @@ impl CallEngine for JsonRpcClient {
             MethodKey::Name(n) => JsonRpcMethod::Name(n.to_string()),
             MethodKey::Proc(p) => JsonRpcMethod::Proc(p),
         };
-        Client::transfer(self, &jm, params, callback).await.map_err(ClientError::into_jsonrpc)
+        Client::transfer(self, &jm, params, callback)
+            .await
+            .map_err(ClientError::into_jsonrpc)
     }
 }
 

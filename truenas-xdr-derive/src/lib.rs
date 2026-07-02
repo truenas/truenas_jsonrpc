@@ -14,7 +14,9 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DataEnum, DeriveInput, Expr, ExprLit, ExprUnary, Fields, Lit, UnOp};
+use syn::{
+    parse_macro_input, Data, DataEnum, DeriveInput, Expr, ExprLit, ExprUnary, Fields, Lit, UnOp,
+};
 
 /// Derive `Serialize`/`Deserialize` for a field-less enum, encoding it as its declared
 /// `i32` discriminant.
@@ -35,12 +37,24 @@ pub fn derive_xdr_union(input: TokenStream) -> TokenStream {
 /// Parse a discriminant `Expr` (`= N` or `= -N`) as an `i32`.
 fn parse_disc(expr: &Expr) -> syn::Result<i32> {
     match expr {
-        Expr::Lit(ExprLit { lit: Lit::Int(li), .. }) => li.base10_parse::<i32>(),
-        Expr::Unary(ExprUnary { op: UnOp::Neg(_), expr, .. }) => {
-            if let Expr::Lit(ExprLit { lit: Lit::Int(li), .. }) = &**expr {
+        Expr::Lit(ExprLit {
+            lit: Lit::Int(li), ..
+        }) => li.base10_parse::<i32>(),
+        Expr::Unary(ExprUnary {
+            op: UnOp::Neg(_),
+            expr,
+            ..
+        }) => {
+            if let Expr::Lit(ExprLit {
+                lit: Lit::Int(li), ..
+            }) = &**expr
+            {
                 Ok(-(li.base10_parse::<i32>()?))
             } else {
-                Err(syn::Error::new_spanned(expr, "expected an integer literal discriminant"))
+                Err(syn::Error::new_spanned(
+                    expr,
+                    "expected an integer literal discriminant",
+                ))
             }
         }
         _ => Err(syn::Error::new_spanned(
@@ -84,7 +98,12 @@ fn expand_enum(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let data = match &input.data {
         Data::Enum(d) => d,
-        _ => return Err(syn::Error::new_spanned(&input, "XdrEnum can only be derived for enums")),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &input,
+                "XdrEnum can only be derived for enums",
+            ))
+        }
     };
     for v in &data.variants {
         if !matches!(v.fields, Fields::Unit) {
@@ -126,7 +145,12 @@ fn expand_union(input: DeriveInput) -> syn::Result<TokenStream> {
     let name = &input.ident;
     let data = match &input.data {
         Data::Enum(d) => d,
-        _ => return Err(syn::Error::new_spanned(&input, "XdrUnion can only be derived for enums")),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &input,
+                "XdrUnion can only be derived for enums",
+            ))
+        }
     };
     let discs = discriminants(data)?;
 
@@ -170,7 +194,11 @@ fn expand_union(input: DeriveInput) -> syn::Result<TokenStream> {
             Fields::Named(fields) => {
                 let n = fields.named.len();
                 max_elems = max_elems.max(1 + n);
-                let fnames: Vec<_> = fields.named.iter().map(|f| f.ident.as_ref().unwrap()).collect();
+                let fnames: Vec<_> = fields
+                    .named
+                    .iter()
+                    .map(|f| f.ident.as_ref().unwrap())
+                    .collect();
                 let binds: Vec<_> = (0..n).map(|i| format_ident!("__f{}", i)).collect();
                 ser_arms.push(quote! {
                     #name::#ident { #( #fnames: #binds ),* } => {

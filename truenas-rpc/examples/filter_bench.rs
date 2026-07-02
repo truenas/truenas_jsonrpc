@@ -12,8 +12,8 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use truenas_rpc::{
-    tnfilter, CompiledFilters, CompiledOptions, FilterableRpcMethod, JsonRpcError,
-    JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx,
+    tnfilter, CompiledFilters, CompiledOptions, FilterableRpcMethod, JsonRpcError, JsonRpcProtocol,
+    MethodDef, NullOutbound, RequestCtx,
 };
 
 #[derive(Deserialize, Serialize)]
@@ -65,14 +65,33 @@ async fn main() {
     let session = proto.new_session(Some(()), Arc::new(NullOutbound));
 
     let cases: &[(&str, &str, bool)] = &[
-        ("count_all", r#"{"query-filters":[],"query-options":{"count":true}}"#, true),
-        ("count_eq", r#"{"query-filters":[["name","=","alpha"]],"query-options":{"count":true}}"#, true),
-        ("filter_page", r#"{"query-filters":[["name","=","alpha"]],"query-options":{"limit":100}}"#, false),
-        ("order_page", r#"{"query-filters":[],"query-options":{"order_by":["-id"],"limit":100}}"#, false),
+        (
+            "count_all",
+            r#"{"query-filters":[],"query-options":{"count":true}}"#,
+            true,
+        ),
+        (
+            "count_eq",
+            r#"{"query-filters":[["name","=","alpha"]],"query-options":{"count":true}}"#,
+            true,
+        ),
+        (
+            "filter_page",
+            r#"{"query-filters":[["name","=","alpha"]],"query-options":{"limit":100}}"#,
+            false,
+        ),
+        (
+            "order_page",
+            r#"{"query-filters":[],"query-options":{"order_by":["-id"],"limit":100}}"#,
+            false,
+        ),
     ];
 
     println!("# rust filter bench  N={N}  iters={ITERS}  trials={TRIALS}  (min-of-trials)");
-    println!("{:<14}{:>12}{:>12}{:>9}", "case", "us/op", "Mrows/s", "reply");
+    println!(
+        "{:<14}{:>12}{:>12}{:>9}",
+        "case", "us/op", "Mrows/s", "reply"
+    );
     let mut guard = 0u64;
     for (name, params, full_scan) in cases {
         let w = fq(params);

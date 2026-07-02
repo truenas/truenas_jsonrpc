@@ -49,7 +49,12 @@ pub struct ScramCredentials {
 impl ScramCredentials {
     /// Mint a verifier from raw key material (PBKDF2-HMAC-SHA512 → StoredKey/ServerKey). Roles are
     /// not part of the verifier — authorization is resolved from the account's uid at `sessionSetup`.
-    pub fn mint(key: &[u8], salt: Vec<u8>, iterations: u32, identity: Identity) -> ScramCredentials {
+    pub fn mint(
+        key: &[u8],
+        salt: Vec<u8>,
+        iterations: u32,
+        identity: Identity,
+    ) -> ScramCredentials {
         let (stored_key, server_key) = derive_verifier(key, &salt, iterations);
         ScramCredentials {
             salt,
@@ -118,8 +123,12 @@ impl<C: CredentialSource> Mechanism for Scram<C> {
 
 impl<C: CredentialSource> Scram<C> {
     fn client_first(&self, payload: &Value, channel: &Channel) -> Outcome {
-        let Some(msg) = message_of(payload) else { return reject(RejectKind::AuthErr) };
-        let Some(cf) = message::parse_client_first(msg) else { return reject(RejectKind::AuthErr) };
+        let Some(msg) = message_of(payload) else {
+            return reject(RejectKind::AuthErr);
+        };
+        let Some(cf) = message::parse_client_first(msg) else {
+            return reject(RejectKind::AuthErr);
+        };
 
         // Enforce SCRAM-PLUS: the client must request tls-server-end-point binding, and the channel
         // must actually carry a binding value (i.e. it's a TLS connection).
@@ -136,13 +145,18 @@ impl<C: CredentialSource> Scram<C> {
         };
 
         let server_nonce = crypto::random_nonce();
-        let Some((server_first, combined_nonce_b64)) =
-            message::server_first(&cf.client_nonce_b64, &server_nonce, &creds.salt, creds.iterations)
-        else {
+        let Some((server_first, combined_nonce_b64)) = message::server_first(
+            &cf.client_nonce_b64,
+            &server_nonce,
+            &creds.salt,
+            creds.iterations,
+        ) else {
             return reject(RejectKind::AuthErr);
         };
 
-        let ClientFirst { gs2_header, bare, .. } = cf;
+        let ClientFirst {
+            gs2_header, bare, ..
+        } = cf;
         let pending = ScramPending {
             server_first: server_first.clone(),
             combined_nonce_b64,
@@ -168,8 +182,12 @@ impl<C: CredentialSource> Scram<C> {
             Ok(p) => *p,
             Err(_) => return reject(RejectKind::AuthErr),
         };
-        let Some(msg) = message_of(payload) else { return reject(RejectKind::AuthErr) };
-        let Some(cf) = message::parse_client_final(msg) else { return reject(RejectKind::AuthErr) };
+        let Some(msg) = message_of(payload) else {
+            return reject(RejectKind::AuthErr);
+        };
+        let Some(cf) = message::parse_client_final(msg) else {
+            return reject(RejectKind::AuthErr);
+        };
 
         // The echoed nonce must match (public values — plain compare).
         if cf.nonce_b64 != pending.combined_nonce_b64 {
@@ -177,18 +195,26 @@ impl<C: CredentialSource> Scram<C> {
         }
         // Channel binding: c= must decode to the gs2 header followed by the server's binding value.
         // A mismatch means a relay/MITM is sitting on a different TLS channel.
-        let Ok(cbind) = decode_block(&cf.cbind_b64) else { return reject(RejectKind::AuthErr) };
+        let Ok(cbind) = decode_block(&cf.cbind_b64) else {
+            return reject(RejectKind::AuthErr);
+        };
         let mut expected = pending.gs2_header.into_bytes();
         expected.extend_from_slice(&pending.channel_binding);
         if cbind != expected {
             return reject(RejectKind::AuthErr);
         }
 
-        let auth_message = message::auth_message(&pending.client_first_bare, &pending.server_first, &cf.without_proof);
+        let auth_message = message::auth_message(
+            &pending.client_first_bare,
+            &pending.server_first,
+            &cf.without_proof,
+        );
 
         // Recover ClientKey = ClientProof XOR HMAC(StoredKey, AuthMessage) and verify
         // H(ClientKey) == StoredKey, constant-time.
-        let Ok(proof) = decode_block(&cf.proof_b64) else { return reject(RejectKind::AuthErr) };
+        let Ok(proof) = decode_block(&cf.proof_b64) else {
+            return reject(RejectKind::AuthErr);
+        };
         let Ok(proof): Result<[u8; KEY_LEN], _> = proof.try_into() else {
             return reject(RejectKind::AuthErr);
         };

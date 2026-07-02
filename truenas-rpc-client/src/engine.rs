@@ -90,7 +90,12 @@ pub trait ProtocolRuntime: Send + Sync + 'static {
     fn key_for_seq(&self, seq: u64) -> Self::CorrelationKey;
     /// Encode a call to its unframed wire bytes under correlation `key`. `params` are the
     /// already-serialized request bytes (JSON for a name key, XDR for a proc-id key).
-    fn encode_call(&self, method: &Self::MethodKey, params: &[u8], key: &Self::CorrelationKey) -> Vec<u8>;
+    fn encode_call(
+        &self,
+        method: &Self::MethodKey,
+        params: &[u8],
+        key: &Self::CorrelationKey,
+    ) -> Vec<u8>;
     /// Classify one inbound frame (the engine never inspects bytes itself).
     fn parse_inbound(&self, frame: &[u8]) -> Result<Inbound<Self>, ClientError>;
     /// Encode a best-effort cancellation for an in-flight call's `key`, if the wire has one
@@ -224,14 +229,22 @@ impl<P: ProtocolRuntime> Client<P> {
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Vec<u8>>();
         let (notif_tx, notif_rx) = mpsc::unbounded_channel::<(P::Topic, Vec<u8>)>();
         let shared = Arc::new(Shared {
-            pending: Mutex::new(Pending { map: HashMap::new(), next_seq: 0 }),
+            pending: Mutex::new(Pending {
+                map: HashMap::new(),
+                next_seq: 0,
+            }),
             out_tx,
             closed: AtomicBool::new(false),
             transfer_resume: Notify::new(),
         });
         let writer_task = tokio::spawn(writer_loop(runtime.clone(), writer, out_rx));
-        let recv_task =
-            tokio::spawn(recv_loop(runtime.clone(), shared.clone(), reader, config.limit, notif_tx));
+        let recv_task = tokio::spawn(recv_loop(
+            runtime.clone(),
+            shared.clone(),
+            reader,
+            config.limit,
+            notif_tx,
+        ));
         let client = Client {
             runtime,
             shared,
@@ -252,12 +265,9 @@ impl<P: ProtocolRuntime> Client<P> {
 
     /// Send one method call and await its reply. The codegen-facing typed methods build on this.
     /// `params` are the already-serialized request bytes for the wire.
-    pub async fn call(
-        &self,
-        method: &P::MethodKey,
-        params: &[u8],
-    ) -> Result<Vec<u8>, ClientError> {
-        self.round_trip(|key| self.runtime.encode_call(method, params, key)).await
+    pub async fn call(&self, method: &P::MethodKey, params: &[u8]) -> Result<Vec<u8>, ClientError> {
+        self.round_trip(|key| self.runtime.encode_call(method, params, key))
+            .await
     }
 
     /// Like [`call`](Self::call), but the call's **progress** updates (`$/progress` on the JSON-RPC
@@ -278,8 +288,11 @@ impl<P: ProtocolRuntime> Client<P> {
         params: &[u8],
         progress: mpsc::UnboundedSender<Vec<u8>>,
     ) -> Result<Vec<u8>, ClientError> {
-        self.round_trip_tracked(|key| self.runtime.encode_call(method, params, key), Some(progress))
-            .await
+        self.round_trip_tracked(
+            |key| self.runtime.encode_call(method, params, key),
+            Some(progress),
+        )
+        .await
     }
 
     /// Draw the next correlation id and register its reply slot (+ optional progress sink) under a
@@ -291,13 +304,23 @@ impl<P: ProtocolRuntime> Client<P> {
         &self,
         progress: Option<ProgressTx>,
         ready: Option<oneshot::Sender<Vec<u8>>>,
-    ) -> (P::CorrelationKey, oneshot::Receiver<Result<Vec<u8>, JsonRpcError>>) {
+    ) -> (
+        P::CorrelationKey,
+        oneshot::Receiver<Result<Vec<u8>, JsonRpcError>>,
+    ) {
         let (tx, rx) = oneshot::channel();
         let mut pending = self.shared.lock_pending();
         let seq = pending.next_seq;
         pending.next_seq = seq.wrapping_add(1);
         let key = self.runtime.key_for_seq(seq);
-        pending.map.insert(key.clone(), PendingEntry { reply: tx, progress, ready });
+        pending.map.insert(
+            key.clone(),
+            PendingEntry {
+                reply: tx,
+                progress,
+                ready,
+            },
+        );
         (key, rx)
     }
 
@@ -331,7 +354,11 @@ impl<P: ProtocolRuntime> Client<P> {
         // clears the pending slot (else it would leak until the connection closes) and fires a
         // best-effort cancellation. Disarmed the instant the reply is in hand, so the happy path pays
         // only a branch.
-        let mut guard = DropCancel { shared: &self.shared, runtime: &self.runtime, key: Some(key) };
+        let mut guard = DropCancel {
+            shared: &self.shared,
+            runtime: &self.runtime,
+            key: Some(key),
+        };
         let result = rx.await;
         guard.key = None;
         match result {
@@ -390,7 +417,8 @@ async fn recv_loop<P: ProtocolRuntime>(
                     // the lock (unbounded send is sync; drops on backpressure).
                     Ok(Inbound::Progress { key, payload }) => {
                         let pending = shared.lock_pending();
-                        if let Some(sink) = pending.map.get(&key).and_then(|e| e.progress.as_ref()) {
+                        if let Some(sink) = pending.map.get(&key).and_then(|e| e.progress.as_ref())
+                        {
                             let _ = sink.send(payload);
                         }
                     }
@@ -401,8 +429,11 @@ async fn recv_loop<P: ProtocolRuntime>(
                     Ok(Inbound::TransferReady { key, payload }) => {
                         // Take the ready-sender out under a tight lock, THEN send + park (never hold
                         // the pending lock across the `.await`).
-                        let ready =
-                            shared.lock_pending().map.get_mut(&key).and_then(|e| e.ready.take());
+                        let ready = shared
+                            .lock_pending()
+                            .map
+                            .get_mut(&key)
+                            .and_then(|e| e.ready.take());
                         if let Some(ready) = ready {
                             let _ = ready.send(payload);
                             shared.transfer_resume.notified().await;
@@ -440,7 +471,9 @@ pub trait Negotiates: ProtocolRuntime {
 impl<P: Negotiates> Client<P> {
     /// Bind a named protocol (the `$/negotiate` handshake).
     pub async fn negotiate(&self, protocol: &str) -> Result<P::Negotiated, ClientError> {
-        let bytes = self.round_trip(|key| self.runtime.encode_negotiate(protocol, key)).await?;
+        let bytes = self
+            .round_trip(|key| self.runtime.encode_negotiate(protocol, key))
+            .await?;
         serde_json::from_slice(&bytes).map_err(|e| ClientError::Decode(e.to_string()))
     }
 }
@@ -450,23 +483,26 @@ pub trait Authenticates: ProtocolRuntime {
     /// Encode `$/sessionSetup` under correlation `key`.
     fn encode_setup(&self, params: Option<&RawValue>, key: &Self::CorrelationKey) -> Vec<u8>;
     /// Encode `$/sessionSetupContinue` (multi-step auth) under correlation `key`.
-    fn encode_setup_continue(&self, params: Option<&RawValue>, key: &Self::CorrelationKey) -> Vec<u8>;
+    fn encode_setup_continue(
+        &self,
+        params: Option<&RawValue>,
+        key: &Self::CorrelationKey,
+    ) -> Vec<u8>;
 }
 
 impl<P: Authenticates> Client<P> {
     /// Run the session-setup handshake; returns the raw setup-result bytes.
-    pub async fn authenticate(
-        &self,
-        params: Option<&RawValue>,
-    ) -> Result<Vec<u8>, ClientError> {
-        self.round_trip(|key| self.runtime.encode_setup(params, key)).await
+    pub async fn authenticate(&self, params: Option<&RawValue>) -> Result<Vec<u8>, ClientError> {
+        self.round_trip(|key| self.runtime.encode_setup(params, key))
+            .await
     }
     /// Continue a multi-step session setup.
     pub async fn authenticate_continue(
         &self,
         params: Option<&RawValue>,
     ) -> Result<Vec<u8>, ClientError> {
-        self.round_trip(|key| self.runtime.encode_setup_continue(params, key)).await
+        self.round_trip(|key| self.runtime.encode_setup_continue(params, key))
+            .await
     }
 }
 
@@ -501,7 +537,10 @@ impl<P: Cancels> Client<P> {
         if self.shared.closed.load(Ordering::SeqCst) {
             return Err(ClientError::Closed);
         }
-        self.shared.out_tx.send(self.runtime.encode_cancel_id(sub_id)).map_err(|_| ClientError::Closed)
+        self.shared
+            .out_tx
+            .send(self.runtime.encode_cancel_id(sub_id))
+            .map_err(|_| ClientError::Closed)
     }
 }
 
@@ -655,7 +694,9 @@ impl TransferHandle {
             }
         }
         if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
-            return Err(std::io::Error::other("received file descriptors were truncated"));
+            return Err(std::io::Error::other(
+                "received file descriptors were truncated",
+            ));
         }
         Ok(out)
     }
@@ -669,7 +710,12 @@ fn write_all_blocking(fd: RawFd, mut buf: &[u8]) -> std::io::Result<()> {
         let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
         match n {
             -1 => return Err(std::io::Error::last_os_error()),
-            0 => return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "transfer peer closed")),
+            0 => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "transfer peer closed",
+                ))
+            }
             n => buf = &buf[n as usize..],
         }
     }
@@ -709,7 +755,16 @@ fn splice_socket_to_fd(src: RawFd, dst: RawFd, count: usize) -> Option<std::io::
         // socket → pipe
         // SAFETY: `src` is the blocking socket, `pw` the pipe write end we just made.
         #[allow(unsafe_code)]
-        let n = unsafe { libc::splice(src, std::ptr::null_mut(), pw, std::ptr::null_mut(), count - moved, 0) };
+        let n = unsafe {
+            libc::splice(
+                src,
+                std::ptr::null_mut(),
+                pw,
+                std::ptr::null_mut(),
+                count - moved,
+                0,
+            )
+        };
         if n < 0 {
             if moved == 0 {
                 close_fd(pr); // unsupported here, nothing consumed → let the caller fall back
@@ -730,7 +785,14 @@ fn splice_socket_to_fd(src: RawFd, dst: RawFd, count: usize) -> Option<std::io::
             // SAFETY: `pr` is the pipe read end, `dst` the destination file.
             #[allow(unsafe_code)]
             let m = unsafe {
-                libc::splice(pr, std::ptr::null_mut(), dst, std::ptr::null_mut(), n as usize - drained, 0)
+                libc::splice(
+                    pr,
+                    std::ptr::null_mut(),
+                    dst,
+                    std::ptr::null_mut(),
+                    n as usize - drained,
+                    0,
+                )
             };
             if m < 0 {
                 break Some(std::io::Error::last_os_error());
@@ -829,14 +891,20 @@ impl<P: Transfers> Client<P> {
         }
         if direction == TransferDirection::Download {
             let mut framed = Vec::new();
-            self.runtime.framing().frame_into(&mut framed, &self.runtime.encode_transfer_go(&key));
+            self.runtime
+                .framing()
+                .frame_into(&mut framed, &self.runtime.encode_transfer_go(&key));
             if let Err(e) = write_all_blocking(fd, &framed) {
                 let _ = set_blocking(fd, false);
                 self.abort_transfer(&key);
                 return Err(ClientError::Transport(e));
             }
         }
-        let handle = TransferHandle { fd, direction, result };
+        let handle = TransferHandle {
+            fd,
+            direction,
+            result,
+        };
         let outcome = tokio::task::spawn_blocking(move || callback(handle)).await;
         let _ = set_blocking(fd, false);
 
@@ -857,7 +925,9 @@ impl<P: Transfers> Client<P> {
             }
             Err(_panic) => {
                 self.abort_transfer(&key);
-                Err(ClientError::Rpc(JsonRpcError::internal("transfer callback panicked")))
+                Err(ClientError::Rpc(JsonRpcError::internal(
+                    "transfer callback panicked",
+                )))
             }
         }
     }
@@ -877,7 +947,8 @@ impl<P: Transfers> Client<P> {
         fds: &[RawFd],
     ) -> Result<Vec<u8>, ClientError> {
         let fds = fds.to_vec();
-        self.transfer(method, params, move |ht| ht.send_fds(&fds)).await
+        self.transfer(method, params, move |ht| ht.send_fds(&fds))
+            .await
     }
 
     /// Receive up to `max_fds` fds from the server over a **download** fd-pass `method`; returns the

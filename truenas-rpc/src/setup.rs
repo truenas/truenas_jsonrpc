@@ -32,8 +32,10 @@ pub enum SetupOutcome<R> {
 pub struct SetupHandoff {
     pub(crate) fd_handoff: bool,
     #[allow(clippy::type_complexity)]
-    pub(crate) complete:
-        Box<dyn FnOnce(&dyn FileTransfer) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError> + Send>,
+    pub(crate) complete: Box<
+        dyn FnOnce(&dyn FileTransfer) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError>
+            + Send,
+    >,
 }
 
 impl SetupHandoff {
@@ -44,9 +46,14 @@ impl SetupHandoff {
     /// error, which leaves the session unauthenticated).
     pub fn new<F>(fd_handoff: bool, complete: F) -> Self
     where
-        F: FnOnce(&dyn FileTransfer) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError> + Send + 'static,
+        F: FnOnce(&dyn FileTransfer) -> Result<(SessionLifecycle, Box<RawValue>), JsonRpcError>
+            + Send
+            + 'static,
     {
-        Self { fd_handoff, complete: Box::new(complete) }
+        Self {
+            fd_handoff,
+            complete: Box::new(complete),
+        }
     }
 }
 
@@ -69,7 +76,11 @@ pub struct SetupTakeover {
 
 impl SetupTakeover {
     pub(crate) fn new(rid: Option<String>, fd_handoff: bool, run: TakeoverRun) -> Self {
-        Self { fd_handoff, rid, run }
+        Self {
+            fd_handoff,
+            rid,
+            run,
+        }
     }
 
     /// Whether the hand-off passes the connection's fd to an out-of-band authenticator — the server
@@ -92,6 +103,9 @@ impl SetupTakeover {
 
 impl std::fmt::Debug for SetupTakeover {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SetupTakeover").field("fd_handoff", &self.fd_handoff).field("rid", &self.rid).finish_non_exhaustive()
+        f.debug_struct("SetupTakeover")
+            .field("fd_handoff", &self.fd_handoff)
+            .field("rid", &self.rid)
+            .finish_non_exhaustive()
     }
 }

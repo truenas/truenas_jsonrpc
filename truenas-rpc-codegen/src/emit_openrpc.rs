@@ -49,17 +49,21 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
 
 fn method_object(spec: &Spec, wire: &str, m: &MethodSpec) -> Result<Value> {
     let params_name = ref_name_req(&m.params, "params")?;
-    let params_def = spec
-        .defs
-        .get(&params_name)
-        .ok_or_else(|| CodegenError::new(format!("params $ref to unknown $defs type: {params_name:?}")))?;
+    let params_def = spec.defs.get(&params_name).ok_or_else(|| {
+        CodegenError::new(format!(
+            "params $ref to unknown $defs type: {params_name:?}"
+        ))
+    })?;
     let required: HashSet<&str> = params_def.required.iter().map(String::as_str).collect();
 
     // Base params (required-first, stable), then (for filterable) the two query descriptors.
     let mut base: Vec<(bool, Value)> = Vec::new();
     for (p, ps) in params_def.properties.iter() {
         let req = required.contains(p);
-        base.push((req, json!({ "name": p, "required": req, "schema": property_schema(ps, req, spec)? })));
+        base.push((
+            req,
+            json!({ "name": p, "required": req, "schema": property_schema(ps, req, spec)? }),
+        ));
     }
     base.sort_by_key(|(req, _)| !req);
     let mut params: Vec<Value> = base.into_iter().map(|(_, v)| v).collect();
@@ -78,7 +82,9 @@ fn method_object(spec: &Spec, wire: &str, m: &MethodSpec) -> Result<Value> {
     let direction = m.direction();
     if m.filterable {
         let entry = ref_name_req(
-            m.entry.as_ref().expect("filterable entry present (guaranteed by validate)"),
+            m.entry
+                .as_ref()
+                .expect("filterable entry present (guaranteed by validate)"),
             "entry",
         )?;
         obj.insert(
@@ -89,7 +95,10 @@ fn method_object(spec: &Spec, wire: &str, m: &MethodSpec) -> Result<Value> {
     } else if direction != Direction::ServerClient {
         if let Some(result) = &m.result {
             let r = ref_name_req(result, "result")?;
-            obj.insert("result".into(), json!({ "name": r, "schema": schema_ref(&r) }));
+            obj.insert(
+                "result".into(),
+                json!({ "name": r, "schema": schema_ref(&r) }),
+            );
         }
     }
     obj.insert("x-direction".into(), json!(direction_str(direction)));
@@ -137,7 +146,9 @@ fn base_schema(node: &SchemaNode, spec: &Spec) -> Result<Value> {
         }
         Some("object") => component_body(None, node, spec),
         Some(t @ ("string" | "integer" | "number" | "boolean")) => Ok(json!({ "type": t })),
-        other => Err(CodegenError::new(format!("cannot map schema to OpenRPC: type={other:?}"))),
+        other => Err(CodegenError::new(format!(
+            "cannot map schema to OpenRPC: type={other:?}"
+        ))),
     }
 }
 
@@ -145,7 +156,10 @@ fn component_body(name: Option<&str>, schema: &SchemaNode, spec: &Spec) -> Resul
     let required: HashSet<&str> = schema.required.iter().map(String::as_str).collect();
     let mut props = Map::new();
     for (p, ps) in schema.properties.iter() {
-        props.insert(p.to_string(), property_schema(ps, required.contains(p), spec)?);
+        props.insert(
+            p.to_string(),
+            property_schema(ps, required.contains(p), spec)?,
+        );
     }
     let mut body = Map::new();
     if let Some(n) = name {
@@ -161,9 +175,14 @@ fn component_body(name: Option<&str>, schema: &SchemaNode, spec: &Spec) -> Resul
 fn collect_component_names(public: &[(&str, &MethodSpec)], spec: &Spec) -> Result<Vec<String>> {
     let mut seen: Vec<String> = Vec::new();
     for (_, m) in public {
-        for node in [Some(&m.params), m.result.as_ref(), m.notifies.as_ref(), m.entry.as_ref()]
-            .into_iter()
-            .flatten()
+        for node in [
+            Some(&m.params),
+            m.result.as_ref(),
+            m.notifies.as_ref(),
+            m.entry.as_ref(),
+        ]
+        .into_iter()
+        .flatten()
         {
             visit_refs(node, spec, &mut seen)?;
         }
@@ -176,7 +195,12 @@ fn visit_refs(node: &SchemaNode, spec: &Spec, seen: &mut Vec<String>) -> Result<
         let name = ref_name(r)?;
         if !seen.contains(&name) {
             seen.push(name.clone());
-            for (_, ps) in spec.defs.get(&name).into_iter().flat_map(|d| d.properties.iter()) {
+            for (_, ps) in spec
+                .defs
+                .get(&name)
+                .into_iter()
+                .flat_map(|d| d.properties.iter())
+            {
                 visit_refs(ps, spec, seen)?;
             }
         }
@@ -217,7 +241,10 @@ fn error_components() -> Value {
     ];
     let mut m = Map::new();
     for (name, code, message) in CODES {
-        m.insert(name.to_string(), json!({ "code": code, "message": message }));
+        m.insert(
+            name.to_string(),
+            json!({ "code": code, "message": message }),
+        );
     }
     Value::Object(m)
 }
@@ -232,6 +259,8 @@ fn direction_str(d: Direction) -> &'static str {
 fn ref_name_req(node: &SchemaNode, slot: &str) -> Result<String> {
     match &node.reference {
         Some(r) => ref_name(r),
-        None => Err(CodegenError::new(format!("{slot} must be a $ref to a $def"))),
+        None => Err(CodegenError::new(format!(
+            "{slot} must be a $ref to a $def"
+        ))),
     }
 }

@@ -13,7 +13,9 @@
 
 use serde::Serialize;
 
-use crate::{from_bytes, from_bytes_with, to_bytes, to_writer, FixedOpaque, Strictness, VarOpaque, XdrError};
+use crate::{
+    from_bytes, from_bytes_with, to_bytes, to_writer, FixedOpaque, Strictness, VarOpaque, XdrError,
+};
 
 /// Frame magic, `"TXDR"` as a big-endian `u32`.
 pub const MAGIC: u32 = 0x5458_4452;
@@ -97,7 +99,12 @@ pub fn parse_request(wire: &[u8]) -> Result<Request<'_>, XdrError> {
     let ((magic, version, proc_id, id), rest) =
         from_bytes_with::<RequestEnvelope>(wire, Strictness::Lenient)?;
     check_header(magic, version)?;
-    Ok(Request { version, proc_id, rid: id.map(|f| f.0), params: rest })
+    Ok(Request {
+        version,
+        proc_id,
+        rid: id.map(|f| f.0),
+        params: rest,
+    })
 }
 
 /// Build a success reply frame: magic + envelope (status 0) + the encoded `result`.
@@ -143,7 +150,12 @@ pub fn parse_reply(wire: &[u8]) -> Result<Reply<'_>, XdrError> {
     let ((magic, version, id, status), rest) =
         from_bytes_with::<ReplyEnvelope>(wire, Strictness::Lenient)?;
     check_header(magic, version)?;
-    Ok(Reply { version, rid: id.map(|f| f.0), status, body: rest })
+    Ok(Reply {
+        version,
+        rid: id.map(|f| f.0),
+        status,
+        body: rest,
+    })
 }
 
 /// Decode a [`STATUS_ERR`] reply body into `(code, detail_json_bytes)`.
@@ -154,10 +166,14 @@ pub fn parse_error_payload(body: &[u8]) -> Result<(i32, Vec<u8>), XdrError> {
 
 fn check_header(magic: u32, version: u32) -> Result<(), XdrError> {
     if magic != MAGIC {
-        return Err(XdrError::Message("not a TXDR frame (bad magic)".to_string()));
+        return Err(XdrError::Message(
+            "not a TXDR frame (bad magic)".to_string(),
+        ));
     }
     if version != VERSION {
-        return Err(XdrError::Message(format!("unsupported TXDR frame version {version}")));
+        return Err(XdrError::Message(format!(
+            "unsupported TXDR frame version {version}"
+        )));
     }
     Ok(())
 }

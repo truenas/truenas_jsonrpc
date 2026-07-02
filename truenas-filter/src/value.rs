@@ -65,8 +65,7 @@ pub(crate) fn py_eq(a: &Value, b: &Value) -> bool {
             x.len() == y.len() && x.iter().zip(y).all(|(p, q)| py_eq(p, q))
         }
         (Value::Object(x), Value::Object(y)) => {
-            x.len() == y.len()
-                && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| py_eq(v, w)))
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| py_eq(v, w)))
         }
         _ => false,
     }
@@ -246,7 +245,10 @@ mod tests {
     fn casefold_all_arms() {
         assert_eq!(casefold_str("AbC"), "abc");
         assert_eq!(casefold_value(&json!("Ab")).unwrap(), json!("ab"));
-        assert_eq!(casefold_value(&json!(["A", "B"])).unwrap(), json!(["a", "b"]));
+        assert_eq!(
+            casefold_value(&json!(["A", "B"])).unwrap(),
+            json!(["a", "b"])
+        );
         assert_eq!(casefold_value(&json!(null)).unwrap(), json!(null));
         assert!(casefold_value(&json!([1])).is_err()); // non-string element
         assert!(casefold_value(&json!(5)).is_err()); // non-foldable scalar

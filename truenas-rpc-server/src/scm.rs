@@ -34,7 +34,10 @@ pub fn send_with_fd(sock: &UnixStream, header: &[u8], fd: RawFd) -> io::Result<(
 /// `sock` (**AF_UNIX only**). Returns the header bytes actually read and the received fd (owned by
 /// the caller), or `None` for the fd if the peer passed none. Errors if the ancillary data was
 /// truncated (the peer sent more fds than the one-fd buffer holds).
-pub fn recv_with_fd(sock: &UnixStream, header_len: usize) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
+pub fn recv_with_fd(
+    sock: &UnixStream,
+    header_len: usize,
+) -> io::Result<(Vec<u8>, Option<OwnedFd>)> {
     let mut buf = vec![0u8; header_len];
     // Scope the `iov` borrow of `buf` so we can truncate `buf` to the received length afterwards.
     let (n, truncated, received) = {
@@ -44,8 +47,13 @@ pub fn recv_with_fd(sock: &UnixStream, header_len: usize) -> io::Result<(Vec<u8>
         let space = unsafe { libc::CMSG_SPACE(size_of::<RawFd>() as libc::c_uint) };
         let mut cmsg_buf: Vec<u8> = Vec::with_capacity(space as usize);
 
-        let msg = recvmsg::<UnixAddr>(sock.as_raw_fd(), &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())
-            .map_err(io::Error::from)?;
+        let msg = recvmsg::<UnixAddr>(
+            sock.as_raw_fd(),
+            &mut iov,
+            Some(&mut cmsg_buf),
+            MsgFlags::empty(),
+        )
+        .map_err(io::Error::from)?;
 
         let mut received: Option<OwnedFd> = None;
         for cmsg in msg.cmsgs().map_err(io::Error::from)? {
@@ -61,7 +69,11 @@ pub fn recv_with_fd(sock: &UnixStream, header_len: usize) -> io::Result<(Vec<u8>
                 }
             }
         }
-        (msg.bytes, msg.flags.contains(MsgFlags::MSG_CTRUNC), received)
+        (
+            msg.bytes,
+            msg.flags.contains(MsgFlags::MSG_CTRUNC),
+            received,
+        )
     };
     if truncated {
         return Err(io::Error::other("passed file descriptors were truncated"));

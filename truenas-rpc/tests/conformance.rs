@@ -20,8 +20,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
     tnfilter, AuditOutcome, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod,
-    Filtered, IdGen, JsonRpcError, RpcMethod, JsonRpcProtocol, RequestInfo, MethodDef,
-    Outbound, RequestCtx, Roles, Session, SessionId, SessionLifecycle, SubscriptionDef,
+    Filtered, IdGen, JsonRpcError, JsonRpcProtocol, MethodDef, Outbound, RequestCtx, RequestInfo,
+    Roles, RpcMethod, Session, SessionId, SessionLifecycle, SubscriptionDef,
 };
 
 const GOLDEN: &str = include_str!("conformance/golden.json");
@@ -83,7 +83,10 @@ type Captured = Arc<Mutex<Vec<Value>>>;
 struct VecSink(Captured);
 impl Outbound for VecSink {
     fn send(&self, message: Vec<u8>) {
-        self.0.lock().unwrap().push(serde_json::from_slice(&message).unwrap());
+        self.0
+            .lock()
+            .unwrap()
+            .push(serde_json::from_slice(&message).unwrap());
     }
 }
 
@@ -102,7 +105,11 @@ fn pinned() -> SessionId {
 
 /// The fixed source the `x.query` filterable reference method streams (matches the golden).
 fn query_data() -> Vec<Value> {
-    vec![json!({"id": 1, "name": "a"}), json!({"id": 2, "name": "b"}), json!({"id": 3, "name": "a"})]
+    vec![
+        json!({"id": 1, "name": "a"}),
+        json!({"id": 2, "name": "b"}),
+        json!({"id": 3, "name": "a"}),
+    ]
 }
 
 fn query_handler(
@@ -118,34 +125,51 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
     let captured: Captured = Arc::new(Mutex::new(Vec::new()));
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("ref-open", "1.0.0")
-        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
-            Ok(EchoResult { echo: a.msg })
-        }))
-        .unwrap()
-        .method(RpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
-            Ok(AddResult { sum: a.a + a.b })
-        }))
-        .unwrap()
-        .method(RpcMethod::new(MethodDef::new("boom"), |_a: Empty, _c: &RequestCtx<()>| {
-            Err::<OkResult, _>(JsonRpcError::request_failed("kaboom"))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("echo"),
+            |a: EchoArgs, _c: &RequestCtx<()>| Ok(EchoResult { echo: a.msg }),
+        ))
         .unwrap()
         .method(RpcMethod::new(
-            MethodDef::new("audit_me").audit_message("audited op").secret_fields(["password"]),
-            |a: AuditArgs, _c: &RequestCtx<()>| Ok(AuditResult { user: a.user, password: a.password }),
+            MethodDef::new("add"),
+            |a: AddArgs, _c: &RequestCtx<()>| Ok(AddResult { sum: a.a + a.b }),
+        ))
+        .unwrap()
+        .method(RpcMethod::new(
+            MethodDef::new("boom"),
+            |_a: Empty, _c: &RequestCtx<()>| {
+                Err::<OkResult, _>(JsonRpcError::request_failed("kaboom"))
+            },
+        ))
+        .unwrap()
+        .method(RpcMethod::new(
+            MethodDef::new("audit_me")
+                .audit_message("audited op")
+                .secret_fields(["password"]),
+            |a: AuditArgs, _c: &RequestCtx<()>| {
+                Ok(AuditResult {
+                    user: a.user,
+                    password: a.password,
+                })
+            },
         ))
         .unwrap()
         .server_info(|_s: &Session<()>| Ok(json!({"name": "ref", "version": "1.0.0"})))
-        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
-            cap.lock().unwrap().push(json!({
-                "method": req.method,
-                "params": req.params,
-                "audit_message": msg,
-            }));
-        })
-        .subscription(
-            SubscriptionDef::<Empty, PoolEvent>::new(MethodDef::new("events").audit_message("subscribed")),
+        .audit_sink(
+            move |req: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  msg: Option<&str>| {
+                cap.lock().unwrap().push(json!({
+                    "method": req.method,
+                    "params": req.params,
+                    "audit_message": msg,
+                }));
+            },
         )
+        .subscription(SubscriptionDef::<Empty, PoolEvent>::new(
+            MethodDef::new("events").audit_message("subscribed"),
+        ))
         .unwrap()
         .filterable(FilterableRpcMethod::<Empty, Value, _>::new(
             MethodDef::new("x.query"),
@@ -160,39 +184,56 @@ fn build_open() -> (JsonRpcProtocol<()>, Captured) {
 fn build_gated() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("ref-gated", "1.0.0")
         .roles(Roles::new(["AUTH"]))
-        .method(RpcMethod::new(MethodDef::new("ping").pre_auth(), |_a: Empty, _c: &RequestCtx<()>| {
-            Ok(PingResult { pong: true })
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("ping").pre_auth(),
+            |_a: Empty, _c: &RequestCtx<()>| Ok(PingResult { pong: true }),
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
-            Ok(EchoResult { echo: a.msg })
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("echo"),
+            |a: EchoArgs, _c: &RequestCtx<()>| Ok(EchoResult { echo: a.msg }),
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
-            Ok(AddResult { sum: a.a + a.b })
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("add"),
+            |a: AddArgs, _c: &RequestCtx<()>| Ok(AddResult { sum: a.a + a.b }),
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("boom"), |_a: Empty, _c: &RequestCtx<()>| {
-            Err::<OkResult, _>(JsonRpcError::request_failed("kaboom"))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("boom"),
+            |_a: Empty, _c: &RequestCtx<()>| {
+                Err::<OkResult, _>(JsonRpcError::request_failed("kaboom"))
+            },
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("secret_op").roles(["AUTH"]), |_a: Empty, _c: &RequestCtx<()>| {
-            Ok(OkResult { ok: true })
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("secret_op").roles(["AUTH"]),
+            |_a: Empty, _c: &RequestCtx<()>| Ok(OkResult { ok: true }),
+        ))
         .unwrap()
-        .session_setup(MethodDef::new("$/sessionSetup"), |a: SetupArgs, _s: &Session<()>| {
-            if a.token == "good" {
-                Ok((SessionLifecycle::Established, SetupResult { welcome: "hi".into() }))
-            } else {
-                Err(JsonRpcError::not_authorized("bad token"))
-            }
-        })
+        .session_setup(
+            MethodDef::new("$/sessionSetup"),
+            |a: SetupArgs, _s: &Session<()>| {
+                if a.token == "good" {
+                    Ok((
+                        SessionLifecycle::Established,
+                        SetupResult {
+                            welcome: "hi".into(),
+                        },
+                    ))
+                } else {
+                    Err(JsonRpcError::not_authorized("bad token"))
+                }
+            },
+        )
         .build()
 }
 
 fn build_pubsub() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("ref-pubsub", "1.0.0")
-        .subscription(SubscriptionDef::<Empty, PoolEvent>::new(MethodDef::new("events")))
+        .subscription(SubscriptionDef::<Empty, PoolEvent>::new(MethodDef::new(
+            "events",
+        )))
         .unwrap()
         .id_gen(FixedId(pinned()))
         .build()
@@ -225,7 +266,10 @@ async fn run_steps(
     steps: &[Value],
     expected_notifs: &[Value],
 ) -> usize {
-    assert!(!steps.is_empty(), "{name}: case has no steps (nothing would be asserted)");
+    assert!(
+        !steps.is_empty(),
+        "{name}: case has no steps (nothing would be asserted)"
+    );
     let notifs: Captured = Arc::new(Mutex::new(Vec::new()));
     let session = proto.new_session(Some(()), Arc::new(VecSink(notifs.clone())));
     let mut dispatched = 0;
@@ -233,27 +277,43 @@ async fn run_steps(
         if step["kind"] == json!("publish") {
             // A server-side publish: fans out to subscribers via the Outbound sink.
             let topic = step["topic"].as_str().expect("publish topic is a string");
-            proto.send_notification(topic, &step["payload"]).expect("publish succeeds");
+            proto
+                .send_notification(topic, &step["payload"])
+                .expect("publish succeeds");
             continue;
         }
         let wire = step["wire"].as_str().expect("wire is a string");
         let actual = match proto.dispatch(wire.as_bytes(), &session).await {
             Dispatched::Reply(b) => Some(serde_json::from_slice::<Value>(&b).unwrap()),
             Dispatched::Nothing => None,
-            Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => unreachable!("transfer/passthrough directive unexpected in this test"),
+            Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => {
+                unreachable!("transfer/passthrough directive unexpected in this test")
+            }
         };
         let expected = &step["response"];
         if expected.is_null() {
-            assert!(actual.is_none(), "{name} step {i}: expected no reply, got {actual:?}");
+            assert!(
+                actual.is_none(),
+                "{name} step {i}: expected no reply, got {actual:?}"
+            );
         } else {
-            let actual = actual.unwrap_or_else(|| panic!("{name} step {i}: expected a reply, got none"));
-            assert_eq!(strip_data(expected), strip_data(&actual), "{name} step {i} response mismatch");
+            let actual =
+                actual.unwrap_or_else(|| panic!("{name} step {i}: expected a reply, got none"));
+            assert_eq!(
+                strip_data(expected),
+                strip_data(&actual),
+                "{name} step {i} response mismatch"
+            );
         }
         dispatched += 1;
     }
     // Server→client notifications the publishes fanned out (FIFO).
     let got = notifs.lock().unwrap();
-    assert_eq!(expected_notifs.len(), got.len(), "{name}: notification count");
+    assert_eq!(
+        expected_notifs.len(),
+        got.len(),
+        "{name}: notification count"
+    );
     for (i, (e, g)) in expected_notifs.iter().zip(got.iter()).enumerate() {
         assert_eq!(e, g, "{name} notification {i} mismatch");
     }
@@ -275,14 +335,21 @@ async fn differential_against_frozen_golden() {
         let proto_name = case["protocol"].as_str().unwrap();
         let steps = case["steps"].as_array().unwrap();
         let expected_audits = case["audits"].as_array().cloned().unwrap_or_default();
-        let expected_notifs = case["notifications"].as_array().cloned().unwrap_or_default();
+        let expected_notifs = case["notifications"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
 
         match proto_name {
             "open" => {
                 let (proto, captured) = build_open();
                 total_steps += run_steps(&proto, name, steps, &expected_notifs).await;
                 let got = captured.lock().unwrap();
-                assert_eq!(expected_audits.len(), got.len(), "{name}: audit-record count");
+                assert_eq!(
+                    expected_audits.len(),
+                    got.len(),
+                    "{name}: audit-record count"
+                );
                 for (i, (e, g)) in expected_audits.iter().zip(got.iter()).enumerate() {
                     assert_eq!(strip_audit(e), strip_audit(g), "{name} audit {i} mismatch");
                 }
@@ -291,12 +358,18 @@ async fn differential_against_frozen_golden() {
             "gated" => {
                 let proto = build_gated();
                 total_steps += run_steps(&proto, name, steps, &expected_notifs).await;
-                assert!(expected_audits.is_empty(), "{name}: gated protocol has no audit sink");
+                assert!(
+                    expected_audits.is_empty(),
+                    "{name}: gated protocol has no audit sink"
+                );
             }
             "pubsub" => {
                 let proto = build_pubsub();
                 total_steps += run_steps(&proto, name, steps, &expected_notifs).await;
-                assert!(expected_audits.is_empty(), "{name}: pubsub protocol has no audit sink");
+                assert!(
+                    expected_audits.is_empty(),
+                    "{name}: pubsub protocol has no audit sink"
+                );
             }
             other => panic!("{name}: unknown protocol {other:?}"),
         }
@@ -305,6 +378,12 @@ async fn differential_against_frozen_golden() {
     // The corpus must actually exercise a meaningful number of comparisons, and the
     // audit path must have produced (and matched) at least one record — otherwise the
     // test would be a no-op even while "passing".
-    assert!(total_steps >= 25, "suspiciously few request/response comparisons: {total_steps}");
-    assert!(total_audit_records >= 1, "audit comparison was never exercised");
+    assert!(
+        total_steps >= 25,
+        "suspiciously few request/response comparisons: {total_steps}"
+    );
+    assert!(
+        total_audit_records >= 1,
+        "audit comparison was never exercised"
+    );
 }

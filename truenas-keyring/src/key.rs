@@ -104,7 +104,13 @@ fn parse_description(s: &str) -> Description {
     let uid = fields.next().and_then(|t| t.parse().ok());
     let gid = fields.next().and_then(|t| t.parse().ok());
     let permissions = fields.next().and_then(|t| u32::from_str_radix(t, 16).ok());
-    Description { key_type, uid, gid, permissions, description }
+    Description {
+        key_type,
+        uid,
+        gid,
+        permissions,
+        description,
+    }
 }
 
 fn cstring(s: &str) -> Result<CString, Error> {
@@ -168,33 +174,56 @@ impl KeyRing {
 
     /// A handle to one of the caller's special keyrings.
     pub fn special(which: SpecialKeyring) -> KeyRing {
-        KeyRing { serial: which.serial() }
+        KeyRing {
+            serial: which.serial(),
+        }
     }
 
     /// `uid`'s persistent keyring (`keyctl_get_persistent`), linked into the process keyring.
     /// `None` uses the caller's own uid.
     pub fn get_persistent(uid: Option<u32>) -> Result<KeyRing, Error> {
         let uid_arg = uid.map_or(-1, |u| u as c_int);
-        Ok(KeyRing { serial: sys::get_persistent(uid_arg, KEY_SPEC_PROCESS_KEYRING)? })
+        Ok(KeyRing {
+            serial: sys::get_persistent(uid_arg, KEY_SPEC_PROCESS_KEYRING)?,
+        })
     }
 
     /// `request_key(2)` — search the caller's keyrings for a key by type + description.
     pub fn request_key(key_type: KeyType, description: &str) -> Result<Found, Error> {
-        Found::from_serial(sys::request_key(key_type.c_bytes(), &cstring(description)?)?)
+        Found::from_serial(sys::request_key(
+            key_type.c_bytes(),
+            &cstring(description)?,
+        )?)
     }
 
     /// Add (or, by description, update) a non-keyring key in this keyring. Use [`add_keyring`](Self::add_keyring)
     /// for a sub-keyring.
     pub fn add_key(&self, key_type: KeyType, description: &str, data: &[u8]) -> Result<Key, Error> {
         if key_type == KeyType::Keyring {
-            return Err(Error::InvalidName("add_key cannot create a keyring; use add_keyring".into()));
+            return Err(Error::InvalidName(
+                "add_key cannot create a keyring; use add_keyring".into(),
+            ));
         }
-        Ok(Key { serial: sys::add_key(key_type.c_bytes(), &cstring(description)?, data, self.serial)? })
+        Ok(Key {
+            serial: sys::add_key(
+                key_type.c_bytes(),
+                &cstring(description)?,
+                data,
+                self.serial,
+            )?,
+        })
     }
 
     /// Create a sub-keyring in this keyring.
     pub fn add_keyring(&self, description: &str) -> Result<KeyRing, Error> {
-        Ok(KeyRing { serial: sys::add_key(KeyType::Keyring.c_bytes(), &cstring(description)?, &[], self.serial)? })
+        Ok(KeyRing {
+            serial: sys::add_key(
+                KeyType::Keyring.c_bytes(),
+                &cstring(description)?,
+                &[],
+                self.serial,
+            )?,
+        })
     }
 
     /// Recursively search for a key by type + description; `None` if not found.
@@ -212,7 +241,11 @@ impl KeyRing {
 
     /// The live children of this keyring as typed handles, skipping (and optionally unlinking)
     /// expired/revoked keys — the peer of `list_keyring_contents`.
-    pub fn list_contents(&self, unlink_expired: bool, unlink_revoked: bool) -> Result<Vec<Found>, Error> {
+    pub fn list_contents(
+        &self,
+        unlink_expired: bool,
+        unlink_revoked: bool,
+    ) -> Result<Vec<Found>, Error> {
         let mut out = Vec::new();
         for serial in sys::read_serials(self.serial)? {
             // Peek for liveness before presenting (mirrors the C peek + optional unlink).
@@ -271,7 +304,12 @@ impl KeyRing {
     // --- record convenience: store/fetch/remove a JSON record as a `user` key, keyed by string ---
 
     /// Store `record` (JSON) under `key` as a `user` key, upserting; `ttl_secs` expires it.
-    pub fn put_record<T: Serialize>(&self, key: &str, record: &T, ttl_secs: Option<u32>) -> Result<Key, Error> {
+    pub fn put_record<T: Serialize>(
+        &self,
+        key: &str,
+        record: &T,
+        ttl_secs: Option<u32>,
+    ) -> Result<Key, Error> {
         let bytes = serde_json::to_vec(record).map_err(Error::Record)?;
         let k = self.add_key(KeyType::User, key, &bytes)?;
         if let Some(secs) = ttl_secs {
@@ -282,7 +320,8 @@ impl KeyRing {
 
     /// Fetch and deserialize the record under `key`, or `None` if absent.
     pub fn get_record<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>, Error> {
-        let Some(serial) = sys::search(self.serial, KeyType::User.c_bytes(), &cstring(key)?)? else {
+        let Some(serial) = sys::search(self.serial, KeyType::User.c_bytes(), &cstring(key)?)?
+        else {
             return Ok(None);
         };
         let bytes = sys::read(serial)?;
@@ -291,7 +330,8 @@ impl KeyRing {
 
     /// Remove the record under `key`; returns whether it existed.
     pub fn remove_record(&self, key: &str) -> Result<bool, Error> {
-        let Some(serial) = sys::search(self.serial, KeyType::User.c_bytes(), &cstring(key)?)? else {
+        let Some(serial) = sys::search(self.serial, KeyType::User.c_bytes(), &cstring(key)?)?
+        else {
             return Ok(false);
         };
         sys::unlink(serial, self.serial)?;

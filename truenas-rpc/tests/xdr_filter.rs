@@ -9,13 +9,15 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome,
-    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod, JsonRpcError,
-    JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, Session,
+    tnfilter, AuditOutcome, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod,
+    JsonRpcError, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RequestInfo, Session,
 };
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 /// The filterable method's base accepts (empty — the query rides in query-filters/options).
@@ -37,11 +39,41 @@ struct FEntry {
 /// `order_desc` golden), in id order.
 fn dataset() -> Vec<FEntry> {
     vec![
-        FEntry { id: 1, name: "alpha".into(), ratio: 0.5, active: true, note: Some("x".into()) },
-        FEntry { id: 2, name: "beta".into(), ratio: 2.5, active: false, note: None },
-        FEntry { id: 3, name: "alpha".into(), ratio: 1.5, active: true, note: None },
-        FEntry { id: 4, name: "gamma".into(), ratio: 3.5, active: false, note: Some("y".into()) },
-        FEntry { id: 5, name: "Alpha".into(), ratio: 0.25, active: true, note: Some("z".into()) },
+        FEntry {
+            id: 1,
+            name: "alpha".into(),
+            ratio: 0.5,
+            active: true,
+            note: Some("x".into()),
+        },
+        FEntry {
+            id: 2,
+            name: "beta".into(),
+            ratio: 2.5,
+            active: false,
+            note: None,
+        },
+        FEntry {
+            id: 3,
+            name: "alpha".into(),
+            ratio: 1.5,
+            active: true,
+            note: None,
+        },
+        FEntry {
+            id: 4,
+            name: "gamma".into(),
+            ratio: 3.5,
+            active: false,
+            note: Some("y".into()),
+        },
+        FEntry {
+            id: 5,
+            name: "Alpha".into(),
+            ratio: 0.25,
+            active: true,
+            note: Some("z".into()),
+        },
     ]
 }
 
@@ -85,7 +117,9 @@ async fn xdr_filter_goldens() {
         let got = match p.dispatch(&unhex(request), &s).await {
             Dispatched::Reply(b) => b,
             Dispatched::Nothing => panic!("{name}: expected a reply"),
-            Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => unreachable!("transfer/passthrough directive unexpected in this test"),
+            Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => {
+                unreachable!("transfer/passthrough directive unexpected in this test")
+            }
         };
         assert_eq!(got, unhex(reply), "{name}: filterable XDR reply mismatch");
     }
@@ -100,15 +134,22 @@ async fn audited_filterable_xdr_call_emits_audit_record() {
     let rec = records.clone();
     let p = JsonRpcProtocol::<()>::builder("conf", "1")
         .filterable(FilterableRpcMethod::<QueryArgs, FEntry, _>::new(
-            MethodDef::new("xdr.query").xdr(1003).audit_message("queried"),
+            MethodDef::new("xdr.query")
+                .xdr(1003)
+                .audit_message("queried"),
             |_a: QueryArgs, _cx: &RequestCtx<()>, f: &CompiledFilters, o: &CompiledOptions| {
                 Ok::<_, JsonRpcError>(tnfilter(dataset(), f, o)?)
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            rec.lock().unwrap().push(json!({ "params": req.params }));
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                rec.lock().unwrap().push(json!({ "params": req.params }));
+            },
+        )
         .build();
     // `xdr_filter_eq` → the matching rows; `xdr_filter_count` → the integer count. Auditing each
     // exercises params reflection for both the `Rows` and `Count` shapes (the wire bytes themselves are
@@ -121,7 +162,10 @@ async fn audited_filterable_xdr_call_emits_audit_record() {
     }
     let recs = records.lock().unwrap();
     // Rows shape: the reflected query-filters.
-    assert_eq!(recs[0]["params"]["query-filters"], json!([["name", "=", "alpha"]]));
+    assert_eq!(
+        recs[0]["params"]["query-filters"],
+        json!([["name", "=", "alpha"]])
+    );
     // Count shape: the reflected query-options.
     assert_eq!(recs[1]["params"]["query-options"]["count"], true);
 }

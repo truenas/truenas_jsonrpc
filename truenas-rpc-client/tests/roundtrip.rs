@@ -33,10 +33,11 @@ fn proto() -> JsonRpcProtocol<()> {
 }
 
 async fn serve(tag: &str) -> std::path::PathBuf {
-    let path =
-        std::env::temp_dir().join(format!("tnrpc-client-{}-{tag}.sock", std::process::id()));
+    let path = std::env::temp_dir().join(format!("tnrpc-client-{}-{tag}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let srv = TruenasRpcServer::<()>::builder("demo-server").protocol("demo", proto()).build();
+    let srv = TruenasRpcServer::<()>::builder("demo-server")
+        .protocol("demo", proto())
+        .build();
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await });
     path
@@ -53,12 +54,20 @@ async fn negotiate_then_call_both_seams() {
     assert_eq!(negotiated.protocol, "demo");
 
     // The rich engine call (a method key + raw wire bytes, rich `ClientError`).
-    let out = client.call(&JsonRpcMethod::Name("math.add".to_string()), br#"{"a":20,"b":22}"#).await.unwrap();
+    let out = client
+        .call(
+            &JsonRpcMethod::Name("math.add".to_string()),
+            br#"{"a":20,"b":22}"#,
+        )
+        .await
+        .unwrap();
     assert_eq!(serde_json::from_slice::<AddResult>(&out).unwrap().sum, 42);
 
     // The `CallEngine` seam the codegen sits on: serialized params in, serialized result out.
     let bytes = serde_json::to_vec(&AddArgs { a: 2, b: 40 }).unwrap();
-    let out = CallEngine::call(&client, MethodKey::Name("math.add"), &bytes).await.unwrap();
+    let out = CallEngine::call(&client, MethodKey::Name("math.add"), &bytes)
+        .await
+        .unwrap();
     assert_eq!(serde_json::from_slice::<AddResult>(&out).unwrap().sum, 42);
 
     let _ = std::fs::remove_file(&path);
@@ -75,13 +84,17 @@ async fn xdr_proc_call_over_the_same_connection() {
     // Negotiated over JSON, but call the xdr-declared method over the TXDR sub-wire (proc 1001):
     // XDR-encode the params, address by proc-id, decode the XDR reply — the generated-client path.
     let params = truenas_rpc_client::to_xdr(&AddArgs { a: 30, b: 12 }).unwrap();
-    let out = CallEngine::call(&client, MethodKey::Proc(1001), &params).await.unwrap();
+    let out = CallEngine::call(&client, MethodKey::Proc(1001), &params)
+        .await
+        .unwrap();
     let result: AddResult = truenas_rpc_client::from_xdr(&out).unwrap();
     assert_eq!(result.sum, 42);
 
     // A JSON call still works on the same client (mixed wires, one connection).
     let json = serde_json::to_vec(&AddArgs { a: 1, b: 1 }).unwrap();
-    let jout = CallEngine::call(&client, MethodKey::Name("math.add"), &json).await.unwrap();
+    let jout = CallEngine::call(&client, MethodKey::Name("math.add"), &json)
+        .await
+        .unwrap();
     assert_eq!(serde_json::from_slice::<AddResult>(&jout).unwrap().sum, 2);
 
     let _ = std::fs::remove_file(&path);
@@ -94,7 +107,10 @@ async fn unknown_method_is_an_rpc_error() {
         JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "demo", ClientConfig::default())
             .await
             .unwrap();
-    let err = client.call(&JsonRpcMethod::Name("math.nope".to_string()), b"").await.unwrap_err();
+    let err = client
+        .call(&JsonRpcMethod::Name("math.nope".to_string()), b"")
+        .await
+        .unwrap_err();
     // METHOD_NOT_FOUND surfaces as a server Rpc error, flattened by the codegen seam.
     assert_eq!(err.into_jsonrpc().code, -32601);
     let _ = std::fs::remove_file(&path);

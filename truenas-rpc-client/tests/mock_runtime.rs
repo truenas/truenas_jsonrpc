@@ -21,7 +21,9 @@ impl Framing for MockFraming {
         }
         let len = u32::from_le_bytes([acc[0], acc[1], acc[2], acc[3]]) as usize;
         if len > limit {
-            return Err(ClientError::Decode(format!("mock frame {len} > limit {limit}")));
+            return Err(ClientError::Decode(format!(
+                "mock frame {len} > limit {limit}"
+            )));
         }
         if acc.len() < 4 + len {
             return Ok(None);
@@ -71,7 +73,10 @@ impl ProtocolRuntime for MockRuntime {
             return Err(ClientError::Decode("mock reply too short".into()));
         }
         let key = u64::from_le_bytes(frame[..8].try_into().unwrap());
-        Ok(Inbound::Reply { key, result: Ok(frame[8..].to_vec()) })
+        Ok(Inbound::Reply {
+            key,
+            result: Ok(frame[8..].to_vec()),
+        })
     }
 }
 
@@ -80,7 +85,9 @@ impl ProtocolRuntime for MockRuntime {
 /// can assert the round-trip). No framework anywhere.
 async fn mock_serve(listener: UnixListener) {
     loop {
-        let Ok((mut stream, _)) = listener.accept().await else { return };
+        let Ok((mut stream, _)) = listener.accept().await else {
+            return;
+        };
         tokio::spawn(async move {
             let mut acc: Vec<u8> = Vec::new();
             let mut tmp = [0u8; 4096];
@@ -118,10 +125,13 @@ async fn mock_runtime_round_trips_through_the_neutral_engine() {
     let listener = UnixListener::bind(&path).unwrap(); // bound before we connect
     tokio::spawn(mock_serve(listener));
 
-    let (client, _notifs) =
-        Client::connect(MockRuntime::default(), &Endpoint::unix(&path), ClientConfig::default())
-            .await
-            .unwrap();
+    let (client, _notifs) = Client::connect(
+        MockRuntime::default(),
+        &Endpoint::unix(&path),
+        ClientConfig::default(),
+    )
+    .await
+    .unwrap();
 
     // Two calls: each draws its own sequence key, so correct correlation is what returns the right
     // echo. Method key is a bare `u32` op-code — no method *name* anywhere.

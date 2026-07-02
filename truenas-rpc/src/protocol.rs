@@ -25,8 +25,8 @@ use crate::envelope::{self, ParsedRequest};
 use crate::error::{BuildResult, Error, ErrorCode, JsonRpcError};
 use crate::method::{
     decode_params, encode_result, AsyncRpcMethod, Encode, ErasedTransfer, FilterableRpcMethod,
-    RpcFdPassMethod, RpcFdTransferMethod, RpcMethod, Method, MethodDef, MethodImpl,
-    MethodMeta, SubscriptionDef, SubscriptionImpl, WireParams,
+    Method, MethodDef, MethodImpl, MethodMeta, RpcFdPassMethod, RpcFdTransferMethod, RpcMethod,
+    SubscriptionDef, SubscriptionImpl, WireParams,
 };
 use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
 use crate::request::{InternalCaller, RequestCtx};
@@ -36,7 +36,7 @@ use crate::session::{
 };
 use crate::setup::{SetupHandoff, SetupOutcome, SetupTakeover};
 use crate::transfer::{FileTransfer, Transfer, TransferDirection};
-use crate::types::{RequestInfo, MessageDirection, SessionLifecycle};
+use crate::types::{MessageDirection, RequestInfo, SessionLifecycle};
 use truenas_filter::{CompiledFilters, CompiledOptions, Filtered};
 
 const CANCEL_METHOD: &str = "$/cancelRequest";
@@ -240,7 +240,11 @@ enum RawSetupOutcome {
 }
 
 trait ErasedSetup<S>: Send + Sync {
-    fn handle(&self, params: Option<&RawValue>, session: &Arc<Session<S>>) -> Result<RawSetupOutcome, JsonRpcError>;
+    fn handle(
+        &self,
+        params: Option<&RawValue>,
+        session: &Arc<Session<S>>,
+    ) -> Result<RawSetupOutcome, JsonRpcError>;
 }
 
 /// Adapter for a takeover-capable `$/sessionSetup` handler (returns a [`SetupOutcome`]).
@@ -256,10 +260,16 @@ where
     R: Serialize,
     F: Fn(A, &Arc<Session<S>>) -> Result<SetupOutcome<R>, JsonRpcError> + Send + Sync,
 {
-    fn handle(&self, params: Option<&RawValue>, session: &Arc<Session<S>>) -> Result<RawSetupOutcome, JsonRpcError> {
+    fn handle(
+        &self,
+        params: Option<&RawValue>,
+        session: &Arc<Session<S>>,
+    ) -> Result<RawSetupOutcome, JsonRpcError> {
         let accepts: A = decode_params(params)?;
         Ok(match (self.f)(accepts, session)? {
-            SetupOutcome::Commit(lifecycle, returns) => RawSetupOutcome::Commit(lifecycle, encode_result(&returns)?),
+            SetupOutcome::Commit(lifecycle, returns) => {
+                RawSetupOutcome::Commit(lifecycle, encode_result(&returns)?)
+            }
             SetupOutcome::Takeover(handoff) => RawSetupOutcome::Takeover(handoff),
         })
     }
@@ -279,7 +289,11 @@ where
     R: Serialize,
     F: Fn(A, &Session<S>) -> Result<(SessionLifecycle, R), JsonRpcError> + Send + Sync,
 {
-    fn handle(&self, params: Option<&RawValue>, session: &Arc<Session<S>>) -> Result<RawSetupOutcome, JsonRpcError> {
+    fn handle(
+        &self,
+        params: Option<&RawValue>,
+        session: &Arc<Session<S>>,
+    ) -> Result<RawSetupOutcome, JsonRpcError> {
         let accepts: A = decode_params(params)?;
         let (lifecycle, returns) = (self.f)(accepts, session)?;
         Ok(RawSetupOutcome::Commit(lifecycle, encode_result(&returns)?))
@@ -386,7 +400,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
                 ))
             })?;
             method.meta.required = registry.mask(method.meta.roles.iter()).map_err(|unknown| {
-                Error::Config(format!("method {name:?} requires unregistered role {unknown:?}"))
+                Error::Config(format!(
+                    "method {name:?} requires unregistered role {unknown:?}"
+                ))
             })?;
         }
         match method.meta.xdr_id {
@@ -453,12 +469,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     /// Register a filterable (query) request method. The handler receives the compiled
     /// `query-filters` / `query-options` and applies them at its source via
     /// [`truenas_filter::tnfilter`]; the framework applies the `get`/`count` finalize.
-    pub fn filterable<F, A, E>(
-        mut self,
-        method: FilterableRpcMethod<A, E, F>,
-    ) -> BuildResult<Self>
+    pub fn filterable<F, A, E>(mut self, method: FilterableRpcMethod<A, E, F>) -> BuildResult<Self>
     where
-        F: Fn(A, &RequestCtx<S>, &CompiledFilters, &CompiledOptions) -> Result<Filtered<E>, JsonRpcError>
+        F: Fn(
+                A,
+                &RequestCtx<S>,
+                &CompiledFilters,
+                &CompiledOptions,
+            ) -> Result<Filtered<E>, JsonRpcError>
             + Send
             + Sync
             + 'static,
@@ -581,7 +599,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     {
         self.setup = Some(SetupSlot {
             meta: def.into_meta(MessageDirection::ClientServer),
-            handler: Arc::new(ClosureCommit { f: handler, _p: PhantomData }),
+            handler: Arc::new(ClosureCommit {
+                f: handler,
+                _p: PhantomData,
+            }),
         });
         self
     }
@@ -600,7 +621,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     {
         self.setup = Some(SetupSlot {
             meta: def.into_meta(MessageDirection::ClientServer),
-            handler: Arc::new(ClosureSetup { f: handler, _p: PhantomData }),
+            handler: Arc::new(ClosureSetup {
+                f: handler,
+                _p: PhantomData,
+            }),
         });
         self
     }
@@ -618,7 +642,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     {
         self.setup_continue = Some(SetupSlot {
             meta: def.into_meta(MessageDirection::ClientServer),
-            handler: Arc::new(ClosureCommit { f: handler, _p: PhantomData }),
+            handler: Arc::new(ClosureCommit {
+                f: handler,
+                _p: PhantomData,
+            }),
         });
         self
     }
@@ -638,7 +665,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocolBuilder<S> {
     /// Freeze into a [`JsonRpcProtocol`].
     pub fn build(self) -> JsonRpcProtocol<S> {
         let has_session_setup = self.setup.is_some();
-        let registry = Arc::new(Registry { methods: self.methods, xdr_methods: self.xdr_methods });
+        let registry = Arc::new(Registry {
+            methods: self.methods,
+            xdr_methods: self.xdr_methods,
+        });
         let caller: Arc<dyn InternalCaller<S>> = Arc::new(Caller {
             registry: registry.clone(),
             audit_sink: self.audit_sink.clone(),
@@ -705,8 +735,12 @@ impl<S: Send + Sync + 'static> Service<S> {
     /// Create a fresh [`Session`] for a connection (and track it in the session registry). `out`
     /// is the back-channel sink.
     pub fn new_session(&self, server_state: Option<S>, out: Arc<dyn Outbound>) -> Arc<Session<S>> {
-        let session =
-            Arc::new(Session::new(self.id_gen.new_id(), self.name.clone(), server_state, out));
+        let session = Arc::new(Session::new(
+            self.id_gen.new_id(),
+            self.name.clone(),
+            server_state,
+            out,
+        ));
         // Register a `Weak` handle — the caller (connection task) owns the returned `Arc`.
         self.sessions
             .lock()
@@ -719,7 +753,10 @@ impl<S: Send + Sync + 'static> Service<S> {
     /// the JSON-RPC wire's concern — see [`JsonRpcProtocol::close_session`].)
     pub fn close_session(&self, session: &Session<S>) {
         session.set_lifecycle(SessionLifecycle::Closed);
-        self.sessions.lock().unwrap_or_else(PoisonError::into_inner).remove(&session.id());
+        self.sessions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&session.id());
     }
 
     /// Run a registered method by its XDR proc-id over raw XDR-encoded `params`, returning the
@@ -745,9 +782,16 @@ impl<S: Send + Sync + 'static> Service<S> {
             pipeline.run_xdr_async(params, cx, Encode::XdrBody).await
         } else {
             let params = params.to_vec();
-            match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx, Encode::XdrBody)).await {
+            match tokio::task::spawn_blocking(move || {
+                pipeline.run_xdr(&params, cx, Encode::XdrBody)
+            })
+            .await
+            {
                 Ok(result) => result,
-                Err(_panicked) => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+                Err(_panicked) => Err(JsonRpcError::new(
+                    ErrorCode::InternalError,
+                    "Internal error",
+                )),
             }
         }
     }
@@ -780,10 +824,15 @@ impl<S: Send + Sync + 'static> Service<S> {
             && !method.meta.pre_auth
             && session.lifecycle() != SessionLifecycle::Established
         {
-            return Err(JsonRpcError::session_not_established("Session not established"));
+            return Err(JsonRpcError::session_not_established(
+                "Session not established",
+            ));
         }
-        let audit_id =
-            if method.meta.audit { rid.map(|b| uuid::Uuid::from_bytes(b).to_string()) } else { None };
+        let audit_id = if method.meta.audit {
+            rid.map(|b| uuid::Uuid::from_bytes(b).to_string())
+        } else {
+            None
+        };
         let req = if method.meta.audit {
             RequestInfo {
                 method: method.meta.name.to_string(),
@@ -792,7 +841,12 @@ impl<S: Send + Sync + 'static> Service<S> {
                 roles: method.meta.roles.to_vec(),
             }
         } else {
-            RequestInfo { method: String::new(), id: None, params: Value::Null, roles: Vec::new() }
+            RequestInfo {
+                method: String::new(),
+                id: None,
+                params: Value::Null,
+                roles: Vec::new(),
+            }
         };
         let is_async = matches!(method.imp, MethodImpl::Async(_));
         let cx = RequestCtx::new_xdr(
@@ -880,7 +934,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
     /// Drop a single subscription by id. Returns `true` if it existed.
     pub fn unsubscribe(&self, sub_id: &str) -> bool {
-        let mut subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut subs = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for topic in subs.values_mut() {
             if topic.remove(sub_id).is_some() {
                 return true;
@@ -893,7 +950,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     pub fn unsubscribe_all(&self, session: &Session<S>) -> usize {
         let sid = session.id();
         let mut removed = 0;
-        let mut subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut subs = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         for topic in subs.values_mut() {
             topic.retain(|_, sub| {
                 let keep = sub.session.id() != sid;
@@ -908,8 +968,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
     /// The session that owns `sub_id`, if any (without removing it) — used by `$/cancelRequest`.
     fn subscription_owner(&self, sub_id: &str) -> Option<SessionId> {
-        let subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
-        subs.values().find_map(|topic| topic.get(sub_id).map(|s| s.session.id()))
+        let subs = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        subs.values()
+            .find_map(|topic| topic.get(sub_id).map(|s| s.session.id()))
     }
 
     /// Publish a notification to every subscriber of a `SERVER_CLIENT` topic. The payload is
@@ -929,11 +993,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 )))
             }
         };
-        let value =
-            serde_json::to_value(payload).map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
+        let value = serde_json::to_value(payload)
+            .map_err(|e| JsonRpcError::invalid_params(e.to_string()))?;
         let params = sub_impl.validate_publish(&value)?;
         let bytes = envelope::notification(topic, &params);
-        let subs = self.subscriptions.lock().unwrap_or_else(PoisonError::into_inner);
+        let subs = self
+            .subscriptions
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if let Some(topic_subs) = subs.get(topic) {
             for sub in topic_subs.values() {
                 sub.session.outbound().send(bytes.clone());
@@ -1009,7 +1076,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // produce a response object (a notification yields `Nothing` and is omitted, per spec).
         let mut objects: Vec<Vec<u8>> = Vec::with_capacity(elements.len());
         for element in elements {
-            match self.dispatch_json_one(element.get().as_bytes(), session).await {
+            match self
+                .dispatch_json_one(element.get().as_bytes(), session)
+                .await
+            {
                 Dispatched::Reply(b) => objects.push(b),
                 Dispatched::Nothing => {}
                 // Connection-level directives (raw-fd transfer, setup passthrough, the
@@ -1058,9 +1128,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             Ok(r) => r,
             // Truncated/corrupt frame: no id to echo — reply with an id-less error frame.
             Err(_) => {
-                return Dispatched::Reply(
-                    self.xdr_error(None, &JsonRpcError::new(ErrorCode::InvalidRequest, "Invalid request")),
-                )
+                return Dispatched::Reply(self.xdr_error(
+                    None,
+                    &JsonRpcError::new(ErrorCode::InvalidRequest, "Invalid request"),
+                ))
             }
         };
         let rid = request.rid;
@@ -1076,16 +1147,23 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let outcome = match self.service.prepare_xdr(request.proc_id, rid, session) {
             Ok((pipeline, cx, is_async)) => {
                 if is_async {
-                    pipeline.run_xdr_async(request.params, cx, Encode::Xdr(rid)).await
+                    pipeline
+                        .run_xdr_async(request.params, cx, Encode::Xdr(rid))
+                        .await
                 } else {
                     let params = request.params.to_vec();
-                    match tokio::task::spawn_blocking(move || pipeline.run_xdr(&params, cx, Encode::Xdr(rid))).await {
+                    match tokio::task::spawn_blocking(move || {
+                        pipeline.run_xdr(&params, cx, Encode::Xdr(rid))
+                    })
+                    .await
+                    {
                         Ok(result) => result,
                         // A handler panic unwinds the worker thread; reply INTERNAL_ERROR (the JSON
                         // sync path does the same via `run_blocking`).
-                        Err(_panicked) => {
-                            Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error"))
-                        }
+                        Err(_panicked) => Err(JsonRpcError::new(
+                            ErrorCode::InternalError,
+                            "Internal error",
+                        )),
                     }
                 }
             }
@@ -1107,7 +1185,11 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         truenas_xdr::frame::build_reply_err(rid, e.code, &detail).expect("XDR error frame encodes")
     }
 
-    async fn dispatch_parsed(&self, parsed: ParsedRequest, session: &Arc<Session<S>>) -> Dispatched {
+    async fn dispatch_parsed(
+        &self,
+        parsed: ParsedRequest,
+        session: &Arc<Session<S>>,
+    ) -> Dispatched {
         let note = parsed.id.is_none();
         let rid = parsed.id.clone();
 
@@ -1130,7 +1212,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             SERVERINFO_METHOD => return self.handle_server_info(parsed, session).await,
             DESCRIBE_METHOD => return self.handle_describe(parsed),
             SESSION_SETUP_METHOD => return self.handle_setup(parsed, session, true).await,
-            SESSION_SETUP_CONTINUE_METHOD => return self.handle_setup(parsed, session, false).await,
+            SESSION_SETUP_CONTINUE_METHOD => {
+                return self.handle_setup(parsed, session, false).await
+            }
             SESSION_CLOSE_METHOD => return self.handle_close(parsed, session),
             SESSIONS_METHOD => return self.handle_sessions(parsed, session),
             _ => {}
@@ -1184,8 +1268,20 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
         // A raw-fd transfer method: authorize + negotiate here, then hand a `Transfer`
         // directive back to the server to drive the wire handshake + fd handoff.
-        if let MethodImpl::FdTransfer { direction, af_unix, erased } = &method.imp {
-            return self.begin_transfer(&method, *direction, *af_unix, erased.clone(), parsed, session);
+        if let MethodImpl::FdTransfer {
+            direction,
+            af_unix,
+            erased,
+        } = &method.imp
+        {
+            return self.begin_transfer(
+                &method,
+                *direction,
+                *af_unix,
+                erased.clone(),
+                parsed,
+                session,
+            );
         }
 
         let response = self.run_method(method, parsed, session.clone()).await;
@@ -1205,15 +1301,18 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let cancel = if cancellable {
             let flag = Arc::new(AtomicBool::new(false));
             if let Some(id) = &rid {
-                self.inflight.lock().unwrap_or_else(PoisonError::into_inner).insert(
-                    id.clone(),
-                    Inflight {
-                        cancel: flag.clone(),
-                        session_id: session.id(),
-                        method: method.meta.name.clone(),
-                        started: Instant::now(),
-                    },
-                );
+                self.inflight
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(
+                        id.clone(),
+                        Inflight {
+                            cancel: flag.clone(),
+                            session_id: session.id(),
+                            method: method.meta.name.clone(),
+                            started: Instant::now(),
+                        },
+                    );
             }
             flag
         } else {
@@ -1234,10 +1333,22 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // `parsed.method` in only when needed (mirroring the XDR path) rather than cloning it.
         let need_method = need_snapshot || matches!(method.imp, MethodImpl::Python);
         let req = RequestInfo {
-            method: if need_method { parsed.method } else { String::new() },
+            method: if need_method {
+                parsed.method
+            } else {
+                String::new()
+            },
             id: rid.clone(),
-            params: if need_snapshot { raw_to_value(parsed.params.as_deref()) } else { Value::Null },
-            roles: if need_snapshot { method.meta.roles.to_vec() } else { Vec::new() },
+            params: if need_snapshot {
+                raw_to_value(parsed.params.as_deref())
+            } else {
+                Value::Null
+            },
+            roles: if need_snapshot {
+                method.meta.roles.to_vec()
+            } else {
+                Vec::new()
+            },
         };
 
         // Bundle everything the decode → authorize → handler → audit stages share into a
@@ -1260,7 +1371,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
         let response = if is_blocking {
             let params = parsed.params;
-            match tokio::task::spawn_blocking(move || pipeline.run_blocking(params.as_deref(), cx)).await {
+            match tokio::task::spawn_blocking(move || pipeline.run_blocking(params.as_deref(), cx))
+                .await
+            {
                 Ok(bytes) => bytes,
                 Err(_panicked) => envelope::error(
                     rid.as_deref(),
@@ -1275,7 +1388,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
         if cancellable {
             if let Some(id) = &rid {
-                self.inflight.lock().unwrap_or_else(PoisonError::into_inner).remove(id);
+                self.inflight
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .remove(id);
             }
         }
         response
@@ -1296,7 +1412,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
         // 1. Validate subscribe params against the topic's Accepts (INVALID_PARAMS before authz).
         if let Err(e) = sub_impl.decode_subscribe(parsed.params.as_deref()) {
-            return finish(note, envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref()));
+            return finish(
+                note,
+                envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+            );
         }
 
         // 2. The authz/audit snapshot (also stored on the subscription).
@@ -1305,15 +1424,28 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let req = RequestInfo {
             method: parsed.method,
             id: rid.clone(),
-            params: if need_snapshot { snapshot.clone() } else { Value::Null },
-            roles: if need_snapshot { method.meta.roles.to_vec() } else { Vec::new() },
+            params: if need_snapshot {
+                snapshot.clone()
+            } else {
+                Value::Null
+            },
+            roles: if need_snapshot {
+                method.meta.roles.to_vec()
+            } else {
+                Vec::new()
+            },
         };
 
         // 3. Authorize (a subscribe is a normal request — no CancelTarget).
         if let Err(denied) = role_gate(method.meta.required, session) {
             return finish(
                 note,
-                envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
+                envelope::error(
+                    rid.as_deref(),
+                    denied.code,
+                    &denied.message,
+                    denied.data.as_ref(),
+                ),
             );
         }
 
@@ -1324,7 +1456,13 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             .unwrap_or_else(PoisonError::into_inner)
             .entry(method.meta.name.clone())
             .or_default()
-            .insert(sub_id.clone(), Subscription { session: session.clone(), params: snapshot });
+            .insert(
+                sub_id.clone(),
+                Subscription {
+                    session: session.clone(),
+                    params: snapshot,
+                },
+            );
         let raw = to_raw_value(&sub_id).expect("encoding a string cannot fail");
         let ack = envelope::success(rid.as_deref(), &raw);
 
@@ -1332,7 +1470,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         //    Reaching here means the subscribe was authorized and registered → success.
         if method.meta.audit {
             if let Some(sink) = self.service.audit_sink.as_deref() {
-                audit_call(sink, &method.meta, &req, AuditOutcome::Success, None, session);
+                audit_call(
+                    sink,
+                    &method.meta,
+                    &req,
+                    AuditOutcome::Success,
+                    None,
+                    session,
+                );
             }
         }
 
@@ -1376,15 +1521,30 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let req = RequestInfo {
             method: parsed.method.clone(),
             id: Some(rid.clone()),
-            params: if need_snapshot { raw_to_value(parsed.params.as_deref()) } else { Value::Null },
-            roles: if need_snapshot { method.meta.roles.to_vec() } else { Vec::new() },
+            params: if need_snapshot {
+                raw_to_value(parsed.params.as_deref())
+            } else {
+                Value::Null
+            },
+            roles: if need_snapshot {
+                method.meta.roles.to_vec()
+            } else {
+                Vec::new()
+            },
         };
 
         // Authorize; a denial is audited (like the normal path audits an authorized call).
         if let Err(denied) = role_gate(method.meta.required, session) {
             if method.meta.audit {
                 if let Some(sink) = self.service.audit_sink.as_deref() {
-                    audit_call(sink, &method.meta, &req, AuditOutcome::Failure(&denied), None, session);
+                    audit_call(
+                        sink,
+                        &method.meta,
+                        &req,
+                        AuditOutcome::Failure(&denied),
+                        None,
+                        session,
+                    );
                 }
             }
             return Dispatched::Reply(response_bytes(Some(&rid), &Err(denied)));
@@ -1403,7 +1563,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             Err(e) => {
                 if method.meta.audit {
                     if let Some(sink) = self.service.audit_sink.as_deref() {
-                        audit_call(sink, &method.meta, &req, AuditOutcome::Failure(&e), None, session);
+                        audit_call(
+                            sink,
+                            &method.meta,
+                            &req,
+                            AuditOutcome::Failure(&e),
+                            None,
+                            session,
+                        );
                     }
                 }
                 return Dispatched::Reply(response_bytes(Some(&rid), &Err(e)));
@@ -1431,7 +1598,14 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             let outcome = erased.run_transfer(decoded, ft);
             if audit {
                 if let Some(sink) = &audit_sink {
-                    audit_call(sink.as_ref(), &meta, &req, audit_outcome(&outcome), None, &session);
+                    audit_call(
+                        sink.as_ref(),
+                        &meta,
+                        &req,
+                        audit_outcome(&outcome),
+                        None,
+                        &session,
+                    );
                 }
             }
             response_bytes(Some(&final_rid), &outcome)
@@ -1442,7 +1616,11 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 
     // --- control messages ----------------------------------------------------
 
-    async fn handle_server_info(&self, parsed: ParsedRequest, session: &Arc<Session<S>>) -> Dispatched {
+    async fn handle_server_info(
+        &self,
+        parsed: ParsedRequest,
+        session: &Arc<Session<S>>,
+    ) -> Dispatched {
         let note = parsed.id.is_none();
         let rid = parsed.id.clone();
         let Some(handler) = self.server_info.clone() else {
@@ -1459,8 +1637,7 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         };
         // No authz, no gate, not audited. Run on the blocking pool (it is a user callback).
         let session2 = session.clone();
-        let outcome =
-            tokio::task::spawn_blocking(move || handler.server_info(&session2)).await;
+        let outcome = tokio::task::spawn_blocking(move || handler.server_info(&session2)).await;
         let bytes = match outcome {
             Ok(Ok(value)) => {
                 // `value` is a `serde_json::Value`, which always serializes to a RawValue.
@@ -1497,7 +1674,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             self.audit_control(&req, AuditOutcome::Failure(&denied), session);
             return finish(
                 note,
-                envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
+                envelope::error(
+                    rid.as_deref(),
+                    denied.code,
+                    &denied.message,
+                    denied.data.as_ref(),
+                ),
             );
         }
 
@@ -1506,7 +1688,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         // server walks each protocol's `render_sessions`). A no-id call is a notification → nothing.
         self.audit_control(&req, AuditOutcome::Success, session);
         match rid {
-            Some(rid) => Dispatched::Sessions { rid, caller: session.id() },
+            Some(rid) => Dispatched::Sessions {
+                rid,
+                caller: session.id(),
+            },
             None => Dispatched::Nothing,
         }
     }
@@ -1517,7 +1702,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     pub fn render_sessions(&self, current: SessionId) -> Vec<Value> {
         let live = self.live_sessions();
         let now_unix = unix_now();
-        live.iter().map(|s| self.render_session(s, current, now_unix)).collect()
+        live.iter()
+            .map(|s| self.render_session(s, current, now_unix))
+            .collect()
     }
 
     /// The live sessions on this protocol (registry `Weak`s upgraded), oldest first — the shared walk
@@ -1543,7 +1730,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     fn render_session(&self, session: &Session<S>, current: SessionId, now_unix: f64) -> Value {
         let mut base = default_session_entry(session, now_unix);
         base.insert("current".to_string(), Value::Bool(session.id() == current));
-        base.insert("operations".to_string(), Value::Array(self.session_operations(session)));
+        base.insert(
+            "operations".to_string(),
+            Value::Array(self.session_operations(session)),
+        );
         if let Some(renderer) = &self.session_info {
             if let Value::Object(extra) = renderer.render(session) {
                 base.extend(extra); // embedder fields augment / override the core base
@@ -1613,7 +1803,11 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
     ) -> Dispatched {
         let note = parsed.id.is_none();
         let rid = parsed.id.clone();
-        let slot = if first { self.setup.as_ref() } else { self.setup_continue.as_ref() };
+        let slot = if first {
+            self.setup.as_ref()
+        } else {
+            self.setup_continue.as_ref()
+        };
         let Some(slot) = slot else {
             return finish(
                 note,
@@ -1648,7 +1842,8 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         let session2 = session.clone();
         let params = parsed.params;
         // Setup bypasses authz; crypto is blocking → the blocking pool.
-        let outcome = tokio::task::spawn_blocking(move || handler.handle(params.as_deref(), &session2)).await;
+        let outcome =
+            tokio::task::spawn_blocking(move || handler.handle(params.as_deref(), &session2)).await;
 
         // The error / panic paths reply + audit synchronously; a successful outcome is either a
         // synchronous commit or a connection takeover (passthrough). Setup is always audited.
@@ -1656,16 +1851,32 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
                 self.audit_setup_outcome(
-                    &parsed.method, rid.as_deref(), snapshot, &slot.meta, AuditOutcome::Failure(&e), session,
+                    &parsed.method,
+                    rid.as_deref(),
+                    snapshot,
+                    &slot.meta,
+                    AuditOutcome::Failure(&e),
+                    session,
                 );
-                return finish(note, envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref()));
+                return finish(
+                    note,
+                    envelope::error(rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+                );
             }
             Err(_panicked) => {
                 let err = JsonRpcError::new(ErrorCode::InternalError, "Internal error");
                 self.audit_setup_outcome(
-                    &parsed.method, rid.as_deref(), snapshot, &slot.meta, AuditOutcome::Failure(&err), session,
+                    &parsed.method,
+                    rid.as_deref(),
+                    snapshot,
+                    &slot.meta,
+                    AuditOutcome::Failure(&err),
+                    session,
                 );
-                return finish(note, envelope::error(rid.as_deref(), err.code, &err.message, err.data.as_ref()));
+                return finish(
+                    note,
+                    envelope::error(rid.as_deref(), err.code, &err.message, err.data.as_ref()),
+                );
             }
         };
 
@@ -1676,7 +1887,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                     session.set_external(v);
                 }
                 self.audit_setup_outcome(
-                    &parsed.method, rid.as_deref(), snapshot, &slot.meta, AuditOutcome::Success, session,
+                    &parsed.method,
+                    rid.as_deref(),
+                    snapshot,
+                    &slot.meta,
+                    AuditOutcome::Success,
+                    session,
                 );
                 finish(note, envelope::success(rid.as_deref(), &raw))
             }
@@ -1695,7 +1911,8 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                 // tracked (like a transfer, it's a rare, potentially long-lived hand-off of the
                 // connection fd). The guard rides inside `run`, unregistering when the take-over
                 // completes or the directive is dropped unrun.
-                let op = session.track_operation(OperationKind::Passthrough, Arc::from(method.as_str()));
+                let op =
+                    session.track_operation(OperationKind::Passthrough, Arc::from(method.as_str()));
                 let run = Box::new(move |ft: &dyn FileTransfer| {
                     let _op = op;
                     let outcome = (complete)(ft);
@@ -1792,7 +2009,11 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
         struct CancelParams {
             target_id: String,
         }
-        let target_id = match parsed.params.as_deref().map(|r| serde_json::from_str::<CancelParams>(r.get())) {
+        let target_id = match parsed
+            .params
+            .as_deref()
+            .map(|r| serde_json::from_str::<CancelParams>(r.get()))
+        {
             Some(Ok(p)) => p.target_id,
             _ => {
                 return finish(
@@ -1816,7 +2037,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             .get(&target_id)
             .map(|e| (e.cancel.clone(), e.session_id));
         let cancel_target = match &request {
-            Some((_, session_id)) => Some(CancelTarget::Request { session_id: *session_id }),
+            Some((_, session_id)) => Some(CancelTarget::Request {
+                session_id: *session_id,
+            }),
             None => self
                 .subscription_owner(&target_id)
                 .map(|session_id| CancelTarget::Subscription { session_id }),
@@ -1842,7 +2065,12 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
             self.audit_control(&req, AuditOutcome::Failure(&denied), session);
             return finish(
                 note,
-                envelope::error(rid.as_deref(), denied.code, &denied.message, denied.data.as_ref()),
+                envelope::error(
+                    rid.as_deref(),
+                    denied.code,
+                    &denied.message,
+                    denied.data.as_ref(),
+                ),
             );
         }
 
@@ -1872,7 +2100,10 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
                     data: Some(json!("no active request or subscription for the given id")),
                 };
                 self.audit_control(&req, AuditOutcome::Failure(&err), session);
-                finish(note, envelope::error(rid.as_deref(), err.code, &err.message, err.data.as_ref()))
+                finish(
+                    note,
+                    envelope::error(rid.as_deref(), err.code, &err.message, err.data.as_ref()),
+                )
             }
         }
     }
@@ -1885,7 +2116,9 @@ impl<S: Send + Sync + 'static> JsonRpcProtocol<S> {
 /// wire shape (`[` → batch) without parsing — the same leading-whitespace tolerance `serde_json`
 /// and [`envelope::parse`] already apply to a `{` object.
 fn first_non_ws(wire: &[u8]) -> Option<u8> {
-    wire.iter().copied().find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
+    wire.iter()
+        .copied()
+        .find(|b| !matches!(b, b' ' | b'\t' | b'\n' | b'\r'))
 }
 
 fn finish(note: bool, bytes: Vec<u8>) -> Dispatched {
@@ -1915,7 +2148,11 @@ fn build_transfer_ready(rid: &str, direction: TransferDirection, interim: &RawVa
     serde_json::to_vec(&Ready {
         jsonrpc: crate::JSONRPC_VERSION,
         method: TRANSFER_READY_METHOD,
-        params: Params { id: rid, direction, result: interim },
+        params: Params {
+            id: rid,
+            direction,
+            result: interim,
+        },
     })
     .expect("encoding the $/transferReady envelope cannot fail")
 }
@@ -1978,7 +2215,14 @@ impl<S: Send + Sync + 'static> Caller<S> {
                 params: Value::Null,
                 roles: meta.roles.to_vec(),
             };
-            audit_call(sink.as_ref(), &meta, &req, audit_outcome(&outcome), None, &session);
+            audit_call(
+                sink.as_ref(),
+                &meta,
+                &req,
+                audit_outcome(&outcome),
+                None,
+                &session,
+            );
         }
         outcome
     }
@@ -2041,10 +2285,7 @@ async fn run_method_value<S: Send + Sync + 'static>(
     .map_err(|_| JsonRpcError::internal("internal call handler panicked"))?
 }
 
-fn response_bytes(
-    rid: Option<&str>,
-    outcome: &Result<Box<RawValue>, JsonRpcError>,
-) -> Vec<u8> {
+fn response_bytes(rid: Option<&str>, outcome: &Result<Box<RawValue>, JsonRpcError>) -> Vec<u8> {
     match outcome {
         Ok(raw) => envelope::success(rid, raw),
         Err(e) => envelope::error(rid, e.code, &e.message, e.data.as_ref()),
@@ -2076,7 +2317,12 @@ fn audit_setup<S>(
     session: &Session<S>,
 ) {
     redact_value(&mut snapshot, secret_fields);
-    let req = RequestInfo { method, id: rid, params: snapshot, roles: Vec::new() };
+    let req = RequestInfo {
+        method,
+        id: rid,
+        params: snapshot,
+        roles: Vec::new(),
+    };
     sink.audit(&req, outcome, session, audit_message);
 }
 
@@ -2173,7 +2419,10 @@ fn default_session_entry<S>(session: &Session<S>, now_unix: f64) -> serde_json::
     if let Some(o) = session.origin() {
         entry.insert("origin".to_string(), Value::String(format_origin(o)));
         entry.insert("secure_transport".to_string(), Value::Bool(o.secure));
-        entry.insert("internal".to_string(), Value::Bool(o.transport == "unix" && o.uid == Some(0)));
+        entry.insert(
+            "internal".to_string(),
+            Value::Bool(o.transport == "unix" && o.uid == Some(0)),
+        );
     }
     // Authenticated credential summary (set by the auth stack at `$/sessionSetup`).
     session.with_credential(|c| {
@@ -2217,7 +2466,9 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let audit_detail = cx.audit_handle();
         let decoded = match erased.decode(WireParams::Json(params), false) {
             Ok((d, _)) => d,
-            Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+            Err(e) => {
+                return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref())
+            }
         };
         let mut out = Vec::with_capacity(self.method.meta.reply_capacity);
         let res = match role_gate(self.method.meta.required, &self.session) {
@@ -2250,12 +2501,17 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let outcome = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
             Ok(()) => match &self.py_dispatcher {
-                None => Err(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+                None => Err(JsonRpcError::new(
+                    ErrorCode::InternalError,
+                    "Internal error",
+                )),
                 Some(dispatcher) => {
                     let params_json = params.map(|r| r.get().as_bytes()).unwrap_or(b"{}");
                     let view = build_session_view(&self.session);
-                    let PyResult { outcome, audit_message } =
-                        dispatcher.dispatch(self.req.method.as_str(), params_json, &view);
+                    let PyResult {
+                        outcome,
+                        audit_message,
+                    } = dispatcher.dispatch(self.req.method.as_str(), params_json, &view);
                     if let Some(message) = audit_message {
                         if let Some(detail) = &audit_detail {
                             *detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);
@@ -2281,12 +2537,18 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         let audit_detail = cx.audit_handle();
         let decoded = match erased.decode(WireParams::Json(params.as_deref()), false) {
             Ok((d, _)) => d,
-            Err(e) => return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref()),
+            Err(e) => {
+                return envelope::error(self.rid.as_deref(), e.code, &e.message, e.data.as_ref())
+            }
         };
         let mut out = Vec::with_capacity(self.method.meta.reply_capacity);
         let res = match role_gate(self.method.meta.required, &self.session) {
             Err(denied) => Err(denied),
-            Ok(()) => erased.run_into(Encode::Json(self.rid.as_deref()), decoded, cx, &mut out).await,
+            Ok(()) => {
+                erased
+                    .run_into(Encode::Json(self.rid.as_deref()), decoded, cx, &mut out)
+                    .await
+            }
         };
         self.do_audit(audit_outcome(&res), &audit_detail);
         match res {
@@ -2301,7 +2563,12 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
     /// the authorizer and the (redacted) audit record, since XDR is non-self-describing (see
     /// [`ErasedSync::xdr_decode`]). A subscription/python method that opted into an xdr_id is not
     /// callable here → method-not-found.
-    fn run_xdr(mut self, params: &[u8], cx: RequestCtx<S>, encode: Encode) -> Result<Vec<u8>, JsonRpcError> {
+    fn run_xdr(
+        mut self,
+        params: &[u8],
+        cx: RequestCtx<S>,
+        encode: Encode,
+    ) -> Result<Vec<u8>, JsonRpcError> {
         let (MethodImpl::Sync(erased) | MethodImpl::Filterable(erased)) = &self.method.imp else {
             // Subscription / python methods are not callable over the binary wire.
             return Err(JsonRpcError::method_not_found("Method not found"));
@@ -2335,7 +2602,12 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
     /// the runtime (the async handler yields, so no `spawn_blocking` hop). The reply stays XDR
     /// bytes; params/result reflect to JSON `Value`s for the authorizer / audit record exactly as
     /// the sync path does.
-    async fn run_xdr_async(mut self, params: &[u8], cx: RequestCtx<S>, encode: Encode<'_>) -> Result<Vec<u8>, JsonRpcError> {
+    async fn run_xdr_async(
+        mut self,
+        params: &[u8],
+        cx: RequestCtx<S>,
+        encode: Encode<'_>,
+    ) -> Result<Vec<u8>, JsonRpcError> {
         let MethodImpl::Async(erased) = &self.method.imp else {
             unreachable!("run_xdr_async on a non-async method")
         };
@@ -2372,11 +2644,21 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
         if !self.method.meta.audit {
             return;
         }
-        let Some(sink) = self.audit_sink.as_deref() else { return };
+        let Some(sink) = self.audit_sink.as_deref() else {
+            return;
+        };
         // The slot is `Some` exactly when the method is audited (we're past the guard above).
-        let detail =
-            audit_detail.as_ref().and_then(|d| d.lock().unwrap_or_else(PoisonError::into_inner).take());
-        audit_call(sink, &self.method.meta, &self.req, outcome, detail.as_deref(), &self.session);
+        let detail = audit_detail
+            .as_ref()
+            .and_then(|d| d.lock().unwrap_or_else(PoisonError::into_inner).take());
+        audit_call(
+            sink,
+            &self.method.meta,
+            &self.req,
+            outcome,
+            detail.as_deref(),
+            &self.session,
+        );
     }
 }
 
@@ -2386,16 +2668,32 @@ mod tests {
     use crate::session::NullOutbound;
 
     fn dummy_session() -> Arc<Session<()>> {
-        Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)))
+        Arc::new(Session::new(
+            SessionId::nil(),
+            "t".into(),
+            Some(()),
+            Arc::new(NullOutbound),
+        ))
     }
     fn dummy_cx(session: &Arc<Session<()>>) -> RequestCtx<()> {
-        RequestCtx::new(None, session.clone(), Arc::new(AtomicBool::new(false)), false, None)
+        RequestCtx::new(
+            None,
+            session.clone(),
+            Arc::new(AtomicBool::new(false)),
+            false,
+            None,
+        )
     }
     fn pipeline(method: Method<()>) -> Pipeline<()> {
         Pipeline {
             method: Arc::new(method),
             session: dummy_session(),
-            req: RequestInfo { method: "m".into(), id: None, params: Value::Null, roles: Vec::new() },
+            req: RequestInfo {
+                method: "m".into(),
+                id: None,
+                params: Value::Null,
+                roles: Vec::new(),
+            },
             rid: None,
             audit_sink: None,
             py_dispatcher: None,
@@ -2425,7 +2723,10 @@ mod tests {
         let id = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
         for m in ["s", "a"] {
             let wire = format!(r#"{{"jsonrpc":"2.0","method":"{m}","id":"{id}"}}"#);
-            assert!(matches!(proto.dispatch(wire.as_bytes(), &s).await, Dispatched::Reply(_)));
+            assert!(matches!(
+                proto.dispatch(wire.as_bytes(), &s).await,
+                Dispatched::Reply(_)
+            ));
         }
     }
 
@@ -2462,7 +2763,11 @@ mod tests {
         let entries = proto.render_sessions(s.id());
         assert_eq!(entries.len(), 1);
         let ops = entries[0]["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 2, "the transfer + this session's request, not the other session's");
+        assert_eq!(
+            ops.len(),
+            2,
+            "the transfer + this session's request, not the other session's"
+        );
         assert_eq!(ops[0]["kind"], "transfer");
         assert_eq!(ops[0]["method"], "snapshot.receive");
         assert!(ops[0]["age_seconds"].as_f64().unwrap() >= 0.0);
@@ -2500,7 +2805,9 @@ mod tests {
         let method = RpcMethod::new(MethodDef::new("s"), nil_ok).erase::<(), Value, Value>();
         let session = dummy_session();
         let cx = dummy_cx(&session);
-        let _ = pipeline(method).run_xdr_async(&[], cx, Encode::Xdr(None)).await;
+        let _ = pipeline(method)
+            .run_xdr_async(&[], cx, Encode::Xdr(None))
+            .await;
     }
 
     // (The subscribe-without-id guard and all pub/sub behavior are covered via the real
@@ -2515,15 +2822,25 @@ mod tests {
         // Not configured → method not found.
         let proto = JsonRpcProtocol::<()>::builder("t", "1").build();
         let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-        let reply = proto.dispatch(wire.as_bytes(), &s).await.into_bytes().unwrap();
+        let reply = proto
+            .dispatch(wire.as_bytes(), &s)
+            .await
+            .into_bytes()
+            .unwrap();
         let v: Value = serde_json::from_slice(&reply).unwrap();
         assert_eq!(v["error"]["code"], -32601);
 
         // Configured → returns the OpenRPC doc as the result.
         let doc: Box<RawValue> = serde_json::from_str(r#"{"openrpc":"1.3.2"}"#).unwrap();
-        let proto = JsonRpcProtocol::<()>::builder("t", "1").describe(doc).build();
+        let proto = JsonRpcProtocol::<()>::builder("t", "1")
+            .describe(doc)
+            .build();
         let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-        let reply = proto.dispatch(wire.as_bytes(), &s).await.into_bytes().unwrap();
+        let reply = proto
+            .dispatch(wire.as_bytes(), &s)
+            .await
+            .into_bytes()
+            .unwrap();
         let v: Value = serde_json::from_slice(&reply).unwrap();
         assert_eq!(v["result"]["openrpc"], "1.3.2");
     }

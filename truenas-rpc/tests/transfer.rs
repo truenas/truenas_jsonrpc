@@ -10,9 +10,8 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome,
-    Dispatched, FileTransfer, JsonRpcError, RpcFdPassMethod, RpcFdTransferMethod,
-    JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, Roles, Session,
+    AuditOutcome, Dispatched, FileTransfer, JsonRpcError, JsonRpcProtocol, MethodDef, NullOutbound,
+    RequestCtx, RequestInfo, Roles, RpcFdPassMethod, RpcFdTransferMethod, Session,
     TransferDirection,
 };
 
@@ -59,11 +58,15 @@ fn download_proto() -> JsonRpcProtocol<()> {
             MethodDef::new("zfs.send"),
             TransferDirection::Download,
             |a: &SendArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(ReadyInfo { size: a.dataset.len() as i64 })
+                Ok::<_, JsonRpcError>(ReadyInfo {
+                    size: a.dataset.len() as i64,
+                })
             },
             |a: SendArgs, ft: &dyn FileTransfer| {
                 assert_eq!(ft.as_raw_fd(), -1);
-                Ok::<_, JsonRpcError>(Done { ok: !a.dataset.is_empty() })
+                Ok::<_, JsonRpcError>(Done {
+                    ok: !a.dataset.is_empty(),
+                })
             },
         ))
         .unwrap()
@@ -74,8 +77,9 @@ fn download_proto() -> JsonRpcProtocol<()> {
 async fn download_round_trip() {
     let p = download_proto();
     let s = session(&p);
-    let Dispatched::Transfer(t) =
-        p.dispatch(&request(json!({"dataset": "tank/x"}), Some(RID)), &s).await
+    let Dispatched::Transfer(t) = p
+        .dispatch(&request(json!({"dataset": "tank/x"}), Some(RID)), &s)
+        .await
     else {
         panic!("expected a transfer directive");
     };
@@ -90,7 +94,7 @@ async fn download_round_trip() {
     assert_eq!(ready["params"]["id"], RID);
     assert_eq!(ready["params"]["direction"], "download");
     assert_eq!(ready["params"]["result"]["size"], 6); // "tank/x".len()
-    // `complete` runs the transfer callback → the final success response.
+                                                      // `complete` runs the transfer callback → the final success response.
     let reply: Value = serde_json::from_slice(&t.complete(&FakeFt(-1))).unwrap();
     assert_eq!(reply["id"], RID);
     assert_eq!(reply["result"]["ok"], true);
@@ -108,8 +112,9 @@ async fn upload_fd_pass_directive() {
         .unwrap()
         .build();
     let s = session(&p);
-    let Dispatched::Transfer(t) =
-        p.dispatch(&request(json!({"dataset": "d"}), Some(RID)), &s).await
+    let Dispatched::Transfer(t) = p
+        .dispatch(&request(json!({"dataset": "d"}), Some(RID)), &s)
+        .await
     else {
         panic!("expected a transfer directive");
     };
@@ -166,9 +171,14 @@ where
             transfer,
         ))
         .unwrap()
-        .audit_sink(move |_r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            h.fetch_add(1, Ordering::SeqCst);
-        })
+        .audit_sink(
+            move |_r: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                h.fetch_add(1, Ordering::SeqCst);
+            },
+        )
         .build();
     (p, hits)
 }
@@ -180,8 +190,11 @@ async fn negotiate_refusal_is_audited() {
         |_a, _ft| Ok::<_, JsonRpcError>(Done { ok: true }),
     );
     let s = session(&p);
-    let reply =
-        p.dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s).await.into_bytes().unwrap();
+    let reply = p
+        .dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s)
+        .await
+        .into_bytes()
+        .unwrap();
     let v: Value = serde_json::from_slice(&reply).unwrap();
     assert_eq!(v["error"]["code"], -32803); // REQUEST_FAILED
     assert_eq!(hits.load(Ordering::SeqCst), 1, "the refusal is audited");
@@ -200,13 +213,21 @@ async fn authz_denial_is_audited() {
             |_a: SendArgs, _ft: &dyn FileTransfer| Ok::<_, JsonRpcError>(Done { ok: true }),
         ))
         .unwrap()
-        .audit_sink(move |_r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            h.fetch_add(1, Ordering::SeqCst);
-        })
+        .audit_sink(
+            move |_r: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                h.fetch_add(1, Ordering::SeqCst);
+            },
+        )
         .build();
     let s = session(&p);
-    let reply =
-        p.dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s).await.into_bytes().unwrap();
+    let reply = p
+        .dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s)
+        .await
+        .into_bytes()
+        .unwrap();
     let v: Value = serde_json::from_slice(&reply).unwrap();
     assert_eq!(v["error"]["code"], -32000); // NOT_AUTHORIZED
     assert_eq!(hits.load(Ordering::SeqCst), 1, "the denial is audited");
@@ -228,7 +249,10 @@ async fn denial_and_refusal_without_audit() {
         .build();
     let s = session(&p);
     let v: Value = serde_json::from_slice(
-        &p.dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s).await.into_bytes().unwrap(),
+        &p.dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s)
+            .await
+            .into_bytes()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(v["error"]["code"], -32000); // NOT_AUTHORIZED
@@ -247,7 +271,10 @@ async fn denial_and_refusal_without_audit() {
         .build();
     let s = session(&p);
     let v: Value = serde_json::from_slice(
-        &p.dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s).await.into_bytes().unwrap(),
+        &p.dispatch(&request(json!({"dataset": "x"}), Some(RID)), &s)
+            .await
+            .into_bytes()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(v["error"]["code"], -32803); // REQUEST_FAILED
@@ -269,8 +296,9 @@ async fn transfer_success_and_failure_are_audited() {
     let s = session(&p);
 
     // Success: `complete` runs the transfer callback and audits the final response.
-    let Dispatched::Transfer(t) =
-        p.dispatch(&request(json!({"dataset": "ok"}), Some(RID)), &s).await
+    let Dispatched::Transfer(t) = p
+        .dispatch(&request(json!({"dataset": "ok"}), Some(RID)), &s)
+        .await
     else {
         panic!("expected a transfer directive");
     };
@@ -279,8 +307,9 @@ async fn transfer_success_and_failure_are_audited() {
     assert_eq!(hits.load(Ordering::SeqCst), 1);
 
     // Failure: the callback error becomes the final error envelope, also audited.
-    let Dispatched::Transfer(t) =
-        p.dispatch(&request(json!({"dataset": "fail"}), Some(RID)), &s).await
+    let Dispatched::Transfer(t) = p
+        .dispatch(&request(json!({"dataset": "fail"}), Some(RID)), &s)
+        .await
     else {
         panic!("expected a transfer directive");
     };

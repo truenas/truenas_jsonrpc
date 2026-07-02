@@ -11,10 +11,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome,
-    AsyncRpcMethod, Clock, Dispatched, Error, ErrorCode, IdGen, JsonRpcError, RpcMethod,
-    JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, RoleMask, Roles, Session,
-    SessionId, SessionLifecycle,
+    AsyncRpcMethod, AuditOutcome, Clock, Dispatched, Error, ErrorCode, IdGen, JsonRpcError,
+    JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RequestInfo, RoleMask, Roles, RpcMethod,
+    Session, SessionId, SessionLifecycle,
 };
 
 const ID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -41,7 +40,9 @@ async fn call<S: Send + Sync + 'static>(
     match proto.dispatch(wire, session).await {
         Dispatched::Reply(b) => Some(serde_json::from_slice(&b).unwrap()),
         Dispatched::Nothing => None,
-        Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => unreachable!("transfer/passthrough directive unexpected in this test"),
+        Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => {
+            unreachable!("transfer/passthrough directive unexpected in this test")
+        }
     }
 }
 
@@ -56,9 +57,10 @@ struct EchoResult {
 
 fn echo_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("test", "1.0.0")
-        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
-            Ok::<_, JsonRpcError>(EchoResult { echo: a.msg })
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("echo"),
+            |a: EchoArgs, _c: &RequestCtx<()>| Ok::<_, JsonRpcError>(EchoResult { echo: a.msg }),
+        ))
         .unwrap()
         .build()
 }
@@ -72,7 +74,9 @@ async fn protocol_accessors_and_dispatched_helpers() {
     assert_eq!(proto.version(), "9.9");
     assert!(!proto.has_session_setup());
     // send_notification to an unregistered topic is an error (covered fully in pubsub.rs).
-    assert!(proto.send_notification("topic", &json!({ "x": 1 })).is_err());
+    assert!(proto
+        .send_notification("topic", &json!({ "x": 1 }))
+        .is_err());
 
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     // A reply carries bytes; a suppressed notification does not.
@@ -88,7 +92,13 @@ async fn closed_session_rejects_further_dispatch() {
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     proto.close_session(&s);
     assert_eq!(s.lifecycle(), SessionLifecycle::Closed);
-    let resp = call(&proto, &s, &req("echo", Some(json!({ "msg": "hi" })), Some(ID))).await.unwrap();
+    let resp = call(
+        &proto,
+        &s,
+        &req("echo", Some(json!({ "msg": "hi" })), Some(ID)),
+    )
+    .await
+    .unwrap();
     assert_eq!(resp["error"]["code"], -32002);
     assert_eq!(resp["error"]["message"], "Session is closed");
 }
@@ -97,7 +107,9 @@ async fn closed_session_rejects_further_dispatch() {
 async fn empty_method_name_is_invalid_request() {
     let proto = echo_proto();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("", Some(json!({})), Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("", Some(json!({})), Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["error"]["code"], -32600);
 }
 
@@ -109,7 +121,12 @@ async fn request_ctx_and_session_surface() {
     let name_seen = Arc::new(Mutex::new(String::new()));
     let cancelled = Arc::new(AtomicBool::new(true));
     let raise_ok = Arc::new(AtomicBool::new(false));
-    let (i, n, c, r) = (id_seen.clone(), name_seen.clone(), cancelled.clone(), raise_ok.clone());
+    let (i, n, c, r) = (
+        id_seen.clone(),
+        name_seen.clone(),
+        cancelled.clone(),
+        raise_ok.clone(),
+    );
     let proto = JsonRpcProtocol::<String>::builder("pname", "1")
         .method(RpcMethod::new(
             MethodDef::new("probe"),
@@ -119,8 +136,11 @@ async fn request_ctx_and_session_surface() {
                 c.store(cx.is_cancelled(), Ordering::SeqCst);
                 r.store(cx.raise_if_cancelled().is_ok(), Ordering::SeqCst);
                 cx.set_audit("probed");
-                let who = cx.session().with_internal(|s| s.cloned().unwrap_or_default());
-                cx.session().with_internal_mut(|s| *s = Some(format!("{who}-mut")));
+                let who = cx
+                    .session()
+                    .with_internal(|s| s.cloned().unwrap_or_default());
+                cx.session()
+                    .with_internal_mut(|s| *s = Some(format!("{who}-mut")));
                 let _ = cx.session().external();
                 Ok::<Value, JsonRpcError>(json!({ "who": who }))
             },
@@ -128,13 +148,18 @@ async fn request_ctx_and_session_surface() {
         .unwrap()
         .build();
     let s = proto.new_session(Some("orig".to_string()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("probe", Some(json!({})), Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("probe", Some(json!({})), Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["result"]["who"], "orig");
     assert_eq!(id_seen.lock().unwrap().as_deref(), Some(ID));
     assert_eq!(*name_seen.lock().unwrap(), "pname");
     assert!(!cancelled.load(Ordering::SeqCst));
     assert!(raise_ok.load(Ordering::SeqCst));
-    assert_eq!(s.with_internal(|x| x.cloned()), Some("orig-mut".to_string()));
+    assert_eq!(
+        s.with_internal(|x| x.cloned()),
+        Some("orig-mut".to_string())
+    );
 }
 
 // --- MethodDef setters + builder overrides -----------------------------------
@@ -151,13 +176,21 @@ async fn method_def_setters_are_all_usable() {
         .secret_fields(["secret"]);
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
         .roles(Roles::new(["admin", "ops"]))
-        .method(RpcMethod::new(def, |a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(a)))
+        .method(RpcMethod::new(def, |a: Value, _c: &RequestCtx<()>| {
+            Ok::<Value, JsonRpcError>(a)
+        }))
         .unwrap()
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     s.set_roles(RoleMask::FULL_ADMIN); // satisfies the method's ["admin", "ops"] requirement
-    // cancellable + id → run_method registers/removes the in-flight entry.
-    let resp = call(&proto, &s, &req("full", Some(json!({ "secret": "x" })), Some(ID))).await.unwrap();
+                                       // cancellable + id → run_method registers/removes the in-flight entry.
+    let resp = call(
+        &proto,
+        &s,
+        &req("full", Some(json!({ "secret": "x" })), Some(ID)),
+    )
+    .await
+    .unwrap();
     assert_eq!(resp["result"]["secret"], "x");
 }
 
@@ -176,7 +209,10 @@ async fn builder_id_gen_and_clock_overrides() {
             42.0
         }
     }
-    let proto = JsonRpcProtocol::<()>::builder("p", "1").id_gen(NilId).clock(FixedClock).build();
+    let proto = JsonRpcProtocol::<()>::builder("p", "1")
+        .id_gen(NilId)
+        .clock(FixedClock)
+        .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     assert_eq!(s.id(), SessionId::nil());
 }
@@ -194,13 +230,15 @@ fn builder_rejects_reserved_and_duplicate_names() {
     ));
     assert!(reserved_rpc.is_err());
     let dup = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(RpcMethod::new(MethodDef::new("dup"), |_a: Value, _c: &RequestCtx<()>| {
-            Ok::<Value, JsonRpcError>(json!(null))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("dup"),
+            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("dup"), |_a: Value, _c: &RequestCtx<()>| {
-            Ok::<Value, JsonRpcError>(json!(null))
-        }));
+        .method(RpcMethod::new(
+            MethodDef::new("dup"),
+            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+        ));
     assert!(dup.is_err());
 }
 
@@ -210,7 +248,9 @@ fn builder_rejects_reserved_and_duplicate_names() {
 async fn server_info_not_configured_is_method_not_found() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("$/serverInfo", None, Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("$/serverInfo", None, Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["error"]["code"], -32601);
 }
 
@@ -220,7 +260,9 @@ async fn server_info_handler_error_maps_to_wire() {
         .server_info(|_s: &Session<()>| Err(JsonRpcError::internal("info boom")))
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("$/serverInfo", None, Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("$/serverInfo", None, Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["error"]["code"], -32603);
     assert_eq!(resp["error"]["message"], "info boom");
 }
@@ -231,7 +273,9 @@ async fn server_info_handler_panic_is_internal_error() {
         .server_info(|_s: &Session<()>| -> Result<Value, JsonRpcError> { panic!("info kaboom") })
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("$/serverInfo", None, Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("$/serverInfo", None, Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["error"]["code"], -32603);
 }
 
@@ -241,7 +285,9 @@ async fn server_info_handler_panic_is_internal_error() {
 async fn session_close_with_no_session_fails() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("$/sessionClose", None, Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("$/sessionClose", None, Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["error"]["code"], -32803);
 }
 
@@ -286,12 +332,24 @@ async fn session_setup_has_setup_flag() {
 async fn session_setup_then_close_succeeds() {
     let proto = setup_proto();
     let s = proto.new_session(None, Arc::new(NullOutbound));
-    let r = call(&proto, &s, &req("$/sessionSetup", Some(json!({ "password": "good" })), Some(ID))).await.unwrap();
+    let r = call(
+        &proto,
+        &s,
+        &req(
+            "$/sessionSetup",
+            Some(json!({ "password": "good" })),
+            Some(ID),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(r["result"], json!({ "welcome": "admin" }));
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
     assert_eq!(s.external(), Some(json!({ "welcome": "admin" })));
 
-    let c = call(&proto, &s, &req("$/sessionClose", None, Some(ID2))).await.unwrap();
+    let c = call(&proto, &s, &req("$/sessionClose", None, Some(ID2)))
+        .await
+        .unwrap();
     assert_eq!(c["result"], json!(true));
     assert_eq!(s.lifecycle(), SessionLifecycle::Closed);
 }
@@ -301,17 +359,45 @@ async fn session_setup_multi_step_then_continue() {
     let proto = setup_proto();
     let s = proto.new_session(None, Arc::new(NullOutbound));
     // bad token → error, lifecycle unchanged
-    let bad = call(&proto, &s, &req("$/sessionSetup", Some(json!({ "password": "no" })), Some(ID))).await.unwrap();
+    let bad = call(
+        &proto,
+        &s,
+        &req(
+            "$/sessionSetup",
+            Some(json!({ "password": "no" })),
+            Some(ID),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(bad["error"]["code"], -32000);
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
     // step1 → Init
-    let r1 = call(&proto, &s, &req("$/sessionSetup", Some(json!({ "password": "step1" })), Some(ID))).await.unwrap();
+    let r1 = call(
+        &proto,
+        &s,
+        &req(
+            "$/sessionSetup",
+            Some(json!({ "password": "step1" })),
+            Some(ID),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(r1["result"], json!({ "need": "more" }));
     assert_eq!(s.lifecycle(), SessionLifecycle::Init);
     // continue step2 → Established
-    let r2 = call(&proto, &s, &req("$/sessionSetupContinue", Some(json!({ "password": "step2" })), Some(ID2)))
-        .await
-        .unwrap();
+    let r2 = call(
+        &proto,
+        &s,
+        &req(
+            "$/sessionSetupContinue",
+            Some(json!({ "password": "step2" })),
+            Some(ID2),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(r2["result"], json!({ "welcome": "admin" }));
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
 }
@@ -321,9 +407,17 @@ async fn session_setup_continue_in_wrong_state_is_request_failed() {
     let proto = setup_proto();
     let s = proto.new_session(None, Arc::new(NullOutbound));
     // continue is only valid in INIT; in NONE it's refused before the handler runs.
-    let resp = call(&proto, &s, &req("$/sessionSetupContinue", Some(json!({ "password": "x" })), Some(ID)))
-        .await
-        .unwrap();
+    let resp = call(
+        &proto,
+        &s,
+        &req(
+            "$/sessionSetupContinue",
+            Some(json!({ "password": "x" })),
+            Some(ID),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(resp["error"]["code"], -32803);
 }
 
@@ -331,9 +425,17 @@ async fn session_setup_continue_in_wrong_state_is_request_failed() {
 async fn session_setup_handler_panic_is_internal_error() {
     let proto = setup_proto();
     let s = proto.new_session(None, Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("$/sessionSetup", Some(json!({ "password": "panic" })), Some(ID)))
-        .await
-        .unwrap();
+    let resp = call(
+        &proto,
+        &s,
+        &req(
+            "$/sessionSetup",
+            Some(json!({ "password": "panic" })),
+            Some(ID),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(resp["error"]["code"], -32603);
 }
 
@@ -341,9 +443,21 @@ async fn session_setup_handler_panic_is_internal_error() {
 async fn session_setup_not_configured_is_method_not_found() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let setup = call(&proto, &s, &req("$/sessionSetup", Some(json!({})), Some(ID))).await.unwrap();
+    let setup = call(
+        &proto,
+        &s,
+        &req("$/sessionSetup", Some(json!({})), Some(ID)),
+    )
+    .await
+    .unwrap();
     assert_eq!(setup["error"]["code"], -32601);
-    let cont = call(&proto, &s, &req("$/sessionSetupContinue", Some(json!({})), Some(ID))).await.unwrap();
+    let cont = call(
+        &proto,
+        &s,
+        &req("$/sessionSetupContinue", Some(json!({})), Some(ID)),
+    )
+    .await
+    .unwrap();
     assert_eq!(cont["error"]["code"], -32601);
 }
 
@@ -354,14 +468,30 @@ async fn session_setup_is_audited_and_redacted() {
     let proto = JsonRpcProtocol::<String>::builder("p", "1")
         .session_setup(
             MethodDef::new("$/sessionSetup").secret_fields(["password"]),
-            |_a: SetupArgs, _s: &Session<String>| Ok((SessionLifecycle::Established, json!({ "token": "sekret" }))),
+            |_a: SetupArgs, _s: &Session<String>| {
+                Ok((SessionLifecycle::Established, json!({ "token": "sekret" })))
+            },
         )
-        .audit_sink(move |r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<String>, _m: Option<&str>| {
-            cap.lock().unwrap().push(json!({ "params": r.params }));
-        })
+        .audit_sink(
+            move |r: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<String>,
+                  _m: Option<&str>| {
+                cap.lock().unwrap().push(json!({ "params": r.params }));
+            },
+        )
         .build();
     let s = proto.new_session(None, Arc::new(NullOutbound));
-    call(&proto, &s, &req("$/sessionSetup", Some(json!({ "user": "u", "password": "pw" })), Some(ID))).await;
+    call(
+        &proto,
+        &s,
+        &req(
+            "$/sessionSetup",
+            Some(json!({ "user": "u", "password": "pw" })),
+            Some(ID),
+        ),
+    )
+    .await;
     let rows = captured.lock().unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["params"]["password"], "********");
@@ -373,13 +503,18 @@ async fn session_setup_is_audited_and_redacted() {
 #[tokio::test]
 async fn sync_handler_panic_is_internal_error() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(RpcMethod::new(MethodDef::new("boom"), |_a: Value, _c: &RequestCtx<()>| -> Result<Value, JsonRpcError> {
-            panic!("handler kaboom")
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("boom"),
+            |_a: Value, _c: &RequestCtx<()>| -> Result<Value, JsonRpcError> {
+                panic!("handler kaboom")
+            },
+        ))
         .unwrap()
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("boom", Some(json!({})), Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("boom", Some(json!({})), Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["error"]["code"], -32603);
 }
 
@@ -390,13 +525,16 @@ async fn unauthorized_call_is_not_authorized() {
     // A method whose required role the session lacks → NOT_AUTHORIZED (the native role gate).
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
         .roles(Roles::new(["AUTH"]))
-        .method(RpcMethod::new(MethodDef::new("m").roles(["AUTH"]), |_a: Value, _c: &RequestCtx<()>| {
-            Ok::<Value, JsonRpcError>(json!(null))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("m").roles(["AUTH"]),
+            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+        ))
         .unwrap()
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let resp = call(&proto, &s, &req("m", Some(json!({})), Some(ID))).await.unwrap();
+    let resp = call(&proto, &s, &req("m", Some(json!({})), Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(resp["error"]["code"], -32000);
     assert_eq!(resp["error"]["message"], "Not authorized");
 }
@@ -407,16 +545,24 @@ async fn audited_request_without_params_snapshots_empty_object() {
     let seen = Arc::new(Mutex::new(Value::Null));
     let sp = seen.clone();
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(RpcMethod::new(MethodDef::new("noargs").audit(), |_a: Value, _c: &RequestCtx<()>| {
-            Ok::<Value, JsonRpcError>(json!(null))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("noargs").audit(),
+            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+        ))
         .unwrap()
-        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            *sp.lock().unwrap() = req.params.clone();
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                *sp.lock().unwrap() = req.params.clone();
+            },
+        )
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    call(&proto, &s, &req("noargs", None, Some(ID))).await.unwrap();
+    call(&proto, &s, &req("noargs", None, Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(*seen.lock().unwrap(), json!({}));
 }
 
@@ -442,7 +588,10 @@ fn method_with_roles_but_no_registry_is_a_build_error() {
         MethodDef::new("m").roles(["x"]),
         |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
     ));
-    assert!(matches!(r, Err(Error::Config(_))), "expected a Config build error");
+    assert!(
+        matches!(r, Err(Error::Config(_))),
+        "expected a Config build error"
+    );
 }
 
 #[test]
@@ -453,7 +602,10 @@ fn method_with_unregistered_role_is_a_build_error() {
             MethodDef::new("m").roles(["unknown"]),
             |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
         ));
-    assert!(matches!(r, Err(Error::Config(_))), "expected a Config build error");
+    assert!(
+        matches!(r, Err(Error::Config(_))),
+        "expected a Config build error"
+    );
 }
 
 #[tokio::test]
@@ -461,23 +613,35 @@ async fn audit_message_join_variants() {
     let cap = Arc::new(Mutex::new(Vec::<Option<String>>::new()));
     let sink = cap.clone();
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(RpcMethod::new(MethodDef::new("both").audit_message("static"), |_a: Value, cx: &RequestCtx<()>| {
-            cx.set_audit("runtime");
-            Ok::<Value, JsonRpcError>(json!(null))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("both").audit_message("static"),
+            |_a: Value, cx: &RequestCtx<()>| {
+                cx.set_audit("runtime");
+                Ok::<Value, JsonRpcError>(json!(null))
+            },
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("runtime_only").audit(), |_a: Value, cx: &RequestCtx<()>| {
-            cx.set_audit("rt");
-            Ok::<Value, JsonRpcError>(json!(null))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("runtime_only").audit(),
+            |_a: Value, cx: &RequestCtx<()>| {
+                cx.set_audit("rt");
+                Ok::<Value, JsonRpcError>(json!(null))
+            },
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("neither").audit(), |_a: Value, _c: &RequestCtx<()>| {
-            Ok::<Value, JsonRpcError>(json!(null))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("neither").audit(),
+            |_a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(json!(null)),
+        ))
         .unwrap()
-        .audit_sink(move |_r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
-            sink.lock().unwrap().push(msg.map(str::to_string));
-        })
+        .audit_sink(
+            move |_r: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  msg: Option<&str>| {
+                sink.lock().unwrap().push(msg.map(str::to_string));
+            },
+        )
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     call(&proto, &s, &req("both", Some(json!({})), Some(ID))).await;
@@ -499,9 +663,14 @@ async fn audit_redacts_secrets_in_nested_arrays() {
             |a: Value, _c: &RequestCtx<()>| Ok::<Value, JsonRpcError>(a),
         ))
         .unwrap()
-        .audit_sink(move |r: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            sink.lock().unwrap().push(r.params.clone());
-        })
+        .audit_sink(
+            move |r: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                sink.lock().unwrap().push(r.params.clone());
+            },
+        )
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     let params = json!({ "accounts": [{ "password": "a" }, { "password": "b" }], "password": "c" });
@@ -518,9 +687,17 @@ async fn audit_redacts_secrets_in_nested_arrays() {
 async fn cancel_missing_target_id_is_invalid_params() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let r = call(&proto, &s, &req("$/cancelRequest", Some(json!({})), Some(ID))).await.unwrap();
+    let r = call(
+        &proto,
+        &s,
+        &req("$/cancelRequest", Some(json!({})), Some(ID)),
+    )
+    .await
+    .unwrap();
     assert_eq!(r["error"]["code"], -32602);
-    let r2 = call(&proto, &s, &req("$/cancelRequest", None, Some(ID))).await.unwrap();
+    let r2 = call(&proto, &s, &req("$/cancelRequest", None, Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(r2["error"]["code"], -32602);
 }
 
@@ -530,7 +707,17 @@ async fn cancel_unknown_target_is_request_failed() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     s.set_roles(RoleMask::FULL_ADMIN);
-    let r = call(&proto, &s, &req("$/cancelRequest", Some(json!({ "target_id": ID2 })), Some(ID))).await.unwrap();
+    let r = call(
+        &proto,
+        &s,
+        &req(
+            "$/cancelRequest",
+            Some(json!({ "target_id": ID2 })),
+            Some(ID),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(r["error"]["code"], -32803);
 }
 
@@ -539,7 +726,17 @@ async fn cancel_unknown_target_by_non_admin_is_not_authorized() {
     // A non-owner/non-admin is denied *before* the existence check (no existence leak).
     let proto = JsonRpcProtocol::<()>::builder("p", "1").build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let r = call(&proto, &s, &req("$/cancelRequest", Some(json!({ "target_id": ID2 })), Some(ID))).await.unwrap();
+    let r = call(
+        &proto,
+        &s,
+        &req(
+            "$/cancelRequest",
+            Some(json!({ "target_id": ID2 })),
+            Some(ID),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(r["error"]["code"], -32000);
     assert_eq!(r["error"]["message"], "Not authorized");
 }
@@ -554,14 +751,17 @@ fn parking_proto(
     let (st, pr) = (started.clone(), proceed.clone());
     let cc = canceller_called;
     let b = JsonRpcProtocol::<()>::builder("p", "1")
-        .method(RpcMethod::new(MethodDef::new("slow").cancellable(), move |_a: Value, cx: &RequestCtx<()>| {
-            st.store(true, Ordering::SeqCst);
-            while !pr.load(Ordering::SeqCst) {
-                std::thread::sleep(Duration::from_millis(1));
-            }
-            cx.raise_if_cancelled()?;
-            Ok::<Value, JsonRpcError>(json!({ "done": true }))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("slow").cancellable(),
+            move |_a: Value, cx: &RequestCtx<()>| {
+                st.store(true, Ordering::SeqCst);
+                while !pr.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                cx.raise_if_cancelled()?;
+                Ok::<Value, JsonRpcError>(json!({ "done": true }))
+            },
+        ))
         .unwrap()
         .cancellation(move |_req: &RequestInfo, _s: &Session<()>| cc.store(true, Ordering::SeqCst));
     Arc::new(b.build())
@@ -576,15 +776,27 @@ async fn cancel_in_flight_request_sets_flag_and_calls_canceller() {
     let session = proto.new_session(Some(()), Arc::new(NullOutbound));
 
     let work = {
-        let (p, s, wire) = (proto.clone(), session.clone(), req("slow", Some(json!({})), Some(ID)));
+        let (p, s, wire) = (
+            proto.clone(),
+            session.clone(),
+            req("slow", Some(json!({})), Some(ID)),
+        );
         tokio::spawn(async move { p.dispatch(&wire, &s).await.into_bytes() })
     };
     while !started.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
-    let cancel = call(&proto, &session, &req("$/cancelRequest", Some(json!({ "target_id": ID })), Some(ID2)))
-        .await
-        .unwrap();
+    let cancel = call(
+        &proto,
+        &session,
+        &req(
+            "$/cancelRequest",
+            Some(json!({ "target_id": ID })),
+            Some(ID2),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(cancel["result"], json!(true));
     assert!(canceller.load(Ordering::SeqCst));
 
@@ -604,16 +816,28 @@ async fn cancel_by_a_different_non_admin_session_is_denied() {
     let other = proto.new_session(Some(()), Arc::new(NullOutbound)); // different session, no roles
 
     let work = {
-        let (p, s, wire) = (proto.clone(), owner.clone(), req("slow", Some(json!({})), Some(ID)));
+        let (p, s, wire) = (
+            proto.clone(),
+            owner.clone(),
+            req("slow", Some(json!({})), Some(ID)),
+        );
         tokio::spawn(async move { p.dispatch(&wire, &s).await.into_bytes() })
     };
     while !started.load(Ordering::SeqCst) {
         tokio::time::sleep(Duration::from_millis(1)).await;
     }
     // `other` is neither the owner nor FULL_ADMIN → it cannot cancel the owner's request.
-    let cancel = call(&proto, &other, &req("$/cancelRequest", Some(json!({ "target_id": ID })), Some(ID2)))
-        .await
-        .unwrap();
+    let cancel = call(
+        &proto,
+        &other,
+        &req(
+            "$/cancelRequest",
+            Some(json!({ "target_id": ID })),
+            Some(ID2),
+        ),
+    )
+    .await
+    .unwrap();
     assert_eq!(cancel["error"]["code"], -32000);
     assert_eq!(cancel["error"]["message"], "Not authorized");
     assert!(!canceller.load(Ordering::SeqCst));
@@ -628,23 +852,40 @@ async fn cancel_by_a_different_non_admin_session_is_denied() {
 async fn async_pipeline_decode_and_authz_branches() {
     let proto = JsonRpcProtocol::<()>::builder("p", "1")
         .roles(Roles::new(["AUTH"]))
-        .async_method(AsyncRpcMethod::new(MethodDef::new("aecho").roles(["AUTH"]), |a: EchoArgs, _cx: RequestCtx<()>| async move {
-            Ok::<_, JsonRpcError>(EchoResult { echo: a.msg })
-        }))
+        .async_method(AsyncRpcMethod::new(
+            MethodDef::new("aecho").roles(["AUTH"]),
+            |a: EchoArgs, _cx: RequestCtx<()>| async move {
+                Ok::<_, JsonRpcError>(EchoResult { echo: a.msg })
+            },
+        ))
         .unwrap()
         .build();
     // A session without the required role.
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     // bad params → INVALID_PARAMS (async decode-error branch, before the gate)
-    let bad = call(&proto, &s, &req("aecho", Some(json!({})), Some(ID))).await.unwrap();
+    let bad = call(&proto, &s, &req("aecho", Some(json!({})), Some(ID)))
+        .await
+        .unwrap();
     assert_eq!(bad["error"]["code"], -32602);
     // good params but the role isn't granted → NOT_AUTHORIZED (async authz-denied branch)
-    let denied = call(&proto, &s, &req("aecho", Some(json!({ "msg": "x" })), Some(ID))).await.unwrap();
+    let denied = call(
+        &proto,
+        &s,
+        &req("aecho", Some(json!({ "msg": "x" })), Some(ID)),
+    )
+    .await
+    .unwrap();
     assert_eq!(denied["error"]["code"], -32000);
     // a FULL_ADMIN session → allowed → result (async run branch)
     let admin = proto.new_session(Some(()), Arc::new(NullOutbound));
     admin.set_roles(RoleMask::FULL_ADMIN);
-    let ok = call(&proto, &admin, &req("aecho", Some(json!({ "msg": "hi" })), Some(ID))).await.unwrap();
+    let ok = call(
+        &proto,
+        &admin,
+        &req("aecho", Some(json!({ "msg": "hi" })), Some(ID)),
+    )
+    .await
+    .unwrap();
     assert_eq!(ok["result"]["echo"], "hi");
 }
 
@@ -652,13 +893,34 @@ async fn async_pipeline_decode_and_authz_branches() {
 
 #[test]
 fn jsonrpc_error_constructors_and_display() {
-    assert_eq!(JsonRpcError::invalid_params("x").code, ErrorCode::InvalidParams.code());
-    assert_eq!(JsonRpcError::method_not_found("x").code, ErrorCode::MethodNotFound.code());
-    assert_eq!(JsonRpcError::not_authorized("x").code, ErrorCode::NotAuthorized.code());
-    assert_eq!(JsonRpcError::request_failed("x").code, ErrorCode::RequestFailed.code());
-    assert_eq!(JsonRpcError::internal("x").code, ErrorCode::InternalError.code());
-    assert_eq!(JsonRpcError::session_not_established("x").code, ErrorCode::SessionNotEstablished.code());
-    assert_eq!(JsonRpcError::cancelled().code, ErrorCode::RequestCancelled.code());
+    assert_eq!(
+        JsonRpcError::invalid_params("x").code,
+        ErrorCode::InvalidParams.code()
+    );
+    assert_eq!(
+        JsonRpcError::method_not_found("x").code,
+        ErrorCode::MethodNotFound.code()
+    );
+    assert_eq!(
+        JsonRpcError::not_authorized("x").code,
+        ErrorCode::NotAuthorized.code()
+    );
+    assert_eq!(
+        JsonRpcError::request_failed("x").code,
+        ErrorCode::RequestFailed.code()
+    );
+    assert_eq!(
+        JsonRpcError::internal("x").code,
+        ErrorCode::InternalError.code()
+    );
+    assert_eq!(
+        JsonRpcError::session_not_established("x").code,
+        ErrorCode::SessionNotEstablished.code()
+    );
+    assert_eq!(
+        JsonRpcError::cancelled().code,
+        ErrorCode::RequestCancelled.code()
+    );
     let e = JsonRpcError::custom(-32050, "custom").with_data(json!({ "k": "v" }));
     assert_eq!(e.code, -32050);
     assert_eq!(e.data, Some(json!({ "k": "v" })));

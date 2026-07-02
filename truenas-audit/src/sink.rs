@@ -43,7 +43,11 @@ impl<S> LinuxAuditSink<S> {
     /// Start building a sink for `service` — the `svc=` value and the `op=<service>:<verb>`
     /// namespace (e.g. `"truenas-api"`).
     pub fn builder(service: impl Into<String>) -> LinuxAuditSinkBuilder<S> {
-        LinuxAuditSinkBuilder { service: service.into(), extract: None, queue_bound: 1024 }
+        LinuxAuditSinkBuilder {
+            service: service.into(),
+            extract: None,
+            queue_bound: 1024,
+        }
     }
 
     /// Records currently dropped-but-not-yet-surfaced because the queue was full (the drain thread
@@ -64,8 +68,15 @@ impl<S: Send + Sync + 'static> AuditSink<S> for LinuxAuditSink<S> {
         let principal = (self.extract)(session);
         let aid = uuid::Uuid::new_v4().to_string();
         let sess = session.id().to_string();
-        let record =
-            build_record(&self.service, &aid, &sess, request, outcome, &principal, audit_message);
+        let record = build_record(
+            &self.service,
+            &aid,
+            &sess,
+            request,
+            outcome,
+            &principal,
+            audit_message,
+        );
         // Non-blocking: a full queue drops + counts rather than stalling dispatch.
         if self.tx.try_send(record).is_err() {
             self.dropped.fetch_add(1, Ordering::Relaxed);
@@ -104,8 +115,9 @@ impl<S: Send + Sync + 'static> LinuxAuditSinkBuilder<S> {
     /// Spawn the drain thread and freeze the sink. **Infallible** — if the audit socket can't open
     /// (no kernel `NETLINK_AUDIT` support), the drain thread logs once and the sink no-ops.
     pub fn build(self) -> LinuxAuditSink<S> {
-        let extract: Extractor<S> =
-            self.extract.unwrap_or_else(|| Box::new(|_: &Session<S>| AuditPrincipal::default()));
+        let extract: Extractor<S> = self
+            .extract
+            .unwrap_or_else(|| Box::new(|_: &Session<S>| AuditPrincipal::default()));
         let (tx, rx) = sync_channel::<(u16, String)>(self.queue_bound);
         let dropped = Arc::new(AtomicU64::new(0));
         let drain_dropped = dropped.clone();
@@ -114,7 +126,12 @@ impl<S: Send + Sync + 'static> LinuxAuditSinkBuilder<S> {
             .name("truenas-audit".into())
             .spawn(move || drain_loop(rx, drain_service, drain_dropped))
             .expect("spawn audit drain thread");
-        LinuxAuditSink { tx, service: self.service, extract, dropped }
+        LinuxAuditSink {
+            tx,
+            service: self.service,
+            extract,
+            dropped,
+        }
     }
 }
 
@@ -132,7 +149,9 @@ fn drain_loop(rx: Receiver<(u16, String)>, service: String, dropped: Arc<AtomicU
     let mut unavailable_logged = false;
     let mut last_err: Option<i32> = None;
     while let Ok((ty, msg)) = rx.recv() {
-        let Some(sock) = socket.as_mut() else { continue }; // disabled → drain + discard
+        let Some(sock) = socket.as_mut() else {
+            continue;
+        }; // disabled → drain + discard
         let lost = dropped.swap(0, Ordering::Relaxed);
         if lost > 0 {
             let (lt, lm) = lost_record(&service, lost);

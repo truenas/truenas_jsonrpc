@@ -126,7 +126,11 @@ pub(crate) fn parse(wire: &[u8]) -> Result<ParsedRequest, ParseError> {
         }
     };
 
-    Ok(ParsedRequest { id, method, params: env.params })
+    Ok(ParsedRequest {
+        id,
+        method,
+        params: env.params,
+    })
 }
 
 // --- response construction ---------------------------------------------------
@@ -156,8 +160,12 @@ struct ErrorEnvelope<'a> {
 /// Build a success response: `{"jsonrpc":"2.0","result":<result>,"id":<id|null>}`.
 /// `id` is `None` only for a notification (whose reply the caller then suppresses).
 pub(crate) fn success(id: Option<&str>, result: &RawValue) -> Vec<u8> {
-    serde_json::to_vec(&SuccessEnvelope { jsonrpc: JSONRPC_VERSION, result, id })
-        .expect("serializing a success envelope cannot fail")
+    serde_json::to_vec(&SuccessEnvelope {
+        jsonrpc: JSONRPC_VERSION,
+        result,
+        id,
+    })
+    .expect("serializing a success envelope cannot fail")
 }
 
 /// Write a success response — `{"jsonrpc":"2.0","result":<result>,"id":<id|null>}` — directly into
@@ -191,8 +199,12 @@ struct NotificationEnvelope<'a> {
 /// Build a server→client notification: `{"jsonrpc":"2.0","method":<method>,"params":<params>}`
 /// (no `id`). Used for pub/sub topic publishes.
 pub(crate) fn notification(method: &str, params: &RawValue) -> Vec<u8> {
-    serde_json::to_vec(&NotificationEnvelope { jsonrpc: JSONRPC_VERSION, method, params })
-        .expect("serializing a notification envelope cannot fail")
+    serde_json::to_vec(&NotificationEnvelope {
+        jsonrpc: JSONRPC_VERSION,
+        method,
+        params,
+    })
+    .expect("serializing a notification envelope cannot fail")
 }
 
 /// Build an error response: `{"jsonrpc":"2.0","error":{code,message,data?},"id":<id|null>}`.
@@ -204,7 +216,11 @@ pub(crate) fn error(
 ) -> Vec<u8> {
     serde_json::to_vec(&ErrorEnvelope {
         jsonrpc: JSONRPC_VERSION,
-        error: WireError { code, message, data },
+        error: WireError {
+            code,
+            message,
+            data,
+        },
         id,
     })
     .expect("serializing an error envelope cannot fail")
@@ -214,13 +230,20 @@ pub(crate) fn error(
 /// member on its own. Used as the XDR error-frame detail so both wires carry identical
 /// bytes (field order: code, message, data).
 pub(crate) fn error_object(code: i32, message: &str, data: Option<&serde_json::Value>) -> Vec<u8> {
-    serde_json::to_vec(&WireError { code, message, data })
-        .expect("serializing an error object cannot fail")
+    serde_json::to_vec(&WireError {
+        code,
+        message,
+        data,
+    })
+    .expect("serializing an error object cannot fail")
 }
 
 /// Convenience: render a [`ParseError`] to wire bytes (always sent).
 pub(crate) fn error_from_parse(e: &ParseError) -> Vec<u8> {
-    let data = e.data.as_ref().map(|s| serde_json::Value::String(s.clone()));
+    let data = e
+        .data
+        .as_ref()
+        .map(|s| serde_json::Value::String(s.clone()));
     error(e.id.as_deref(), e.code.code(), &e.message, data.as_ref())
 }
 

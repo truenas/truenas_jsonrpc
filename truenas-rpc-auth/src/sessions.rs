@@ -41,7 +41,11 @@ mod tests {
     #[test]
     fn renders_only_authenticated_extras() {
         let proto = JsonRpcProtocol::<AuthSession>::builder("api", "1").build();
-        let peer = Peer::unix(Some(Ucred { pid: 1, uid: 1000, gid: 1000 }));
+        let peer = Peer::unix(Some(Ucred {
+            pid: 1,
+            uid: 1000,
+            gid: 1000,
+        }));
 
         // Unauthenticated: just the `authenticated` flag, no identity. The core base entry owns
         // session_id / origin / age / … now — the renderer no longer emits them.

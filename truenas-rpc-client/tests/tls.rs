@@ -58,7 +58,8 @@ fn server() -> TruenasRpcServer<()> {
             |a: &DlArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DlReady { size: a.n }),
             |a: DlArgs, ft: &dyn FileTransfer| {
                 let buf: Vec<u8> = (0..a.n).map(pattern).collect();
-                ft.write_all(&buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                ft.write_all(&buf)
+                    .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
                 Ok(DlDone { sent: a.n })
             },
         ))
@@ -75,7 +76,9 @@ async fn ktls_round_trip_and_transfer() {
     let (cert, key) = self_signed_pem();
     let tls = TlsConfig::from_pem(&cert, &key, TlsMode::Kernel).unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await });
 
     let (client, neg, _notifs) = JsonRpcClient::connect_negotiate(
@@ -92,7 +95,10 @@ async fn ktls_round_trip_and_transfer() {
 
     // A plain call over the encrypted link.
     let bytes = client
-        .call(&JsonRpcMethod::Name("math.add".into()), &serde_json::to_vec(&AddArgs { a: 2, b: 40 }).unwrap())
+        .call(
+            &JsonRpcMethod::Name("math.add".into()),
+            &serde_json::to_vec(&AddArgs { a: 2, b: 40 }).unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(serde_json::from_slice::<AddResult>(&bytes).unwrap().sum, 42);
@@ -101,14 +107,21 @@ async fn ktls_round_trip_and_transfer() {
     // plaintext (kernel-encrypted) fd and verifies it byte-for-byte.
     let params = serde_json::to_vec(&DlArgs { n: N }).unwrap();
     let reply = client
-        .transfer(&JsonRpcMethod::Name("x.download".into()), &params, move |ht| {
-            let mut buf = vec![0u8; N];
-            ht.read_exact(&mut buf)?;
-            if buf.iter().enumerate().any(|(i, &b)| b != pattern(i)) {
-                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt download"));
-            }
-            Ok(())
-        })
+        .transfer(
+            &JsonRpcMethod::Name("x.download".into()),
+            &params,
+            move |ht| {
+                let mut buf = vec![0u8; N];
+                ht.read_exact(&mut buf)?;
+                if buf.iter().enumerate().any(|(i, &b)| b != pattern(i)) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "corrupt download",
+                    ));
+                }
+                Ok(())
+            },
+        )
         .await
         .unwrap();
     assert_eq!(serde_json::from_slice::<DlDone>(&reply).unwrap().sent, N);
@@ -122,14 +135,20 @@ async fn mtls_valid_client_cert_is_accepted() {
     let (ca, ca_key) = make_ca();
     let (ccert, ckey) = make_client(&ca, &ca_key, "client-1");
     let tls =
-        TlsConfig::from_pem_with_client_ca(&scert, &skey, &ca.to_pem().unwrap(), TlsMode::Kernel).unwrap();
+        TlsConfig::from_pem_with_client_ca(&scert, &skey, &ca.to_pem().unwrap(), TlsMode::Kernel)
+            .unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await });
 
     // The client presents a cert that chains to the server's client-CA → the handshake completes.
-    let client_tls =
-        ClientTls::builder().danger_accept_invalid_certs().client_cert_pem(&ccert, &ckey).build().unwrap();
+    let client_tls = ClientTls::builder()
+        .danger_accept_invalid_certs()
+        .client_cert_pem(&ccert, &ckey)
+        .build()
+        .unwrap();
     let (client, neg, _notifs) = JsonRpcClient::connect_negotiate(
         &Endpoint::tls(addr.to_string(), "localhost", client_tls),
         "main",
@@ -139,7 +158,10 @@ async fn mtls_valid_client_cert_is_accepted() {
     .unwrap();
     assert_eq!(neg.protocol, "main");
     let bytes = client
-        .call(&JsonRpcMethod::Name("math.add".into()), &serde_json::to_vec(&AddArgs { a: 1, b: 2 }).unwrap())
+        .call(
+            &JsonRpcMethod::Name("math.add".into()),
+            &serde_json::to_vec(&AddArgs { a: 1, b: 2 }).unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(serde_json::from_slice::<AddResult>(&bytes).unwrap().sum, 3);
@@ -153,21 +175,30 @@ async fn mtls_untrusted_client_cert_is_rejected() {
     let (other_ca, other_key) = make_ca(); // a different CA the server does NOT trust
     let (ccert, ckey) = make_client(&other_ca, &other_key, "rogue");
     let tls =
-        TlsConfig::from_pem_with_client_ca(&scert, &skey, &ca.to_pem().unwrap(), TlsMode::Kernel).unwrap();
+        TlsConfig::from_pem_with_client_ca(&scert, &skey, &ca.to_pem().unwrap(), TlsMode::Kernel)
+            .unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await });
 
     // The presented cert does not chain to the server's client-CA → the handshake must fail.
-    let client_tls =
-        ClientTls::builder().danger_accept_invalid_certs().client_cert_pem(&ccert, &ckey).build().unwrap();
+    let client_tls = ClientTls::builder()
+        .danger_accept_invalid_certs()
+        .client_cert_pem(&ccert, &ckey)
+        .build()
+        .unwrap();
     let result = JsonRpcClient::connect_negotiate(
         &Endpoint::tls(addr.to_string(), "localhost", client_tls),
         "main",
         ClientConfig::default(),
     )
     .await;
-    assert!(result.is_err(), "a client cert not chaining to the server's client-CA must be rejected");
+    assert!(
+        result.is_err(),
+        "a client cert not chaining to the server's client-CA must be rejected"
+    );
     task.abort();
 }
 
@@ -179,10 +210,15 @@ async fn tls_verifies_the_server_against_custom_roots() {
     let (scert, skey) = make_server(&ca, &ca_key, "localhost");
     let tls = TlsConfig::from_pem(&scert, &skey, TlsMode::Kernel).unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await });
 
-    let client_tls = ClientTls::builder().roots_pem(&ca.to_pem().unwrap()).build().unwrap();
+    let client_tls = ClientTls::builder()
+        .roots_pem(&ca.to_pem().unwrap())
+        .build()
+        .unwrap();
     let (client, neg, _notifs) = JsonRpcClient::connect_negotiate(
         &Endpoint::tls(addr.to_string(), "localhost", client_tls),
         "main",
@@ -192,7 +228,10 @@ async fn tls_verifies_the_server_against_custom_roots() {
     .unwrap();
     assert_eq!(neg.protocol, "main");
     let bytes = client
-        .call(&JsonRpcMethod::Name("math.add".into()), &serde_json::to_vec(&AddArgs { a: 19, b: 23 }).unwrap())
+        .call(
+            &JsonRpcMethod::Name("math.add".into()),
+            &serde_json::to_vec(&AddArgs { a: 19, b: 23 }).unwrap(),
+        )
         .await
         .unwrap();
     assert_eq!(serde_json::from_slice::<AddResult>(&bytes).unwrap().sum, 42);
@@ -216,10 +255,15 @@ fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
     b.set_subject_name(&name).unwrap();
     b.set_issuer_name(&name).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     b.sign(&key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }
 
 fn rsa_key() -> PKey<Private> {
@@ -252,9 +296,12 @@ fn make_ca() -> (X509, PKey<Private>) {
     b.set_subject_name(&name).unwrap();
     b.set_issuer_name(&name).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
-    b.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+        .unwrap();
     b.sign(&key, MessageDigest::sha256()).unwrap();
     (b.build(), key)
 }
@@ -271,11 +318,17 @@ fn make_client(ca: &X509, ca_key: &PKey<Private>, name: &str) -> (Vec<u8>, Vec<u
     b.set_subject_name(&cn(name)).unwrap();
     b.set_issuer_name(ca.subject_name()).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
-    b.append_extension(ExtendedKeyUsage::new().client_auth().build().unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    b.append_extension(ExtendedKeyUsage::new().client_auth().build().unwrap())
+        .unwrap();
     b.sign(ca_key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }
 
 /// A leaf **server** cert (`CN=<name>`, `serverAuth`, `SAN=DNS:<name>`) signed by `ca`.
@@ -290,14 +343,20 @@ fn make_server(ca: &X509, ca_key: &PKey<Private>, name: &str) -> (Vec<u8>, Vec<u
     b.set_subject_name(&cn(name)).unwrap();
     b.set_issuer_name(ca.subject_name()).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
-    b.append_extension(ExtendedKeyUsage::new().server_auth().build().unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    b.append_extension(ExtendedKeyUsage::new().server_auth().build().unwrap())
+        .unwrap();
     let san = SubjectAlternativeName::new()
         .dns(name)
         .build(&b.x509v3_context(Some(ca), None))
         .unwrap();
     b.append_extension(san).unwrap();
     b.sign(ca_key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }

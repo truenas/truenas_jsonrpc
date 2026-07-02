@@ -13,10 +13,10 @@ use std::net::SocketAddr;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    FileTransfer, JsonRpcError, RpcFdTransferMethod, RpcMethod, JsonRpcProtocol, MethodDef,
-    RequestCtx, TransferDirection,
+    FileTransfer, JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RpcFdTransferMethod,
+    RpcMethod, TransferDirection,
 };
-use truenas_rpc_server::{FileTransferExt, JsonRpc, TruenasRpcServer, TlsConfig, TlsMode};
+use truenas_rpc_server::{FileTransferExt, JsonRpc, TlsConfig, TlsMode, TruenasRpcServer};
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
 
@@ -60,7 +60,8 @@ fn server() -> TruenasRpcServer<()> {
             |a: &DlArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DlReady { size: a.n }),
             |a: DlArgs, ft: &dyn FileTransfer| {
                 let buf: Vec<u8> = (0..a.n).map(pattern_byte).collect();
-                ft.write_all(&buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                ft.write_all(&buf)
+                    .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
                 Ok(DlDone { sent: a.n })
             },
         ))
@@ -97,10 +98,15 @@ fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
     b.set_subject_name(&name).unwrap();
     b.set_issuer_name(&name).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     b.sign(&key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }
 
 fn send<W: Write>(w: &mut W, v: &Value) {
@@ -130,9 +136,15 @@ fn connect_tls(addr: SocketAddr) -> openssl::ssl::SslStream<std::net::TcpStream>
 /// Connect, negotiate `main`, then `math.add`.
 fn client_roundtrip(addr: SocketAddr) -> (Value, Value) {
     let mut s = connect_tls(addr);
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}));
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    );
     let neg = recv(&mut s);
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}}));
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}}),
+    );
     let add = recv(&mut s);
     (neg, add)
 }
@@ -142,9 +154,15 @@ fn client_roundtrip(addr: SocketAddr) -> (Value, Value) {
 /// response.
 fn client_download(addr: SocketAddr, n: usize) -> (bool, Value) {
     let mut s = connect_tls(addr);
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}));
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    );
     let _ = recv(&mut s);
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"x.download","id":UUID,"params":{"n":n}}));
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"x.download","id":UUID,"params":{"n":n}}),
+    );
     let ready = recv(&mut s);
     assert_eq!(ready["params"]["direction"], "download");
     assert_eq!(ready["params"]["result"]["size"], n);
@@ -161,13 +179,17 @@ async fn round_trip(mode: TlsMode) {
     let (cert, key) = self_signed_pem();
     let tls = TlsConfig::from_pem(&cert, &key, mode).unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
     };
 
-    let (neg, add) = tokio::task::spawn_blocking(move || client_roundtrip(addr)).await.unwrap();
+    let (neg, add) = tokio::task::spawn_blocking(move || client_roundtrip(addr))
+        .await
+        .unwrap();
     assert_eq!(neg["result"]["protocol"], "main");
     assert_eq!(neg["result"]["server"], "tls-server");
     assert_eq!(add["result"]["sum"], 42);
@@ -195,14 +217,21 @@ async fn kernel_tls_transfer_is_encrypted() {
     let (cert, key) = self_signed_pem();
     let tls = TlsConfig::from_pem(&cert, &key, TlsMode::Kernel).unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
     };
 
-    let (matched, fin) = tokio::task::spawn_blocking(move || client_download(addr, N)).await.unwrap();
-    assert!(matched, "the TLS-decrypted download stream didn't match the pattern");
+    let (matched, fin) = tokio::task::spawn_blocking(move || client_download(addr, N))
+        .await
+        .unwrap();
+    assert!(
+        matched,
+        "the TLS-decrypted download stream didn't match the pattern"
+    );
     assert_eq!(fin["result"]["sent"], N);
     assert_eq!(fin["id"], UUID);
 
@@ -230,7 +259,9 @@ fn mtls_server() -> TruenasRpcServer<CertState> {
         .method(RpcMethod::new(
             MethodDef::new("cert.len"),
             |_a: NoArgs, cx: &RequestCtx<CertState>| {
-                let len = cx.session().with_internal(|s| s.and_then(|c| c.as_ref()).map_or(0, Vec::len));
+                let len = cx
+                    .session()
+                    .with_internal(|s| s.and_then(|c| c.as_ref()).map_or(0, Vec::len));
                 Ok::<_, JsonRpcError>(CertLen { len })
             },
         ))
@@ -274,9 +305,12 @@ fn make_ca() -> (X509, PKey<Private>) {
     b.set_subject_name(&name).unwrap();
     b.set_issuer_name(&name).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
-    b.append_extension(BasicConstraints::new().critical().ca().build().unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    b.append_extension(BasicConstraints::new().critical().ca().build().unwrap())
+        .unwrap();
     b.sign(&key, MessageDigest::sha256()).unwrap();
     (b.build(), key)
 }
@@ -293,11 +327,17 @@ fn make_client(ca: &X509, ca_key: &PKey<Private>, name: &str) -> (Vec<u8>, Vec<u
     b.set_subject_name(&cn(name)).unwrap();
     b.set_issuer_name(ca.subject_name()).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
-    b.append_extension(ExtendedKeyUsage::new().client_auth().build().unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
+    b.append_extension(ExtendedKeyUsage::new().client_auth().build().unwrap())
+        .unwrap();
     b.sign(ca_key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }
 
 /// Connect (optionally presenting a client cert), negotiate, call `cert.len`, return the length.
@@ -306,14 +346,22 @@ fn mtls_cert_len(addr: SocketAddr, client: Option<(Vec<u8>, Vec<u8>)>) -> usize 
     let mut b = SslConnector::builder(SslMethod::tls()).unwrap();
     b.set_verify(SslVerifyMode::NONE); // accept the self-signed server cert
     if let Some((cert_pem, key_pem)) = client {
-        b.set_certificate(&X509::from_pem(&cert_pem).unwrap()).unwrap();
-        b.set_private_key(&PKey::private_key_from_pem(&key_pem).unwrap()).unwrap();
+        b.set_certificate(&X509::from_pem(&cert_pem).unwrap())
+            .unwrap();
+        b.set_private_key(&PKey::private_key_from_pem(&key_pem).unwrap())
+            .unwrap();
     }
     let tcp = std::net::TcpStream::connect(addr).unwrap();
     let mut s = b.build().connect("localhost", tcp).unwrap();
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}));
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    );
     let _ = recv(&mut s);
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"cert.len","id":UUID,"params":{}}));
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"cert.len","id":UUID,"params":{}}),
+    );
     recv(&mut s)["result"]["len"].as_u64().unwrap() as usize
 }
 
@@ -324,24 +372,37 @@ async fn mtls_surfaces_verified_client_cert() {
     let (client_cert, client_key) = make_client(&ca, &ca_key, "client-alice");
     let ca_pem = ca.to_pem().unwrap();
 
-    let tls = TlsConfig::from_pem_with_client_ca(&server_cert, &server_key, &ca_pem, TlsMode::Userspace).unwrap();
+    let tls =
+        TlsConfig::from_pem_with_client_ca(&server_cert, &server_key, &ca_pem, TlsMode::Userspace)
+            .unwrap();
     let srv = mtls_server();
-    let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
     };
 
     // A CA-signed client cert is verified by the handshake and surfaces on the Peer.
-    let with = tokio::task::spawn_blocking(move || mtls_cert_len(addr, Some((client_cert, client_key))))
-        .await
-        .unwrap();
-    assert!(with > 0, "the verified client cert should surface on Peer::tls");
+    let with =
+        tokio::task::spawn_blocking(move || mtls_cert_len(addr, Some((client_cert, client_key))))
+            .await
+            .unwrap();
+    assert!(
+        with > 0,
+        "the verified client cert should surface on Peer::tls"
+    );
 
     // No client cert → the handshake still succeeds (PEER, not fail-if-absent) and nothing surfaces,
     // so SCRAM / other mechanisms remain usable over the same listener.
-    let without = tokio::task::spawn_blocking(move || mtls_cert_len(addr, None)).await.unwrap();
-    assert_eq!(without, 0, "no client cert → none surfaced, connection still works");
+    let without = tokio::task::spawn_blocking(move || mtls_cert_len(addr, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        without, 0,
+        "no client cert → none surfaced, connection still works"
+    );
 
     task.abort();
 }
@@ -361,9 +422,12 @@ fn binding_server() -> TruenasRpcServer<CertState> {
             MethodDef::new("binding.get"),
             |_a: NoArgs, cx: &RequestCtx<CertState>| {
                 let binding = cx.session().with_internal(|s| {
-                    s.and_then(|c| c.as_ref()).map(|c| openssl::base64::encode_block(c))
+                    s.and_then(|c| c.as_ref())
+                        .map(|c| openssl::base64::encode_block(c))
                 });
-                Ok::<_, JsonRpcError>(BindingResult { binding: binding.unwrap_or_default() })
+                Ok::<_, JsonRpcError>(BindingResult {
+                    binding: binding.unwrap_or_default(),
+                })
             },
         ))
         .unwrap()
@@ -390,10 +454,19 @@ fn client_get_binding(addr: SocketAddr) -> (String, String) {
     let client_derived = sha256_der_b64(&server_cert_der);
 
     let mut s = s;
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}));
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    );
     let _ = recv(&mut s);
-    send(&mut s, &json!({"jsonrpc":"2.0","method":"binding.get","id":UUID,"params":{}}));
-    let reported = recv(&mut s)["result"]["binding"].as_str().unwrap().to_string();
+    send(
+        &mut s,
+        &json!({"jsonrpc":"2.0","method":"binding.get","id":UUID,"params":{}}),
+    );
+    let reported = recv(&mut s)["result"]["binding"]
+        .as_str()
+        .unwrap()
+        .to_string();
     (reported, client_derived)
 }
 
@@ -409,17 +482,30 @@ async fn tls_surfaces_server_end_point_binding() {
     for mode in [TlsMode::Userspace, TlsMode::Kernel] {
         let tls = TlsConfig::from_pem(&cert, &key, mode).unwrap();
         let srv = binding_server();
-        let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0").await.unwrap();
+        let (listener, addr) = TruenasRpcServer::<CertState>::bind_tcp("127.0.0.1:0")
+            .await
+            .unwrap();
         let task = {
             let srv = srv.clone();
             tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await })
         };
 
         let (reported, client_derived) =
-            tokio::task::spawn_blocking(move || client_get_binding(addr)).await.unwrap();
-        assert!(!reported.is_empty(), "{mode:?}: no binding surfaced on the connection");
-        assert_eq!(reported, expected, "{mode:?}: binding != SHA-256(server cert DER)");
-        assert_eq!(reported, client_derived, "{mode:?}: server and client disagree on the binding");
+            tokio::task::spawn_blocking(move || client_get_binding(addr))
+                .await
+                .unwrap();
+        assert!(
+            !reported.is_empty(),
+            "{mode:?}: no binding surfaced on the connection"
+        );
+        assert_eq!(
+            reported, expected,
+            "{mode:?}: binding != SHA-256(server cert DER)"
+        );
+        assert_eq!(
+            reported, client_derived,
+            "{mode:?}: server and client disagree on the binding"
+        );
 
         task.abort();
     }

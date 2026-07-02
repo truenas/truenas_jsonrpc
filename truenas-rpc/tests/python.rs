@@ -8,9 +8,8 @@ use std::sync::{Arc, Mutex};
 use serde_json::value::to_raw_value;
 use serde_json::Value;
 use truenas_rpc::{
-    AuditOutcome,
-    JsonRpcError, JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, PyOutcome, PyResult,
-    Roles, Session,
+    AuditOutcome, JsonRpcError, JsonRpcProtocol, MethodDef, NullOutbound, PyOutcome, PyResult,
+    RequestInfo, Roles, Session,
 };
 
 const ID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -32,13 +31,20 @@ fn mock(name: &str, params_json: &[u8], session_json: &[u8]) -> PyResult {
             outcome: PyOutcome::Error(JsonRpcError::invalid_params("bad params")),
             audit_message: None,
         },
-        _ => PyResult { outcome: PyOutcome::Error(JsonRpcError::internal("?")), audit_message: None },
+        _ => PyResult {
+            outcome: PyOutcome::Error(JsonRpcError::internal("?")),
+            audit_message: None,
+        },
     }
 }
 
 async fn dispatch(proto: &JsonRpcProtocol<()>, wire: &str) -> Value {
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-    let bytes = proto.dispatch(wire.as_bytes(), &s).await.into_bytes().unwrap();
+    let bytes = proto
+        .dispatch(wire.as_bytes(), &s)
+        .await
+        .into_bytes()
+        .unwrap();
     serde_json::from_slice(&bytes).unwrap()
 }
 
@@ -50,9 +56,16 @@ async fn python_ok_passes_params_and_session_view_and_audits() {
         .python_method(MethodDef::new("py.echo").audit_message("call"))
         .unwrap()
         .python_dispatcher(mock)
-        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
-            rec.lock().unwrap().push((req.method.clone(), msg.map(str::to_string)));
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  msg: Option<&str>| {
+                rec.lock()
+                    .unwrap()
+                    .push((req.method.clone(), msg.map(str::to_string)));
+            },
+        )
         .build();
 
     let wire = format!(r#"{{"jsonrpc":"2.0","method":"py.echo","id":"{ID}","params":{{"x":1}}}}"#);
@@ -66,7 +79,10 @@ async fn python_ok_passes_params_and_session_view_and_audits() {
 
     // Audited: the static `audit_message` joined with the body's runtime detail.
     let recs = records.lock().unwrap();
-    assert_eq!(recs.as_slice(), &[("py.echo".to_string(), Some("call echoed".to_string()))]);
+    assert_eq!(
+        recs.as_slice(),
+        &[("py.echo".to_string(), Some("call echoed".to_string()))]
+    );
 }
 
 #[tokio::test]

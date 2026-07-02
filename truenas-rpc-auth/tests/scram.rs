@@ -14,9 +14,7 @@ use openssl::pkey::PKey;
 use openssl::sign::Signer;
 use serde_json::{json, Value};
 use truenas_rpc::{JsonRpcProtocol, NullOutbound, Session, SessionLifecycle};
-use truenas_rpc_auth::{
-    install, AuthSession, AuthStack, CredentialSource, ScramCredentials,
-};
+use truenas_rpc_auth::{install, AuthSession, AuthStack, CredentialSource, ScramCredentials};
 use truenas_rpc_server::{Peer, TlsPeer, TransportPosture};
 
 const ID: &str = "123e4567-e89b-12d3-a456-426614174000";
@@ -50,7 +48,11 @@ struct Client {
 
 impl Client {
     fn first(&self, flag: &str) -> String {
-        format!("{flag},,n={},r={}", self.username, encode_block(&self.nonce))
+        format!(
+            "{flag},,n={},r={}",
+            self.username,
+            encode_block(&self.nonce)
+        )
     }
     /// (client-final, expected server-final `v=`) for the given server-first + channel binding.
     fn finalize(&self, server_first: &str, binding: &[u8]) -> (String, String) {
@@ -58,9 +60,13 @@ impl Client {
         let mut salt_b64 = String::new();
         let mut iters = 0u32;
         for tok in server_first.split(',') {
-            if let Some(v) = tok.strip_prefix("r=") { combined = v.into() }
-            else if let Some(v) = tok.strip_prefix("s=") { salt_b64 = v.into() }
-            else if let Some(v) = tok.strip_prefix("i=") { iters = v.parse().unwrap() }
+            if let Some(v) = tok.strip_prefix("r=") {
+                combined = v.into()
+            } else if let Some(v) = tok.strip_prefix("s=") {
+                salt_b64 = v.into()
+            } else if let Some(v) = tok.strip_prefix("i=") {
+                iters = v.parse().unwrap()
+            }
         }
         let salt = decode_block(&salt_b64).unwrap();
         let mut cbind = GS2.as_bytes().to_vec();
@@ -74,10 +80,17 @@ impl Client {
         let client_key = hmac(&sp, b"Client Key");
         let stored_key = sha512(&client_key);
         let client_sig = hmac(&stored_key, auth_message.as_bytes());
-        let proof: Vec<u8> = client_key.iter().zip(&client_sig).map(|(a, b)| a ^ b).collect();
+        let proof: Vec<u8> = client_key
+            .iter()
+            .zip(&client_sig)
+            .map(|(a, b)| a ^ b)
+            .collect();
 
         let server_key = hmac(&sp, b"Server Key");
-        let v = format!("v={}", encode_block(&hmac(&server_key, auth_message.as_bytes())));
+        let v = format!(
+            "v={}",
+            encode_block(&hmac(&server_key, auth_message.as_bytes()))
+        );
         (format!("{without_proof},p={}", encode_block(&proof)), v)
     }
 }
@@ -100,16 +113,27 @@ fn server_with<C: CredentialSource + 'static>(source: C) -> JsonRpcProtocol<Auth
     install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build()
 }
 
-fn tls_session(proto: &JsonRpcProtocol<AuthSession>, binding: Option<Vec<u8>>) -> Arc<Session<AuthSession>> {
+fn tls_session(
+    proto: &JsonRpcProtocol<AuthSession>,
+    binding: Option<Vec<u8>>,
+) -> Arc<Session<AuthSession>> {
     let peer = Peer {
-        tls: Some(TlsPeer { peer_cert: None, channel_binding: binding }),
+        tls: Some(TlsPeer {
+            peer_cert: None,
+            channel_binding: binding,
+        }),
         posture: Some(TransportPosture::KernelTls), // a secure (kTLS) channel can authenticate
         ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
     };
     proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))
 }
 
-async fn call(proto: &JsonRpcProtocol<AuthSession>, s: &Arc<Session<AuthSession>>, method: &str, scram_msg: &str) -> Value {
+async fn call(
+    proto: &JsonRpcProtocol<AuthSession>,
+    s: &Arc<Session<AuthSession>>,
+    method: &str,
+    scram_msg: &str,
+) -> Value {
     let wire = serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "method": method, "id": ID,
         "params": { "mechanism": { "mechanism": "SCRAM", "message": scram_msg } },
@@ -120,8 +144,20 @@ async fn call(proto: &JsonRpcProtocol<AuthSession>, s: &Arc<Session<AuthSession>
 
 fn alice() -> (Client, ScramCredentials) {
     let key = b"DJpfT7q7dHu6RRfeMwP8aJlGeUOmRWbDKnnzxnsc8F1YAsDNbl8aDM4X1cYwPmcC".to_vec();
-    let creds = ScramCredentials::mint(&key, b"0123456789abcdef".to_vec(), 4096, json!({ "user": "alice" }));
-    (Client { key, username: "alice".into(), nonce: *b"clientnonce-0123456789012345678!" }, creds)
+    let creds = ScramCredentials::mint(
+        &key,
+        b"0123456789abcdef".to_vec(),
+        4096,
+        json!({ "user": "alice" }),
+    );
+    (
+        Client {
+            key,
+            username: "alice".into(),
+            nonce: *b"clientnonce-0123456789012345678!",
+        },
+        creds,
+    )
 }
 
 fn rtype(v: &Value) -> &str {
@@ -135,7 +171,13 @@ async fn full_scram_plus_exchange_succeeds() {
     let s = tls_session(&proto, Some(BINDING.to_vec()));
 
     // client-first → server-first
-    let r1 = call(&proto, &s, "$/sessionSetup", &client.first("p=tls-server-end-point")).await;
+    let r1 = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
     assert_eq!(rtype(&r1), "CHALLENGE", "{r1}");
     let server_first = r1["result"]["response"]["message"].as_str().unwrap();
     assert_eq!(s.lifecycle(), SessionLifecycle::Init);
@@ -144,9 +186,15 @@ async fn full_scram_plus_exchange_succeeds() {
     let (client_final, expected_v) = client.finalize(server_first, BINDING);
     let r2 = call(&proto, &s, "$/sessionSetupContinue", &client_final).await;
     assert_eq!(rtype(&r2), "SUCCESS", "{r2}");
-    assert_eq!(r2["result"]["response"]["extra"]["scram"].as_str().unwrap(), expected_v);
+    assert_eq!(
+        r2["result"]["response"]["extra"]["scram"].as_str().unwrap(),
+        expected_v
+    );
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
-    assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "user": "alice" })));
+    assert_eq!(
+        s.with_internal(|a| a.unwrap().identity().cloned()),
+        Some(json!({ "user": "alice" }))
+    );
 }
 
 #[tokio::test]
@@ -154,8 +202,17 @@ async fn a_bad_proof_is_rejected() {
     let (client, creds) = alice();
     let proto = server(creds);
     let s = tls_session(&proto, Some(BINDING.to_vec()));
-    let r1 = call(&proto, &s, "$/sessionSetup", &client.first("p=tls-server-end-point")).await;
-    let server_first = r1["result"]["response"]["message"].as_str().unwrap().to_string();
+    let r1 = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
+    let server_first = r1["result"]["response"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
     // Corrupt the proof (flip the last base64 char's bits by re-encoding a mutated proof).
     let (mut client_final, _) = client.finalize(&server_first, BINDING);
     let p_idx = client_final.rfind(",p=").unwrap() + 3;
@@ -181,8 +238,17 @@ async fn a_mismatched_binding_is_rejected() {
     let (client, creds) = alice();
     let proto = server(creds);
     let s = tls_session(&proto, Some(BINDING.to_vec()));
-    let r1 = call(&proto, &s, "$/sessionSetup", &client.first("p=tls-server-end-point")).await;
-    let server_first = r1["result"]["response"]["message"].as_str().unwrap().to_string();
+    let r1 = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
+    let server_first = r1["result"]["response"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
     // The client computes its c= against a *different* binding (a relay on another TLS channel).
     let (client_final, _) = client.finalize(&server_first, b"a-different-binding-value-32bytes");
     let r2 = call(&proto, &s, "$/sessionSetupContinue", &client_final).await;
@@ -194,8 +260,18 @@ async fn unknown_user_is_rejected() {
     let (_c, creds) = alice();
     let proto = server(creds);
     let s = tls_session(&proto, Some(BINDING.to_vec()));
-    let bob = Client { key: b"x".to_vec(), username: "bob".into(), nonce: [7u8; 32] };
-    let r = call(&proto, &s, "$/sessionSetup", &bob.first("p=tls-server-end-point")).await;
+    let bob = Client {
+        key: b"x".to_vec(),
+        username: "bob".into(),
+        nonce: [7u8; 32],
+    };
+    let r = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &bob.first("p=tls-server-end-point"),
+    )
+    .await;
     assert_eq!(rtype(&r), "AUTH_ERR");
 }
 
@@ -205,7 +281,13 @@ async fn scram_without_a_channel_binding_is_denied() {
     let proto = server(creds);
     // A TLS channel that carries no binding value (so SCRAM-PLUS can't apply).
     let s = tls_session(&proto, None);
-    let r = call(&proto, &s, "$/sessionSetup", &client.first("p=tls-server-end-point")).await;
+    let r = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
     assert_eq!(rtype(&r), "DENIED");
 }
 
@@ -232,8 +314,8 @@ fn alice_record(creds: &ScramCredentials, expiry: i64) -> truenas_keyring::Scram
 #[cfg(feature = "keyring")]
 #[tokio::test]
 async fn scram_authenticates_through_a_keyring_record_and_honours_revocation() {
-    use truenas_rpc_auth::KeyringCredentials;
     use truenas_keyring::{KeyringConfig, KeyringStore};
+    use truenas_rpc_auth::KeyringCredentials;
 
     // A **session** keyring (not a thread keyring): the setup handler runs on a `spawn_blocking`
     // worker, so the ring must be possessed from any thread of the process. The session keyring is.
@@ -243,7 +325,11 @@ async fn scram_authenticates_through_a_keyring_record_and_honours_revocation() {
         Err(e) => return eprintln!("keyring unavailable ({e}); skipping"),
     };
     let (client, creds) = alice();
-    if store.server_keys().put_record("alice", &alice_record(&creds, 0), None).is_err() {
+    if store
+        .server_keys()
+        .put_record("alice", &alice_record(&creds, 0), None)
+        .is_err()
+    {
         return eprintln!("keyring put unavailable; skipping");
     }
 
@@ -251,20 +337,48 @@ async fn scram_authenticates_through_a_keyring_record_and_honours_revocation() {
     // identity is the record-derived default `{ "username": "alice" }`.
     let proto = server_with(KeyringCredentials::new(store.server_keys()));
     let s = tls_session(&proto, Some(BINDING.to_vec()));
-    let r1 = call(&proto, &s, "$/sessionSetup", &client.first("p=tls-server-end-point")).await;
+    let r1 = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
     assert_eq!(rtype(&r1), "CHALLENGE", "{r1}");
-    let server_first = r1["result"]["response"]["message"].as_str().unwrap().to_string();
+    let server_first = r1["result"]["response"]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (client_final, expected_v) = client.finalize(&server_first, BINDING);
     let r2 = call(&proto, &s, "$/sessionSetupContinue", &client_final).await;
     assert_eq!(rtype(&r2), "SUCCESS", "{r2}");
-    assert_eq!(r2["result"]["response"]["extra"]["scram"].as_str().unwrap(), expected_v);
-    assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "username": "alice" })));
+    assert_eq!(
+        r2["result"]["response"]["extra"]["scram"].as_str().unwrap(),
+        expected_v
+    );
+    assert_eq!(
+        s.with_internal(|a| a.unwrap().identity().cloned()),
+        Some(json!({ "username": "alice" }))
+    );
 
     // Revoke it (expiry < 0): the same lookup now yields nothing → client-first is refused.
-    store.server_keys().put_record("alice", &alice_record(&creds, -1), None).unwrap();
+    store
+        .server_keys()
+        .put_record("alice", &alice_record(&creds, -1), None)
+        .unwrap();
     let s2 = tls_session(&proto, Some(BINDING.to_vec()));
-    let r = call(&proto, &s2, "$/sessionSetup", &client.first("p=tls-server-end-point")).await;
-    assert_eq!(rtype(&r), "AUTH_ERR", "a revoked record must not authenticate");
+    let r = call(
+        &proto,
+        &s2,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
+    assert_eq!(
+        rtype(&r),
+        "AUTH_ERR",
+        "a revoked record must not authenticate"
+    );
 
     let _ = store.server_keys().remove_record("alice");
 }

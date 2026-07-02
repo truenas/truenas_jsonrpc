@@ -25,11 +25,16 @@ pub(crate) struct XdrSerializer<W> {
 
 impl<W: Write> XdrSerializer<W> {
     pub(crate) fn new(w: W) -> Self {
-        Self { w, fixed_pending: false }
+        Self {
+            w,
+            fixed_pending: false,
+        }
     }
 
     fn put(&mut self, bytes: &[u8]) -> Result<(), XdrError> {
-        self.w.write_all(bytes).map_err(|e| XdrError::Message(e.to_string()))
+        self.w
+            .write_all(bytes)
+            .map_err(|e| XdrError::Message(e.to_string()))
     }
     fn put_u32(&mut self, v: u32) -> Result<(), XdrError> {
         self.put(&v.to_be_bytes())

@@ -42,7 +42,11 @@ where
         channel: &Channel,
         _progress: Option<AuthProgress>,
     ) -> Outcome {
-        match channel.client_cert.as_deref().and_then(|der| (self.policy)(der)) {
+        match channel
+            .client_cert
+            .as_deref()
+            .and_then(|der| (self.policy)(der))
+        {
             Some((identity, principal)) => Outcome::authenticated(identity, principal),
             None => Outcome::Reject(RejectKind::AuthErr),
         }

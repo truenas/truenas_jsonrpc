@@ -45,17 +45,26 @@ impl KeyringStore {
 
     /// The built-in `server_keys` sub-keyring (inbound SCRAM verifiers).
     pub fn server_keys(&self) -> KeyRing {
-        *self.subkeyrings.get(SERVER_KEYS).expect("server_keys is a built-in sub-keyring")
+        *self
+            .subkeyrings
+            .get(SERVER_KEYS)
+            .expect("server_keys is a built-in sub-keyring")
     }
 
     /// The built-in `client_keys` sub-keyring (outbound peer credentials).
     pub fn client_keys(&self) -> KeyRing {
-        *self.subkeyrings.get(CLIENT_KEYS).expect("client_keys is a built-in sub-keyring")
+        *self
+            .subkeyrings
+            .get(CLIENT_KEYS)
+            .expect("client_keys is a built-in sub-keyring")
     }
 
     /// The built-in `server_roles` sub-keyring (uid → granted roles).
     pub fn server_roles(&self) -> KeyRing {
-        *self.subkeyrings.get(SERVER_ROLES).expect("server_roles is a built-in sub-keyring")
+        *self
+            .subkeyrings
+            .get(SERVER_ROLES)
+            .expect("server_roles is a built-in sub-keyring")
     }
 
     /// A sub-keyring by name (a built-in or a config extra), or `None` if not configured.

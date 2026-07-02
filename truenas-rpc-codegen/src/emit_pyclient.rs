@@ -20,7 +20,10 @@ use crate::typemap::{ref_name, str_lit};
 /// generated Rust typed client + the `#[pymodule]` init.
 pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     let module = rust_ident(&spec.name).ok_or_else(|| {
-        CodegenError::new(format!("spec name {:?} is not a valid Python module identifier", spec.name))
+        CodegenError::new(format!(
+            "spec name {:?} is not a valid Python module identifier",
+            spec.name
+        ))
     })?;
     let client = format!("{}Client", pascal_case(&spec.name));
 
@@ -58,17 +61,26 @@ fn emit_type_class(name: &str, schema: &SchemaNode) -> Result<String> {
         )));
     }
     let mut s = String::new();
-    s.push_str(&format!("#[pyo3::pyclass(name = {})]\n#[derive(Clone)]\n", str_lit(name)));
-    s.push_str(&format!("pub struct Py{name} {{\n    inner: {name},\n}}\n\n"));
+    s.push_str(&format!(
+        "#[pyo3::pyclass(name = {})]\n#[derive(Clone)]\n",
+        str_lit(name)
+    ));
+    s.push_str(&format!(
+        "pub struct Py{name} {{\n    inner: {name},\n}}\n\n"
+    ));
     s.push_str(&format!("#[pyo3::pymethods]\nimpl Py{name} {{\n"));
     s.push_str("    #[new]\n    #[pyo3(signature = (**kwargs))]\n");
     s.push_str("    fn new(py: pyo3::Python<'_>, kwargs: Option<pyo3::Bound<'_, pyo3::types::PyDict>>) -> pyo3::PyResult<Self> {\n");
     s.push_str("        let dict = match kwargs { Some(kwargs) => kwargs, None => pyo3::types::PyDict::new(py) };\n");
-    s.push_str(&format!("        Ok(Py{name} {{ inner: truenas_rpc_pyclient::from_py(dict.as_any())? }})\n"));
+    s.push_str(&format!(
+        "        Ok(Py{name} {{ inner: truenas_rpc_pyclient::from_py(dict.as_any())? }})\n"
+    ));
     s.push_str("    }\n");
     for (pname, _pschema) in schema.properties.iter() {
         let field = rust_ident(pname).ok_or_else(|| {
-            CodegenError::new(format!("$defs.{name} property {pname:?} is not a valid identifier"))
+            CodegenError::new(format!(
+                "$defs.{name} property {pname:?} is not a valid identifier"
+            ))
         })?;
         // The getter is `get_<field>` — pyo3 strips the `get_` prefix for the Python attribute name,
         // and the prefix keeps it from colliding with `new` / `__repr__` (a field could be named
@@ -77,7 +89,9 @@ fn emit_type_class(name: &str, schema: &SchemaNode) -> Result<String> {
         s.push_str(&format!(
             "    fn get_{pname}(&self, py: pyo3::Python<'_>) -> pyo3::PyResult<pyo3::PyObject> {{\n"
         ));
-        s.push_str(&format!("        truenas_rpc_pyclient::to_py(py, &self.inner.{field})\n    }}\n"));
+        s.push_str(&format!(
+            "        truenas_rpc_pyclient::to_py(py, &self.inner.{field})\n    }}\n"
+        ));
     }
     s.push_str(&format!("    fn __repr__(&self) -> String {{\n        format!(\"{name}({{:?}})\", self.inner)\n    }}\n"));
     s.push_str("}\n");
@@ -92,15 +106,21 @@ fn emit_client_class(spec: &Spec, client: &str) -> Result<String> {
         // Out of scope for the basic Python client — each needs a bespoke Python surface (a filter
         // model, a notification stream, a blocking fd). Emitted as a skip comment, not silently.
         if m.direction() == Direction::ServerClient {
-            methods.push_str(&format!("    // `{wire}`: server->client subscription — not in the basic Python client.\n"));
+            methods.push_str(&format!(
+                "    // `{wire}`: server->client subscription — not in the basic Python client.\n"
+            ));
             continue;
         }
         if m.filterable {
-            methods.push_str(&format!("    // `{wire}`: filterable query — not in the basic Python client.\n"));
+            methods.push_str(&format!(
+                "    // `{wire}`: filterable query — not in the basic Python client.\n"
+            ));
             continue;
         }
         if m.transfer.is_some() {
-            methods.push_str(&format!("    // `{wire}`: raw-fd transfer — not in the basic Python client.\n"));
+            methods.push_str(&format!(
+                "    // `{wire}`: raw-fd transfer — not in the basic Python client.\n"
+            ));
             continue;
         }
         // plain / xdr / python: request -> result, delegating to the generated Rust typed method
@@ -131,7 +151,10 @@ fn emit_client_class(spec: &Spec, client: &str) -> Result<String> {
         "pub struct Py{client} {{\n    inner: std::sync::Mutex<Option<{client}<truenas_rpc_client::JsonRpcClient>>>,\n}}\n\n"
     ));
     s.push_str(&format!("#[pyo3::pymethods]\nimpl Py{client} {{\n"));
-    s.push_str(&format!("    /// Connect to `endpoint` and negotiate the `{}` protocol.\n", spec.name));
+    s.push_str(&format!(
+        "    /// Connect to `endpoint` and negotiate the `{}` protocol.\n",
+        spec.name
+    ));
     s.push_str("    #[staticmethod]\n    #[pyo3(signature = (endpoint, config = None))]\n");
     s.push_str("    fn connect(py: pyo3::Python<'_>, endpoint: &truenas_rpc_pyclient::PyEndpoint, config: Option<&truenas_rpc_pyclient::PyClientConfig>) -> pyo3::PyResult<Self> {\n");
     s.push_str(&format!(
@@ -151,9 +174,14 @@ fn emit_client_class(spec: &Spec, client: &str) -> Result<String> {
 
 fn emit_module(py_name: &str, module_fn: &str, classes: &[String]) -> String {
     let mut s = String::new();
-    s.push_str("\n/// The generated Python extension module. Also callable directly (e.g. from a test)\n");
+    s.push_str(
+        "\n/// The generated Python extension module. Also callable directly (e.g. from a test)\n",
+    );
     s.push_str("/// to populate a `PyModule` with the classes.\n");
-    s.push_str(&format!("#[pyo3::pymodule]\n#[pyo3(name = {})]\n", str_lit(py_name)));
+    s.push_str(&format!(
+        "#[pyo3::pymodule]\n#[pyo3(name = {})]\n",
+        str_lit(py_name)
+    ));
     s.push_str(&format!(
         "pub fn {module_fn}(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {{\n"
     ));
@@ -171,7 +199,9 @@ fn emit_module(py_name: &str, module_fn: &str, classes: &[String]) -> String {
 fn ref_name_of(node: &SchemaNode, slot: &str) -> Result<String> {
     match &node.reference {
         Some(r) => ref_name(r),
-        None => Err(CodegenError::new(format!("{slot} must be a $ref to a $def"))),
+        None => Err(CodegenError::new(format!(
+            "{slot} must be a $ref to a $def"
+        ))),
     }
 }
 

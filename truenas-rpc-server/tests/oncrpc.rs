@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc::{JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RpcMethod};
 use truenas_rpc_server::{OncRpc, TruenasRpcServer, UnixConfig};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
@@ -48,7 +48,15 @@ fn rm_frame(payload: &[u8]) -> Vec<u8> {
 fn call(xid: u32, procedure: u32, args: &[u8]) -> Vec<u8> {
     // xid, mtype=CALL(0), rpcvers=2, prog, vers, proc, cred(AUTH_NONE, empty), verf(AUTH_NONE, empty)
     let prefix = (
-        xid, 0u32, 2u32, PROG, VERS, procedure, 0u32, VarOpaque(Vec::new()), 0u32,
+        xid,
+        0u32,
+        2u32,
+        PROG,
+        VERS,
+        procedure,
+        0u32,
+        VarOpaque(Vec::new()),
+        0u32,
         VarOpaque(Vec::new()),
     );
     let mut msg = to_bytes(&prefix).unwrap();
@@ -73,10 +81,14 @@ async fn read_reply(stream: &mut UnixStream) -> (u32, Vec<u8>) {
 async fn registered_method_served_over_oncrpc() {
     let path = std::env::temp_dir().join(format!("tnrpc-{}-oncrpc.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let srv = TruenasRpcServer::<()>::builder("dual-wire").protocol("demo", proto()).build();
+    let srv = TruenasRpcServer::<()>::builder("dual-wire")
+        .protocol("demo", proto())
+        .build();
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
-    let task =
-        tokio::spawn(async move { srv.serve_unix_listener(listener, OncRpc::protocol("demo")).await });
+    let task = tokio::spawn(async move {
+        srv.serve_unix_listener(listener, OncRpc::protocol("demo"))
+            .await
+    });
 
     let mut client = UnixStream::connect(&path).await.unwrap();
 

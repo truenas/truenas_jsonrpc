@@ -59,7 +59,11 @@ impl BrokerContext {
         Self {
             protocol: None,
             transport: transport.to_string(),
-            peercred: channel.ucred.map(|c| PeerCred { pid: c.pid, uid: c.uid, gid: c.gid }),
+            peercred: channel.ucred.map(|c| PeerCred {
+                pid: c.pid,
+                uid: c.uid,
+                gid: c.gid,
+            }),
             encrypted: channel.encrypted,
             client_cert: channel.client_cert.clone(),
             channel_binding: channel.channel_binding.clone(),
@@ -110,8 +114,18 @@ impl BrokerVerdict {
     /// it in the credential). The mechanism is `None` on a non-authenticated verdict.
     pub(crate) fn into_handoff(self) -> (Outcome, Option<String>) {
         match self {
-            BrokerVerdict::Authenticated { identity, mechanism, principal, user_info } => (
-                Outcome::Authenticated { identity, principal, user_info, extra: None },
+            BrokerVerdict::Authenticated {
+                identity,
+                mechanism,
+                principal,
+                user_info,
+            } => (
+                Outcome::Authenticated {
+                    identity,
+                    principal,
+                    user_info,
+                    extra: None,
+                },
                 Some(mechanism),
             ),
             BrokerVerdict::Denied => (Outcome::Reject(RejectKind::Denied), None),

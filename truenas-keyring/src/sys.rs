@@ -31,14 +31,29 @@ fn last_err() -> io::Error {
 
 /// `add_key(2)` — create (or, by description, update) a key of `key_type` in `ring`. `payload` is
 /// empty for a `keyring`-type key.
-pub(crate) fn add_key(key_type: &[u8], desc: &CStr, payload: &[u8], ring: Serial) -> io::Result<Serial> {
-    let (ptr, len) =
-        if payload.is_empty() { (std::ptr::null(), 0) } else { (payload.as_ptr().cast::<c_void>(), payload.len()) };
+pub(crate) fn add_key(
+    key_type: &[u8],
+    desc: &CStr,
+    payload: &[u8],
+    ring: Serial,
+) -> io::Result<Serial> {
+    let (ptr, len) = if payload.is_empty() {
+        (std::ptr::null(), 0)
+    } else {
+        (payload.as_ptr().cast::<c_void>(), payload.len())
+    };
     // SAFETY: add_key(2) reads the NUL-terminated `key_type`/`desc` and `len` bytes at `ptr` (valid
     // for `len`, or null with `len == 0`); it writes nothing through them. Returns a serial or -1.
     #[allow(unsafe_code)]
     let rc = unsafe {
-        libc::syscall(libc::SYS_add_key, key_type.as_ptr().cast::<c_char>(), desc.as_ptr(), ptr, len, ring as c_long)
+        libc::syscall(
+            libc::SYS_add_key,
+            key_type.as_ptr().cast::<c_char>(),
+            desc.as_ptr(),
+            ptr,
+            len,
+            ring as c_long,
+        )
     };
     if rc < 0 {
         Err(last_err())
@@ -52,7 +67,13 @@ pub(crate) fn request_key(key_type: &[u8], desc: &CStr) -> io::Result<Serial> {
     // SAFETY: request_key(2) reads the NUL-terminated `key_type`/`desc`; callout/dest are null/0.
     #[allow(unsafe_code)]
     let rc = unsafe {
-        libc::syscall(libc::SYS_request_key, key_type.as_ptr().cast::<c_char>(), desc.as_ptr(), std::ptr::null::<c_char>(), 0 as c_long)
+        libc::syscall(
+            libc::SYS_request_key,
+            key_type.as_ptr().cast::<c_char>(),
+            desc.as_ptr(),
+            std::ptr::null::<c_char>(),
+            0 as c_long,
+        )
     };
     if rc < 0 {
         Err(last_err())
@@ -67,7 +88,14 @@ pub(crate) fn get_persistent(uid: c_int, dest: Serial) -> io::Result<Serial> {
     // SAFETY: scalar arguments only.
     #[allow(unsafe_code)]
     let rc = unsafe {
-        libc::syscall(libc::SYS_keyctl, KEYCTL_GET_PERSISTENT, c_long::from(uid), dest as c_long, 0 as c_long, 0 as c_long)
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_GET_PERSISTENT,
+            c_long::from(uid),
+            dest as c_long,
+            0 as c_long,
+            0 as c_long,
+        )
     };
     if rc < 0 {
         Err(last_err())
@@ -81,7 +109,14 @@ pub(crate) fn search(ring: Serial, key_type: &[u8], desc: &CStr) -> io::Result<O
     // SAFETY: keyctl(SEARCH) reads the NUL-terminated `key_type`/`desc`; dest = 0 (no link).
     #[allow(unsafe_code)]
     let rc = unsafe {
-        libc::syscall(libc::SYS_keyctl, KEYCTL_SEARCH, ring as c_long, key_type.as_ptr().cast::<c_char>(), desc.as_ptr(), 0 as c_long)
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_SEARCH,
+            ring as c_long,
+            key_type.as_ptr().cast::<c_char>(),
+            desc.as_ptr(),
+            0 as c_long,
+        )
     };
     if rc >= 0 {
         return Ok(Some(rc as Serial));
@@ -101,7 +136,14 @@ pub(crate) fn probe_read(key: Serial) -> io::Result<usize> {
     // nothing.
     #[allow(unsafe_code)]
     let rc = unsafe {
-        libc::syscall(libc::SYS_keyctl, KEYCTL_READ, key as c_long, std::ptr::null_mut::<c_void>(), 0 as c_long, 0 as c_long)
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_READ,
+            key as c_long,
+            std::ptr::null_mut::<c_void>(),
+            0 as c_long,
+            0 as c_long,
+        )
     };
     if rc < 0 {
         Err(last_err())
@@ -115,7 +157,14 @@ fn read_into(key: Serial, buf: &mut [u8]) -> io::Result<usize> {
     // returns the full payload length.
     #[allow(unsafe_code)]
     let rc = unsafe {
-        libc::syscall(libc::SYS_keyctl, KEYCTL_READ, key as c_long, buf.as_mut_ptr().cast::<c_void>(), buf.len() as c_long, 0 as c_long)
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_READ,
+            key as c_long,
+            buf.as_mut_ptr().cast::<c_void>(),
+            buf.len() as c_long,
+            0 as c_long,
+        )
     };
     if rc < 0 {
         Err(last_err())
@@ -138,7 +187,14 @@ pub(crate) fn describe(key: Serial) -> io::Result<String> {
     // SAFETY: keyctl(DESCRIBE) with a null buffer and length 0 returns the buffer size (incl NUL).
     #[allow(unsafe_code)]
     let len = unsafe {
-        libc::syscall(libc::SYS_keyctl, KEYCTL_DESCRIBE, key as c_long, std::ptr::null_mut::<c_void>(), 0 as c_long, 0 as c_long)
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_DESCRIBE,
+            key as c_long,
+            std::ptr::null_mut::<c_void>(),
+            0 as c_long,
+            0 as c_long,
+        )
     };
     if len < 0 {
         return Err(last_err());
@@ -147,7 +203,14 @@ pub(crate) fn describe(key: Serial) -> io::Result<String> {
     // SAFETY: keyctl(DESCRIBE) writes up to `buf.len()` bytes (a NUL-terminated string) into `buf`.
     #[allow(unsafe_code)]
     let n = unsafe {
-        libc::syscall(libc::SYS_keyctl, KEYCTL_DESCRIBE, key as c_long, buf.as_mut_ptr().cast::<c_void>(), buf.len() as c_long, 0 as c_long)
+        libc::syscall(
+            libc::SYS_keyctl,
+            KEYCTL_DESCRIBE,
+            key as c_long,
+            buf.as_mut_ptr().cast::<c_void>(),
+            buf.len() as c_long,
+            0 as c_long,
+        )
     };
     if n < 0 {
         return Err(last_err());
@@ -173,7 +236,11 @@ pub(crate) fn read_serials(keyring: Serial) -> io::Result<Vec<Serial>> {
 
 /// `keyctl(KEYCTL_SET_TIMEOUT, key, seconds)`.
 pub(crate) fn set_timeout(key: Serial, seconds: u32) -> io::Result<()> {
-    scalar(KEYCTL_SET_TIMEOUT, key as c_long, c_long::from(seconds as c_int))
+    scalar(
+        KEYCTL_SET_TIMEOUT,
+        key as c_long,
+        c_long::from(seconds as c_int),
+    )
 }
 
 /// `keyctl(KEYCTL_UNLINK, key, ring)`.

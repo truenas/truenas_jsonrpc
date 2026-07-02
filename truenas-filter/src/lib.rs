@@ -173,7 +173,9 @@ mod tests {
 
     #[test]
     fn error_display() {
-        assert!(FilterError::Compile("op".into()).to_string().contains("invalid query"));
+        assert!(FilterError::Compile("op".into())
+            .to_string()
+            .contains("invalid query"));
         assert!(FilterError::Eval("cmp".into()).to_string().contains("cmp"));
     }
 
@@ -185,8 +187,9 @@ mod tests {
         let co = compile_options(&serde_json::from_value(json!({"count": true})).unwrap()).unwrap();
         assert_eq!(tnfilter(data(), &cf, &co).unwrap(), Filtered::Count(2));
         // count + get → shortcircuit breaks the count at the first match
-        let co = compile_options(&serde_json::from_value(json!({"count": true, "get": true})).unwrap())
-            .unwrap();
+        let co =
+            compile_options(&serde_json::from_value(json!({"count": true, "get": true})).unwrap())
+                .unwrap();
         assert_eq!(tnfilter(data(), &cf, &co).unwrap(), Filtered::Count(1));
     }
 
@@ -211,6 +214,9 @@ mod tests {
         }
         let cf = compile_filters(&[json!(["x", "=", 1])]).unwrap();
         let co = compile_options(&QueryOptions::default()).unwrap();
-        assert!(matches!(tnfilter(vec![Unser], &cf, &co), Err(FilterError::Eval(_))));
+        assert!(matches!(
+            tnfilter(vec![Unser], &cf, &co),
+            Err(FilterError::Eval(_))
+        ));
     }
 }

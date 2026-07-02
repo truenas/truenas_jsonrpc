@@ -65,7 +65,12 @@ impl<S: BearerTokenSource> Mechanism for GssapiBearerToken<S> {
         &[Capability::Encrypted]
     }
 
-    fn step(&self, payload: &Value, _channel: &Channel, _progress: Option<AuthProgress>) -> Outcome {
+    fn step(
+        &self,
+        payload: &Value,
+        _channel: &Channel,
+        _progress: Option<AuthProgress>,
+    ) -> Outcome {
         let Some(token) = payload.get("token").and_then(Value::as_str) else {
             return Outcome::Reject(RejectKind::AuthErr);
         };

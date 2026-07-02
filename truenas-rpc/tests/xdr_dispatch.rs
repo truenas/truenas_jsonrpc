@@ -9,9 +9,8 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome,
-    AsyncRpcMethod, Dispatched, JsonRpcError, RpcMethod, JsonRpcProtocol, RequestInfo,
-    MethodDef, NullOutbound, RequestCtx, Roles, Session, SessionLifecycle,
+    AsyncRpcMethod, AuditOutcome, Dispatched, JsonRpcError, JsonRpcProtocol, MethodDef,
+    NullOutbound, RequestCtx, RequestInfo, Roles, RpcMethod, Session, SessionLifecycle,
 };
 use truenas_xdr::frame::{self, build_request};
 use truenas_xdr::to_bytes;
@@ -21,7 +20,10 @@ const TEST_ID: [u8; 16] = [
 ];
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -45,7 +47,10 @@ fn add_proto() -> JsonRpcProtocol<()> {
         .method(RpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001),
             |a: AddArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
@@ -59,9 +64,8 @@ async fn dispatch(proto: &JsonRpcProtocol<()>, wire: &[u8]) -> Dispatched {
 
 #[tokio::test]
 async fn add_dispatch_matches_golden() {
-    let request = unhex(
-        "5458445200000001000003e900000001123e4567e89b12d3a4564266141740000000000200000003",
-    );
+    let request =
+        unhex("5458445200000001000003e900000001123e4567e89b12d3a4564266141740000000000200000003");
     let golden_reply = unhex(
         "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000005000000026f6b0000",
     );
@@ -78,8 +82,15 @@ async fn run_proc_routes_to_registered_methods() {
     let args = to_bytes(&AddArgs { a: 2, b: 40 }).unwrap();
     for proto in [add_proto(), add_proto_async()] {
         let session = proto.new_session(Some(()), Arc::new(NullOutbound));
-        let bytes = proto.service().run_proc(1001, None, &args, &session).await.unwrap();
-        assert_eq!(truenas_xdr::from_bytes::<AddResult>(&bytes).unwrap().sum, 42);
+        let bytes = proto
+            .service()
+            .run_proc(1001, None, &args, &session)
+            .await
+            .unwrap();
+        assert_eq!(
+            truenas_xdr::from_bytes::<AddResult>(&bytes).unwrap().sum,
+            42
+        );
     }
 }
 
@@ -90,7 +101,11 @@ async fn run_proc_surfaces_errors() {
     let session = proto.new_session(Some(()), Arc::new(NullOutbound));
 
     // Unknown proc-id → METHOD_NOT_FOUND, for the caller to map onto its own status.
-    let nf = proto.service().run_proc(9999, None, &args, &session).await.unwrap_err();
+    let nf = proto
+        .service()
+        .run_proc(9999, None, &args, &session)
+        .await
+        .unwrap_err();
     assert_eq!(nf.code, -32601);
 
     // A panicking sync handler over `run_proc` surfaces INTERNAL_ERROR (the spawn_blocking
@@ -98,12 +113,18 @@ async fn run_proc_surfaces_errors() {
     let boom = JsonRpcProtocol::<()>::builder("c", "1")
         .method(RpcMethod::new(
             MethodDef::new("xdr.boom").xdr(2001),
-            |_a: AddArgs, _cx: &RequestCtx<()>| -> Result<AddResult, JsonRpcError> { panic!("boom") },
+            |_a: AddArgs, _cx: &RequestCtx<()>| -> Result<AddResult, JsonRpcError> {
+                panic!("boom")
+            },
         ))
         .unwrap()
         .build();
     let bsession = boom.new_session(Some(()), Arc::new(NullOutbound));
-    let panicked = boom.service().run_proc(2001, None, &args, &bsession).await.unwrap_err();
+    let panicked = boom
+        .service()
+        .run_proc(2001, None, &args, &bsession)
+        .await
+        .unwrap_err();
     assert_eq!(panicked.code, -32603);
 }
 
@@ -120,7 +141,10 @@ async fn unknown_proc_matches_golden() {
 #[tokio::test]
 async fn truncated_frame_replies_with_idless_error() {
     // Magic only — the envelope can't be read → an id-less error frame.
-    let reply = dispatch(&add_proto(), &[0x54, 0x58, 0x44, 0x52]).await.into_bytes().unwrap();
+    let reply = dispatch(&add_proto(), &[0x54, 0x58, 0x44, 0x52])
+        .await
+        .into_bytes()
+        .unwrap();
     let parsed = frame::parse_reply(&reply).unwrap();
     assert_eq!(parsed.status, frame::STATUS_ERR);
     assert_eq!(parsed.rid, None);
@@ -129,7 +153,10 @@ async fn truncated_frame_replies_with_idless_error() {
 #[tokio::test]
 async fn notification_without_id_is_suppressed() {
     let request = build_request(1001, None, &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
-    assert!(matches!(dispatch(&add_proto(), &request).await, Dispatched::Nothing));
+    assert!(matches!(
+        dispatch(&add_proto(), &request).await,
+        Dispatched::Nothing
+    ));
 }
 
 #[tokio::test]
@@ -137,7 +164,12 @@ async fn closed_session_is_rejected() {
     let proto = add_proto();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
     proto.close_session(&s);
-    let request = build_request(1001, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
+    let request = build_request(
+        1001,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap(),
+    )
+    .unwrap();
     let reply = proto.dispatch(&request, &s).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32002); // SESSION_NOT_ESTABLISHED
@@ -149,15 +181,29 @@ async fn session_gate_blocks_before_established() {
         .method(RpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001),
             |a: AddArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
         .session_setup(MethodDef::new("$setup"), |_a: AddArgs, _s: &Session<()>| {
-            Ok::<_, JsonRpcError>((SessionLifecycle::Established, AddResult { sum: 0, label: String::new() }))
+            Ok::<_, JsonRpcError>((
+                SessionLifecycle::Established,
+                AddResult {
+                    sum: 0,
+                    label: String::new(),
+                },
+            ))
         })
         .build();
-    let request = build_request(1001, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
+    let request = build_request(
+        1001,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32002);
@@ -170,12 +216,20 @@ async fn authorizer_denial_is_rejected() {
         .method(RpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001).roles(["AUTH"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
         .build();
-    let request = build_request(1001, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
+    let request = build_request(
+        1001,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32000); // NOT_AUTHORIZED (required role not granted)
@@ -187,14 +241,22 @@ async fn handler_error_carries_data_in_the_detail() {
         .method(RpcMethod::new(
             MethodDef::new("xdr.fail").xdr(2004),
             |_a: AddArgs, _cx: &RequestCtx<()>| {
-                Err::<AddResult, _>(JsonRpcError::request_failed("nope").with_data(json!({"why": 1})))
+                Err::<AddResult, _>(
+                    JsonRpcError::request_failed("nope").with_data(json!({"why": 1})),
+                )
             },
         ))
         .unwrap()
         .build();
-    let request = build_request(2004, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let request = build_request(
+        2004,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
-    let (code, detail) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
+    let (code, detail) =
+        frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32803); // REQUEST_FAILED
     let obj: serde_json::Value = serde_json::from_slice(&detail).unwrap();
     assert_eq!(obj["data"]["why"], 1); // the error object carries `data`
@@ -215,12 +277,19 @@ async fn unencodable_result_is_internal_error() {
         .method(RpcMethod::new(
             MethodDef::new("xdr.map").xdr(2003),
             |_a: AddArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(MapResult { m: BTreeMap::from([("k".to_string(), 1)]) })
+                Ok::<_, JsonRpcError>(MapResult {
+                    m: BTreeMap::from([("k".to_string(), 1)]),
+                })
             },
         ))
         .unwrap()
         .build();
-    let request = build_request(2003, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let request = build_request(
+        2003,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32603); // INTERNAL_ERROR (XDR can't encode a map)
@@ -239,7 +308,12 @@ async fn handler_panic_is_internal_error() {
         ))
         .unwrap()
         .build();
-    let request = build_request(2005, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let request = build_request(
+        2005,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32603); // INTERNAL_ERROR (handler panicked)
@@ -254,21 +328,41 @@ async fn audited_xdr_call_emits_redacted_audit_record() {
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .method(RpcMethod::new(
-            MethodDef::new("xdr.secret").xdr(2010).audit_message("did the secret thing").secret_fields(["a"]),
+            MethodDef::new("xdr.secret")
+                .xdr(2010)
+                .audit_message("did the secret thing")
+                .secret_fields(["a"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
-            *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  msg: Option<&str>| {
+                *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
+            },
+        )
         .build();
-    let request = build_request(2010, Some(TEST_ID), &to_bytes(&AddArgs { a: 2, b: 40 }).unwrap()).unwrap();
+    let request = build_request(
+        2010,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 2, b: 40 }).unwrap(),
+    )
+    .unwrap();
     // The wire reply is the ordinary XDR success frame (audit is off the wire path).
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     assert_eq!(frame::parse_reply(&reply).unwrap().status, frame::STATUS_OK);
-    let rec = captured.lock().unwrap().take().expect("the audit sink fired");
+    let rec = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the audit sink fired");
     assert_eq!(rec["params"]["a"], "********"); // secret field redacted in the reflected params
     assert_eq!(rec["params"]["b"], 40); //          the rest reflected from the typed XDR struct
     assert_eq!(rec["msg"], "did the secret thing");
@@ -284,21 +378,41 @@ async fn audited_xdr_denial_is_audited() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .roles(Roles::new(["AUTH"]))
         .method(RpcMethod::new(
-            MethodDef::new("xdr.guarded").xdr(2011).audit().roles(["AUTH"]),
+            MethodDef::new("xdr.guarded")
+                .xdr(2011)
+                .audit()
+                .roles(["AUTH"]),
             |a: AddArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &RequestInfo, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
+            },
+        )
         .build();
-    let request = build_request(2011, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
+    let request = build_request(
+        2011,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire (required role not granted)
-    let (params, err_code) = captured.lock().unwrap().take().expect("the denial was audited");
+    let (params, err_code) = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the denial was audited");
     assert_eq!(params["a"], 1); // params reflected even on denial (decode precedes authz)
     assert_eq!(err_code, Some(-32000));
 }
@@ -312,7 +426,12 @@ async fn python_method_is_not_on_the_xdr_wire() {
         .python_method(MethodDef::new("xdr.py").xdr(2002))
         .unwrap()
         .build();
-    let request = build_request(2002, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let request = build_request(
+        2002,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32601); // METHOD_NOT_FOUND
@@ -331,7 +450,10 @@ fn add_proto_async() -> JsonRpcProtocol<()> {
         .async_method(AsyncRpcMethod::new(
             MethodDef::new("xdr.add").xdr(1001),
             |a: AddArgs, _cx: RequestCtx<()>| async move {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
@@ -342,14 +464,19 @@ fn add_proto_async() -> JsonRpcProtocol<()> {
 async fn async_add_dispatch_matches_sync_golden() {
     // The same request + golden as `add_dispatch_matches_golden`: an inline-dispatched async
     // method produces the byte-identical XDR reply — only the server-side scheduling differs.
-    let request = unhex(
-        "5458445200000001000003e900000001123e4567e89b12d3a4564266141740000000000200000003",
-    );
+    let request =
+        unhex("5458445200000001000003e900000001123e4567e89b12d3a4564266141740000000000200000003");
     let golden_reply = unhex(
         "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000005000000026f6b0000",
     );
-    let reply = dispatch(&add_proto_async(), &request).await.into_bytes().unwrap();
-    assert_eq!(reply, golden_reply, "async xdr.add reply matches the sync golden");
+    let reply = dispatch(&add_proto_async(), &request)
+        .await
+        .into_bytes()
+        .unwrap();
+    assert_eq!(
+        reply, golden_reply,
+        "async xdr.add reply matches the sync golden"
+    );
 }
 
 #[tokio::test]
@@ -357,7 +484,10 @@ async fn async_malformed_params_are_invalid_params() {
     // proc 1001 expects two i32 (8 bytes); supply only 4 → the async XDR decode underruns,
     // returning before authz/audit.
     let request = build_request(1001, Some(TEST_ID), &[0, 0, 0, 2]).unwrap();
-    let reply = dispatch(&add_proto_async(), &request).await.into_bytes().unwrap();
+    let reply = dispatch(&add_proto_async(), &request)
+        .await
+        .into_bytes()
+        .unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32602); // INVALID_PARAMS
 }
@@ -373,7 +503,12 @@ async fn async_handler_error_is_request_failed() {
         ))
         .unwrap()
         .build();
-    let request = build_request(2012, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let request = build_request(
+        2012,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32803); // REQUEST_FAILED
@@ -385,12 +520,19 @@ async fn async_unencodable_result_is_internal_error() {
         .async_method(AsyncRpcMethod::new(
             MethodDef::new("xdr.amap").xdr(2013),
             |_a: AddArgs, _cx: RequestCtx<()>| async move {
-                Ok::<_, JsonRpcError>(MapResult { m: BTreeMap::from([("k".to_string(), 1)]) })
+                Ok::<_, JsonRpcError>(MapResult {
+                    m: BTreeMap::from([("k".to_string(), 1)]),
+                })
             },
         ))
         .unwrap()
         .build();
-    let request = build_request(2013, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let request = build_request(
+        2013,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32603); // INTERNAL_ERROR (XDR can't encode a map)
@@ -405,20 +547,40 @@ async fn async_audited_xdr_call_emits_redacted_audit_record() {
     let cap = captured.clone();
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .async_method(AsyncRpcMethod::new(
-            MethodDef::new("xdr.secret").xdr(2010).audit_message("did the secret thing").secret_fields(["a"]),
+            MethodDef::new("xdr.secret")
+                .xdr(2010)
+                .audit_message("did the secret thing")
+                .secret_fields(["a"]),
             |a: AddArgs, _cx: RequestCtx<()>| async move {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
-            *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  msg: Option<&str>| {
+                *cap.lock().unwrap() = Some(json!({ "params": req.params, "msg": msg }));
+            },
+        )
         .build();
-    let request = build_request(2010, Some(TEST_ID), &to_bytes(&AddArgs { a: 2, b: 40 }).unwrap()).unwrap();
+    let request = build_request(
+        2010,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 2, b: 40 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     assert_eq!(frame::parse_reply(&reply).unwrap().status, frame::STATUS_OK);
-    let rec = captured.lock().unwrap().take().expect("the audit sink fired");
+    let rec = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the audit sink fired");
     assert_eq!(rec["params"]["a"], "********"); // secret field redacted
     assert_eq!(rec["params"]["b"], 40);
     assert_eq!(rec["msg"], "did the secret thing");
@@ -434,21 +596,41 @@ async fn async_audited_denial_is_audited() {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         .roles(Roles::new(["AUTH"]))
         .async_method(AsyncRpcMethod::new(
-            MethodDef::new("xdr.guarded").xdr(2011).audit().roles(["AUTH"]),
+            MethodDef::new("xdr.guarded")
+                .xdr(2011)
+                .audit()
+                .roles(["AUTH"]),
             |a: AddArgs, _cx: RequestCtx<()>| async move {
-                Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: i64::from(a.a + a.b),
+                    label: "ok".into(),
+                })
             },
         ))
         .unwrap()
-        .audit_sink(move |req: &RequestInfo, outcome: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  _m: Option<&str>| {
+                *cap.lock().unwrap() = Some((req.params.clone(), outcome.error().map(|e| e.code)));
+            },
+        )
         .build();
-    let request = build_request(2011, Some(TEST_ID), &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap()).unwrap();
+    let request = build_request(
+        2011,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 1, b: 2 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
     let (code, _) = frame::parse_error_payload(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(code, -32000); // NOT_AUTHORIZED on the wire (required role not granted)
-    let (params, err_code) = captured.lock().unwrap().take().expect("the denial was audited");
+    let (params, err_code) = captured
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the denial was audited");
     assert_eq!(params["a"], 1); // params reflected even on denial (decode precedes authz)
     assert_eq!(err_code, Some(-32000));
 }
@@ -461,21 +643,33 @@ async fn xdr_handler_reads_lazy_request_id() {
         .method(RpcMethod::new(
             MethodDef::new("xdr.whoami").xdr(2030),
             |_a: AddArgs, cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(AddResult { sum: 0, label: cx.id().unwrap_or("none").into() })
+                Ok::<_, JsonRpcError>(AddResult {
+                    sum: 0,
+                    label: cx.id().unwrap_or("none").into(),
+                })
             },
         ))
         .unwrap()
         .build();
-    let request = build_request(2030, Some(TEST_ID), &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap()).unwrap();
+    let request = build_request(
+        2030,
+        Some(TEST_ID),
+        &to_bytes(&AddArgs { a: 0, b: 0 }).unwrap(),
+    )
+    .unwrap();
     let reply = dispatch(&proto, &request).await.into_bytes().unwrap();
-    let result: AddResult = truenas_xdr::from_bytes(frame::parse_reply(&reply).unwrap().body).unwrap();
+    let result: AddResult =
+        truenas_xdr::from_bytes(frame::parse_reply(&reply).unwrap().body).unwrap();
     assert_eq!(result.label, "123e4567-e89b-12d3-a456-426614174000"); // TEST_ID, formatted lazily
 }
 
 #[test]
 fn registration_rejects_reserved_and_duplicate_proc_ids() {
     let h = |a: AddArgs, _cx: &RequestCtx<()>| {
-        Ok::<_, JsonRpcError>(AddResult { sum: i64::from(a.a + a.b), label: "ok".into() })
+        Ok::<_, JsonRpcError>(AddResult {
+            sum: i64::from(a.a + a.b),
+            label: "ok".into(),
+        })
     };
     // Reserved band (<= 1000).
     assert!(JsonRpcProtocol::<()>::builder("c", "1")

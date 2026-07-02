@@ -29,16 +29,18 @@ mod ws;
 
 pub use auth::{AuthOutcome, Mechanism};
 pub use config::{ClientConfig, Endpoint};
-#[cfg(feature = "tls")]
-pub use tls::{ClientTls, ClientTlsBuilder};
 pub use engine::{
     Authenticates, CallEngine, Cancels, Client, Framing, GracefulClose, Inbound, MethodKey,
     Negotiates, NotificationStream, ProtocolRuntime, QueryResult, SubId, TransferHandle, Transfers,
 };
+pub use error::ClientError;
+pub use jsonrpc::{
+    JsonRpcClient, JsonRpcMethod, JsonRpcRuntime, LengthPrefix, Negotiated, Progress,
+};
+#[cfg(feature = "tls")]
+pub use tls::{ClientTls, ClientTlsBuilder};
 /// Stream direction for a raw-fd transfer, re-exported from the core.
 pub use truenas_rpc::TransferDirection;
-pub use error::ClientError;
-pub use jsonrpc::{JsonRpcClient, JsonRpcMethod, JsonRpcRuntime, LengthPrefix, Negotiated, Progress};
 
 /// XDR (de)serialization for the binary sub-wire, re-exported so a generated client can encode a
 /// `MethodKey::Proc` call's params / decode its reply without a direct `truenas-xdr` dependency.

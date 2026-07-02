@@ -20,7 +20,13 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     let mut defaults = String::new();
 
     for (name, schema) in spec.defs.iter() {
-        structs.push_str(&emit_struct(name, schema, xdr.contains(name), &mut ctx, &mut defaults)?);
+        structs.push_str(&emit_struct(
+            name,
+            schema,
+            xdr.contains(name),
+            &mut ctx,
+            &mut defaults,
+        )?);
         structs.push('\n');
     }
 
@@ -50,7 +56,10 @@ fn xdr_reachable(spec: &Spec) -> HashSet<String> {
     let mut stack: Vec<String> = Vec::new();
     for (_, m) in spec.methods.iter() {
         if m.xdr {
-            for node in [Some(&m.params), m.result.as_ref(), m.entry.as_ref()].into_iter().flatten() {
+            for node in [Some(&m.params), m.result.as_ref(), m.entry.as_ref()]
+                .into_iter()
+                .flatten()
+            {
                 push_ref(node, &mut stack);
             }
         }
@@ -60,7 +69,12 @@ fn xdr_reachable(spec: &Spec) -> HashSet<String> {
         if set.insert(name.clone()) {
             // Names come from validated refs, so the def resolves; iterate its properties
             // (a missing name simply yields nothing).
-            for (_, p) in spec.defs.get(&name).into_iter().flat_map(|d| d.properties.iter()) {
+            for (_, p) in spec
+                .defs
+                .get(&name)
+                .into_iter()
+                .flat_map(|d| d.properties.iter())
+            {
                 collect_refs(p, &mut stack);
             }
         }
@@ -101,7 +115,9 @@ fn emit_struct(
     let mut fields = String::new();
     for (pname, pschema) in schema.properties.iter() {
         let ident = rust_ident(pname).ok_or_else(|| {
-            CodegenError::new(format!("$defs.{name} property {pname:?} is not a valid identifier"))
+            CodegenError::new(format!(
+                "$defs.{name} property {pname:?} is not a valid identifier"
+            ))
         })?;
         let hint = format!("{name}{}", pascal_case(pname));
         let base = rust_type(pschema, &hint, ctx)?;
@@ -125,7 +141,11 @@ fn emit_struct(
             fields.push_str(&format!("    pub {ident}: Option<{base}>,\n"));
         }
     }
-    let body = if fields.is_empty() { String::new() } else { format!("\n{fields}") };
+    let body = if fields.is_empty() {
+        String::new()
+    } else {
+        format!("\n{fields}")
+    };
     Ok(format!(
         "#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]\npub struct {name} {{{body}}}\n"
     ))
@@ -148,31 +168,43 @@ fn render_default(
     } else {
         match pschema.ty.as_deref() {
             Some("string") => {
-                let s = default.as_str().ok_or_else(|| CodegenError::new("string default must be a string"))?;
+                let s = default
+                    .as_str()
+                    .ok_or_else(|| CodegenError::new("string default must be a string"))?;
                 (s.is_empty(), format!("{}.to_string()", str_lit(s)))
             }
             Some("integer") => {
-                let n = default.as_i64().ok_or_else(|| CodegenError::new("integer default must be an integer"))?;
+                let n = default
+                    .as_i64()
+                    .ok_or_else(|| CodegenError::new("integer default must be an integer"))?;
                 (n == 0, format!("{n}i64"))
             }
             // Always emit a fn for floats (avoids a float-equality comparison here).
             Some("number") => {
-                let f = default.as_f64().ok_or_else(|| CodegenError::new("number default must be a number"))?;
+                let f = default
+                    .as_f64()
+                    .ok_or_else(|| CodegenError::new("number default must be a number"))?;
                 (false, format!("{f:?}f64"))
             }
             Some("boolean") => {
-                let b = default.as_bool().ok_or_else(|| CodegenError::new("boolean default must be a boolean"))?;
+                let b = default
+                    .as_bool()
+                    .ok_or_else(|| CodegenError::new("boolean default must be a boolean"))?;
                 (!b, format!("{b}"))
             }
             Some("array") => {
                 let empty = default.as_array().is_some_and(|a| a.is_empty());
                 if !empty {
-                    return Err(CodegenError::new("only an empty-array default ([]) is supported"));
+                    return Err(CodegenError::new(
+                        "only an empty-array default ([]) is supported",
+                    ));
                 }
                 (true, "Vec::new()".to_string())
             }
             other => {
-                return Err(CodegenError::new(format!("unsupported default for type {other:?}")))
+                return Err(CodegenError::new(format!(
+                    "unsupported default for type {other:?}"
+                )))
             }
         }
     };

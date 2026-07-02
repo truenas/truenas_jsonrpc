@@ -209,7 +209,9 @@ impl<S> RequestCtx<S> {
         op_id: u32,
         args: Box<dyn Any + Send>,
     ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
-        self.caller()?.call_op(op_id, args, self.clone(), false).await
+        self.caller()?
+            .call_op(op_id, args, self.clone(), false)
+            .await
     }
 
     /// Like [`call_op`](Self::call_op) but **elevated** — full privileges, skipping the role gate,
@@ -221,7 +223,9 @@ impl<S> RequestCtx<S> {
         op_id: u32,
         args: Box<dyn Any + Send>,
     ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
-        self.caller()?.call_op(op_id, args, self.clone(), true).await
+        self.caller()?
+            .call_op(op_id, args, self.clone(), true)
+            .await
     }
 
     /// [`call_op`](Self::call_op) by method **name** (the JSON op-table key).
@@ -230,7 +234,9 @@ impl<S> RequestCtx<S> {
         name: &str,
         args: Box<dyn Any + Send>,
     ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
-        self.caller()?.call_named(name.to_owned(), args, self.clone(), false).await
+        self.caller()?
+            .call_named(name.to_owned(), args, self.clone(), false)
+            .await
     }
 
     /// [`call_op_elevated`](Self::call_op_elevated) by method **name**.
@@ -239,7 +245,9 @@ impl<S> RequestCtx<S> {
         name: &str,
         args: Box<dyn Any + Send>,
     ) -> Result<Box<dyn Any + Send>, JsonRpcError> {
-        self.caller()?.call_named(name.to_owned(), args, self.clone(), true).await
+        self.caller()?
+            .call_named(name.to_owned(), args, self.clone(), true)
+            .await
     }
 
     fn caller(&self) -> Result<&Arc<dyn InternalCaller<S>>, JsonRpcError> {
@@ -260,7 +268,12 @@ impl<S> RequestCtx<S> {
         let env = ProgressEnvelope {
             jsonrpc: JSONRPC_VERSION,
             method: "$/progress",
-            params: ProgressParams { id, percent, description, extra },
+            params: ProgressParams {
+                id,
+                percent,
+                description,
+                extra,
+            },
         };
         if let Ok(bytes) = serde_json::to_vec(&env) {
             self.session.outbound().send(bytes);
@@ -274,8 +287,12 @@ mod tests {
     use crate::session::{NullOutbound, Session, SessionId};
 
     fn ctx(id: Option<String>) -> RequestCtx<()> {
-        let session =
-            Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)));
+        let session = Arc::new(Session::new(
+            SessionId::nil(),
+            "t".into(),
+            Some(()),
+            Arc::new(NullOutbound),
+        ));
         RequestCtx::new(id, session, Arc::new(AtomicBool::new(false)), false, None)
     }
 
@@ -291,10 +308,17 @@ mod tests {
 
     #[test]
     fn audit_detail_slot_is_allocated_only_when_audited() {
-        let mk =
-            || Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)));
+        let mk = || {
+            Arc::new(Session::new(
+                SessionId::nil(),
+                "t".into(),
+                Some(()),
+                Arc::new(NullOutbound),
+            ))
+        };
         // Audited: the slot exists; `set_audit` records it and the pipeline reads it back.
-        let audited = RequestCtx::<()>::new(None, mk(), Arc::new(AtomicBool::new(false)), true, None);
+        let audited =
+            RequestCtx::<()>::new(None, mk(), Arc::new(AtomicBool::new(false)), true, None);
         assert!(audited.audit_handle().is_some());
         audited.set_audit("did the thing");
         let got = audited.audit_handle().unwrap().lock().unwrap().clone();

@@ -65,7 +65,7 @@ mod tests {
         assert_eq!(&*s, "pw"); // Deref
         assert_eq!(s.clone().into_inner(), "pw"); // Clone + into_inner
         assert_eq!(format!("{s:?}"), "Secret(********)"); // Debug is redacted
-        // Wire-transparent through serde_json (the JSON wire): no wrapper object.
+                                                          // Wire-transparent through serde_json (the JSON wire): no wrapper object.
         assert_eq!(serde_json::to_string(&s).unwrap(), "\"pw\"");
         let d: Secret<String> = serde_json::from_str("\"pw\"").unwrap();
         assert_eq!(s, d); // PartialEq / Eq

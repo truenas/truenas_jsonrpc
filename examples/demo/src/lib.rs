@@ -48,11 +48,16 @@ mod tests {
 
     impl Handlers<()> for DemoHandlers {
         fn greet(&self, req: GreetArgs, _cx: &RequestCtx<()>) -> Result<GreetResult, JsonRpcError> {
-            Ok(GreetResult { message: format!("hi {}", req.name) })
+            Ok(GreetResult {
+                message: format!("hi {}", req.name),
+            })
         }
         fn login(&self, req: LoginArgs, _cx: &RequestCtx<()>) -> Result<LoginResult, JsonRpcError> {
             // `password` is a `Secret<String>` (deref to read); `token` is `Secret<String>`.
-            Ok(LoginResult { token: format!("tok-{}", &*req.password).into(), ok: !req.user.is_empty() })
+            Ok(LoginResult {
+                token: format!("tok-{}", &*req.password).into(),
+                ok: !req.user.is_empty(),
+            })
         }
         async fn add(&self, req: AddArgs, _cx: RequestCtx<()>) -> Result<AddResult, JsonRpcError> {
             Ok(AddResult { sum: req.a + req.b })
@@ -67,9 +72,18 @@ mod tests {
             // Typed rows: `tnfilter` filters via a Value view but returns the typed `Item`s,
             // so the result can be encoded to either the JSON or the XDR wire.
             let items = vec![
-                Item { id: 1, name: "a".into() },
-                Item { id: 2, name: "b".into() },
-                Item { id: 3, name: "a".into() },
+                Item {
+                    id: 1,
+                    name: "a".into(),
+                },
+                Item {
+                    id: 2,
+                    name: "b".into(),
+                },
+                Item {
+                    id: 3,
+                    name: "a".into(),
+                },
             ];
             Ok(tnfilter(items, f, o)?)
         }
@@ -88,7 +102,8 @@ mod tests {
         ) -> Result<DownloadDone, JsonRpcError> {
             // Server produces the stream: write `n` pattern bytes onto the lent connection fd.
             let buf: Vec<u8> = (0..req.n as usize).map(|i| (i % 251) as u8).collect();
-            ft.write_all(&buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+            ft.write_all(&buf)
+                .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
             Ok(DownloadDone { sent: req.n })
         }
         fn upload_ready(
@@ -106,16 +121,22 @@ mod tests {
         ) -> Result<UploadDone, JsonRpcError> {
             // Client produces the stream: read `n` bytes off the lent connection fd.
             let mut buf = vec![0u8; req.n as usize];
-            let got =
-                ft.read_exact(&mut buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-            Ok(UploadDone { received: got as i64 })
+            let got = ft
+                .read_exact(&mut buf)
+                .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+            Ok(UploadDone {
+                received: got as i64,
+            })
         }
     }
 
     fn proto() -> JsonRpcProtocol<()> {
-        register(JsonRpcProtocol::<()>::builder("demo", "1.0.0"), Arc::new(DemoHandlers))
-            .expect("register")
-            .build()
+        register(
+            JsonRpcProtocol::<()>::builder("demo", "1.0.0"),
+            Arc::new(DemoHandlers),
+        )
+        .expect("register")
+        .build()
     }
 
     fn session(p: &JsonRpcProtocol<()>) -> Arc<Session<()>> {
@@ -153,7 +174,12 @@ mod tests {
 
     #[tokio::test]
     async fn filterable_method_applies_the_query() {
-        let v = json_call(&proto(), "items.query", json!({"query-filters": [["name", "=", "a"]]})).await;
+        let v = json_call(
+            &proto(),
+            "items.query",
+            json!({"query-filters": [["name", "=", "a"]]}),
+        )
+        .await;
         let rows = v["result"].as_array().unwrap();
         assert_eq!(rows.len(), 2); // id 1 and 3
         assert_eq!(rows[0]["id"], 1);
@@ -169,22 +195,41 @@ mod tests {
 
         let path = std::env::temp_dir().join(format!("demo-e2e-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let server = TruenasRpcServer::<()>::builder("demo").protocol("demo", proto()).build();
+        let server = TruenasRpcServer::<()>::builder("demo")
+            .protocol("demo", proto())
+            .build();
         let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
         let task = tokio::spawn(async move { server.serve_unix_listener(listener, JsonRpc).await });
 
-        let (jc, negotiated, _notifs) =
-            JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "demo", ClientConfig::default())
-                .await
-                .unwrap();
+        let (jc, negotiated, _notifs) = JsonRpcClient::connect_negotiate(
+            &Endpoint::unix(&path),
+            "demo",
+            ClientConfig::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(negotiated.protocol, "demo");
         let client = DemoClient::new(jc);
 
         // Plain typed call, then the dual-wire `add`, then a secret round-trip.
-        assert_eq!(client.greet(GreetArgs { name: "world".into() }).await.unwrap().message, "hi world");
+        assert_eq!(
+            client
+                .greet(GreetArgs {
+                    name: "world".into()
+                })
+                .await
+                .unwrap()
+                .message,
+            "hi world"
+        );
         assert_eq!(client.add(AddArgs { a: 20, b: 22 }).await.unwrap().sum, 42);
-        let login =
-            client.login(LoginArgs { user: "u".into(), password: "pw".to_string().into() }).await.unwrap();
+        let login = client
+            .login(LoginArgs {
+                user: "u".into(),
+                password: "pw".to_string().into(),
+            })
+            .await
+            .unwrap();
         assert!(login.ok);
 
         // The filterable query: no filter → all three rows.
@@ -210,14 +255,19 @@ mod tests {
 
         let path = std::env::temp_dir().join(format!("demo-xfer-{}.sock", std::process::id()));
         let _ = std::fs::remove_file(&path);
-        let server = TruenasRpcServer::<()>::builder("demo").protocol("demo", proto()).build();
+        let server = TruenasRpcServer::<()>::builder("demo")
+            .protocol("demo", proto())
+            .build();
         let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
         let task = tokio::spawn(async move { server.serve_unix_listener(listener, JsonRpc).await });
 
-        let (jc, _neg, _notifs) =
-            JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "demo", ClientConfig::default())
-                .await
-                .unwrap();
+        let (jc, _neg, _notifs) = JsonRpcClient::connect_negotiate(
+            &Endpoint::unix(&path),
+            "demo",
+            ClientConfig::default(),
+        )
+        .await
+        .unwrap();
         let client = DemoClient::new(jc);
 
         // Download: the server streams N pattern bytes; the callback reads and verifies them.
@@ -226,13 +276,19 @@ mod tests {
                 let mut buf = vec![0u8; N];
                 ht.read_exact(&mut buf)?;
                 if buf.iter().enumerate().any(|(i, &b)| b != (i % 251) as u8) {
-                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt download"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "corrupt download",
+                    ));
                 }
                 Ok(())
             })
             .await
             .unwrap();
-        assert_eq!(done.sent, N as i64, "the server's final reply follows the stream");
+        assert_eq!(
+            done.sent, N as i64,
+            "the server's final reply follows the stream"
+        );
 
         // Upload: the callback streams N pattern bytes; the server reports how many it read.
         let done = client
@@ -257,7 +313,10 @@ mod tests {
         assert_eq!(v["result"]["sum"], 5);
 
         // XDR binary wire — the same generated `add` method, addressed by its proc-id (1001).
-        let id = [0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17, 0x40, 0x00];
+        let id = [
+            0x12, 0x3e, 0x45, 0x67, 0xe8, 0x9b, 0x12, 0xd3, 0xa4, 0x56, 0x42, 0x66, 0x14, 0x17,
+            0x40, 0x00,
+        ];
         let params = truenas_xdr::to_bytes(&AddArgs { a: 2, b: 3 }).unwrap();
         let request = truenas_xdr::frame::build_request(1001, Some(id), &params).unwrap();
         let s = session(&p);

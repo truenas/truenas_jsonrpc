@@ -66,7 +66,10 @@ impl TlsConfig {
     /// must have set `SSL_OP_ENABLE_KTLS` on the context (a connection whose kTLS doesn't
     /// engage is refused).
     pub fn new(acceptor: SslAcceptor, mode: TlsMode) -> Self {
-        TlsConfig { acceptor: Arc::new(acceptor), mode }
+        TlsConfig {
+            acceptor: Arc::new(acceptor),
+            mode,
+        }
     }
 
     /// Build an acceptor for `mode` from a PEM certificate (chain) + private key, using
@@ -77,7 +80,10 @@ impl TlsConfig {
         key_pem: &[u8],
         mode: TlsMode,
     ) -> Result<Self, openssl::error::ErrorStack> {
-        Ok(TlsConfig { acceptor: Arc::new(build_acceptor(cert_pem, key_pem, mode, None)?), mode })
+        Ok(TlsConfig {
+            acceptor: Arc::new(build_acceptor(cert_pem, key_pem, mode, None)?),
+            mode,
+        })
     }
 
     /// Like [`from_pem`](Self::from_pem) but also requests + verifies a **client** certificate
@@ -92,7 +98,10 @@ impl TlsConfig {
         mode: TlsMode,
     ) -> Result<Self, openssl::error::ErrorStack> {
         let acceptor = build_acceptor(cert_pem, key_pem, mode, Some(client_ca_pem))?;
-        Ok(TlsConfig { acceptor: Arc::new(acceptor), mode })
+        Ok(TlsConfig {
+            acceptor: Arc::new(acceptor),
+            mode,
+        })
     }
 
     /// The configured acceptor — used by the WebSocket-over-TLS (`wss`) path, which always
@@ -142,7 +151,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
                             return;
                         }
                         let fd = kfd.as_raw_fd();
-                        let Ok(stream) = TcpStream::from_std(kfd) else { return };
+                        let Ok(stream) = TcpStream::from_std(kfd) else {
+                            return;
+                        };
                         // kTLS: the fd is plaintext to us / kernel-encrypted → transfer works.
                         let ctx = ConnContext {
                             stream: Box::new(stream),
@@ -153,7 +164,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
                         engine.serve(ctx).await;
                     }
                     TlsMode::Userspace => {
-                        let Some(stream) = userspace_accept(&acceptor, tcp).await else { return };
+                        let Some(stream) = userspace_accept(&acceptor, tcp).await else {
+                            return;
+                        };
                         let (cert, binding) = tls_facts(stream.ssl());
                         // Userspace TLS: ciphertext on the fd → no raw-fd transfer (None).
                         let ctx = ConnContext {
@@ -222,12 +235,16 @@ fn ktls_accept(
         // SAFETY: reading the error code for the just-used SSL object.
         #[allow(unsafe_code)]
         let err = unsafe { openssl_sys::SSL_get_error(ssl.as_ptr(), rc) };
-        return Err(io_other(format!("TLS handshake failed (SSL_accept={rc}, ssl_error={err})")));
+        return Err(io_other(format!(
+            "TLS handshake failed (SSL_accept={rc}, ssl_error={err})"
+        )));
     }
 
     let cipher = ssl.current_cipher().map(|c| c.name()).unwrap_or("");
     if !cipher.contains("GCM") && !cipher.contains("CHACHA20") {
-        return Err(io_other(format!("kTLS requires an AES-GCM/ChaCha20 cipher; got {cipher:?}")));
+        return Err(io_other(format!(
+            "kTLS requires an AES-GCM/ChaCha20 cipher; got {cipher:?}"
+        )));
     }
     confirm_ktls(fd)?;
     // The verified client cert (mTLS) + this connection's channel binding, read before SSL_free.
@@ -299,7 +316,7 @@ fn tls_server_end_point(cert: &X509Ref) -> Option<Vec<u8>> {
     let sig_nid = cert.signature_algorithm().object().nid();
     let digest_nid = sig_nid.signature_algorithms()?.digest;
     let md = match digest_nid {
-        Nid::UNDEF => return None,                       // no single hash → undefined
+        Nid::UNDEF => return None, // no single hash → undefined
         Nid::MD5 | Nid::SHA1 => MessageDigest::sha256(), // RFC 5929: weak hash → SHA-256
         nid => MessageDigest::from_nid(nid)?,
     };
@@ -313,7 +330,14 @@ pub(crate) fn tls_peer(
     channel_binding: Option<Vec<u8>>,
     posture: Option<TransportPosture>,
 ) -> Peer {
-    Peer { tls: Some(TlsPeer { peer_cert, channel_binding }), posture, ..Peer::tcp(addr) }
+    Peer {
+        tls: Some(TlsPeer {
+            peer_cert,
+            channel_binding,
+        }),
+        posture,
+        ..Peer::tcp(addr)
+    }
 }
 
 /// Refuse unless the kernel installed TLS crypto for both directions on `fd`.

@@ -86,7 +86,11 @@ enum AuthResponse {
 /// One parsed setup/continue step: the driver either finishes (established or refused) or must answer
 /// a challenge.
 enum Step {
-    Established { session_id: String, user_info: Option<Value>, extra: Option<Value> },
+    Established {
+        session_id: String,
+        user_info: Option<Value>,
+        extra: Option<Value>,
+    },
     Challenge(Value),
     Refused(AuthOutcome),
 }
@@ -95,11 +99,19 @@ fn interpret(result: &[u8]) -> Result<Step, ClientError> {
     let parsed: AuthResult = serde_json::from_slice(result)
         .map_err(|e| ClientError::Decode(format!("$/sessionSetup result: {e}")))?;
     Ok(match parsed.response {
-        AuthResponse::Success { session_id, user_info, extra } => {
-            Step::Established { session_id, user_info, extra }
-        }
+        AuthResponse::Success {
+            session_id,
+            user_info,
+            extra,
+        } => Step::Established {
+            session_id,
+            user_info,
+            extra,
+        },
         AuthResponse::Challenge { data } => Step::Challenge(data),
-        AuthResponse::OtpRequired { username } => Step::Refused(AuthOutcome::OtpRequired { username }),
+        AuthResponse::OtpRequired { username } => {
+            Step::Refused(AuthOutcome::OtpRequired { username })
+        }
         AuthResponse::Denied => Step::Refused(AuthOutcome::Denied),
         AuthResponse::AuthErr => Step::Refused(AuthOutcome::AuthErr),
         AuthResponse::Expired => Step::Refused(AuthOutcome::Expired),
@@ -109,13 +121,18 @@ fn interpret(result: &[u8]) -> Result<Step, ClientError> {
 /// Interpret a **single-shot** setup/continue result (no challenge is expected).
 fn single(result: &[u8]) -> Result<AuthOutcome, ClientError> {
     match interpret(result)? {
-        Step::Established { session_id, user_info, .. } => {
-            Ok(AuthOutcome::Established { session_id, user_info })
-        }
+        Step::Established {
+            session_id,
+            user_info,
+            ..
+        } => Ok(AuthOutcome::Established {
+            session_id,
+            user_info,
+        }),
         Step::Refused(outcome) => Ok(outcome),
-        Step::Challenge(_) => {
-            Err(ClientError::Auth("unexpected challenge for a single-shot mechanism".into()))
-        }
+        Step::Challenge(_) => Err(ClientError::Auth(
+            "unexpected challenge for a single-shot mechanism".into(),
+        )),
     }
 }
 
@@ -133,9 +150,16 @@ impl<P: Authenticates> Client<P> {
         let mut result = self.authenticate(Some(&*params)).await?;
         loop {
             match interpret(&result)? {
-                Step::Established { session_id, user_info, extra } => {
+                Step::Established {
+                    session_id,
+                    user_info,
+                    extra,
+                } => {
                     mechanism.verify(extra.as_ref())?;
-                    return Ok(AuthOutcome::Established { session_id, user_info });
+                    return Ok(AuthOutcome::Established {
+                        session_id,
+                        user_info,
+                    });
                 }
                 Step::Challenge(data) => {
                     let next = mechanism.respond(&data)?;
@@ -156,17 +180,22 @@ impl<P: Authenticates> Client<P> {
 
     /// **mTLS**: use the client certificate presented in the TLS handshake as the identity.
     pub async fn authenticate_mtls(&self) -> Result<AuthOutcome, ClientError> {
-        self.authenticate_with(Single(json!({ "mechanism": "CLIENT_CERTIFICATE" }))).await
+        self.authenticate_with(Single(json!({ "mechanism": "CLIENT_CERTIFICATE" })))
+            .await
     }
 
     /// **OAuth/OIDC**: present a validated ID token (a JWT); the server verifies it offline.
     pub async fn authenticate_oauth(&self, id_token: &str) -> Result<AuthOutcome, ClientError> {
-        self.authenticate_with(Single(json!({ "mechanism": "OAUTH", "token": id_token }))).await
+        self.authenticate_with(Single(json!({ "mechanism": "OAUTH", "token": id_token })))
+            .await
     }
 
     /// A single-use **bearer token** minted by an external SPNEGO edge.
     pub async fn authenticate_bearer(&self, token: &str) -> Result<AuthOutcome, ClientError> {
-        self.authenticate_with(Single(json!({ "mechanism": "GSSAPI_BEARER_TOKEN", "token": token }))).await
+        self.authenticate_with(Single(
+            json!({ "mechanism": "GSSAPI_BEARER_TOKEN", "token": token }),
+        ))
+        .await
     }
 
     /// Continue with a one-time **second factor** after a primary factor returned
@@ -185,7 +214,9 @@ impl Mechanism for Single {
         Ok(self.0.clone())
     }
     fn respond(&mut self, _data: &Value) -> Result<Value, ClientError> {
-        Err(ClientError::Auth("this mechanism does not support a challenge".into()))
+        Err(ClientError::Auth(
+            "this mechanism does not support a challenge".into(),
+        ))
     }
 }
 

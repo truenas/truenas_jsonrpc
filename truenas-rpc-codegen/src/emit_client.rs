@@ -28,8 +28,10 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
                 m.handler
             ));
         } else if m.direction() == Direction::ServerClient {
-            let notifies =
-                ref_name_of(m.notifies.as_ref().ok_or_else(|| miss("notifies"))?, "notifies")?;
+            let notifies = ref_name_of(
+                m.notifies.as_ref().ok_or_else(|| miss("notifies"))?,
+                "notifies",
+            )?;
             topics.push((wire.to_string(), notifies));
             methods.push_str(&format!(
                 "    /// Subscribe to `{wire}`; returns the subscription id (notifications arrive on the engine's stream).\n    pub async fn subscribe_{}(&self, request: {params}) -> Result<truenas_rpc_client::SubId, truenas_rpc::JsonRpcError> {{\n        let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;\n        let bytes = self.engine.call({key}, &params).await?;\n        serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))\n    }}\n",
@@ -37,7 +39,9 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
             ));
         } else if m.filterable {
             let entry = ref_name_of(
-                m.entry.as_ref().expect("filterable entry present (guaranteed by validate)"),
+                m.entry
+                    .as_ref()
+                    .expect("filterable entry present (guaranteed by validate)"),
                 "entry",
             )?;
             methods.push_str(&format!(
@@ -74,8 +78,10 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     let topics_const = if topics.is_empty() {
         String::new()
     } else {
-        let entries: Vec<String> =
-            topics.iter().map(|(w, n)| format!("({}, {})", str_lit(w), str_lit(n))).collect();
+        let entries: Vec<String> = topics
+            .iter()
+            .map(|(w, n)| format!("({}, {})", str_lit(w), str_lit(n)))
+            .collect();
         format!(
             "\n/// Subscribable topics: `(wire-name, notification-type-name)`.\npub const TOPICS: &[(&str, &str)] = &[{}];\n",
             entries.join(", ")
@@ -95,7 +101,9 @@ fn header(origin: &str) -> String {
 fn ref_name_of(node: &SchemaNode, slot: &str) -> Result<String> {
     match &node.reference {
         Some(r) => ref_name(r),
-        None => Err(CodegenError::new(format!("{slot} must be a $ref to a $def"))),
+        None => Err(CodegenError::new(format!(
+            "{slot} must be a $ref to a $def"
+        ))),
     }
 }
 

@@ -34,15 +34,13 @@ mod types;
 pub use error::{BuildResult, Error, ErrorCode, JsonRpcError};
 pub use meta::Secret;
 pub use method::{
-    AsyncRpcMethod, FilterableRpcMethod, RpcFdPassMethod, RpcFdTransferMethod,
-    RpcMethod, MethodDef, SubscriptionDef,
+    AsyncRpcMethod, FilterableRpcMethod, MethodDef, RpcFdPassMethod, RpcFdTransferMethod,
+    RpcMethod, SubscriptionDef,
 };
 pub use protocol::{
     AuditOutcome, AuditSink, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
     JsonRpcProtocolBuilder, ServerInfoHandler, Service, SessionInfo,
 };
-pub use setup::{SetupHandoff, SetupOutcome, SetupTakeover};
-pub use transfer::{FileTransfer, Transfer, TransferDirection};
 pub use pydispatch::{PyDispatcher, PyOutcome, PyResult};
 pub use request::RequestCtx;
 pub use role::{RoleMask, Roles};
@@ -50,7 +48,9 @@ pub use session::{
     Clock, Credential, IdGen, NullOutbound, OperationGuard, OperationInfo, OperationKind, Outbound,
     Session, SessionId, SessionOrigin, SystemClock, UuidGen,
 };
-pub use types::{RequestInfo, MessageDirection, ServerInfo, SessionLifecycle};
+pub use setup::{SetupHandoff, SetupOutcome, SetupTakeover};
+pub use transfer::{FileTransfer, Transfer, TransferDirection};
+pub use types::{MessageDirection, RequestInfo, ServerInfo, SessionLifecycle};
 // Re-exported from `truenas-filter` so consumers can write filterable (query) handlers
 // without a direct dependency on the engine crate.
 pub use truenas_filter::{

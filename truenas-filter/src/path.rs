@@ -19,15 +19,16 @@ impl PathPart {
     fn new(seg: String) -> Self {
         let is_wildcard = seg == "*";
         // Mirror the C engine's `strtol` index test: non-empty, all ASCII digits, fits.
-        let index = if !is_wildcard
-            && !seg.is_empty()
-            && seg.bytes().all(|b| b.is_ascii_digit())
-        {
+        let index = if !is_wildcard && !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_digit()) {
             seg.parse::<usize>().ok()
         } else {
             None
         };
-        PathPart { key: seg, is_wildcard, index }
+        PathPart {
+            key: seg,
+            is_wildcard,
+            index,
+        }
     }
 }
 

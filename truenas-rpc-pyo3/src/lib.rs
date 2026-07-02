@@ -243,7 +243,10 @@ unsafe fn clear_and_internal() -> PyResult {
         ffi::PyErr_Clear();
     }
     PyResult {
-        outcome: PyOutcome::Error(JsonRpcError::new(ErrorCode::InternalError, "Internal error")),
+        outcome: PyOutcome::Error(JsonRpcError::new(
+            ErrorCode::InternalError,
+            "Internal error",
+        )),
         audit_message: None,
     }
 }
@@ -276,7 +279,10 @@ fn decode_outcome(status: i64, payload: &[u8], audit: &[u8]) -> PyResult {
             String::from_utf8_lossy(payload).into_owned(),
         ))
     };
-    PyResult { outcome, audit_message }
+    PyResult {
+        outcome,
+        audit_message,
+    }
 }
 
 /// Build a NUL-terminated C string from `s`, mapping an interior NUL to a [`BridgeError`].
@@ -327,11 +333,14 @@ def dispatch(name, params, session):
 
     async fn call(proto: &JsonRpcProtocol<()>, method: &str, params: &str) -> Value {
         let s = proto.new_session(Some(()), Arc::new(NullOutbound));
-        let wire = format!(r#"{{"jsonrpc":"2.0","method":"{method}","id":"{ID}","params":{params}}}"#);
+        let wire =
+            format!(r#"{{"jsonrpc":"2.0","method":"{method}","id":"{ID}","params":{params}}}"#);
         match proto.dispatch(wire.as_bytes(), &s).await {
             Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
             Dispatched::Nothing => panic!("expected a reply"),
-            Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => panic!("unexpected transfer/passthrough"),
+            Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => {
+                panic!("unexpected transfer/passthrough")
+            }
         }
     }
 

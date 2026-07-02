@@ -137,7 +137,12 @@ impl<P: JwksProvider> Mechanism for Oauth<P> {
         &[Capability::Encrypted]
     }
 
-    fn step(&self, payload: &Value, _channel: &Channel, _progress: Option<AuthProgress>) -> Outcome {
+    fn step(
+        &self,
+        payload: &Value,
+        _channel: &Channel,
+        _progress: Option<AuthProgress>,
+    ) -> Outcome {
         match self.verify(payload) {
             Some((claims, username)) => Outcome::Authenticated {
                 identity: claims,
@@ -203,7 +208,10 @@ impl<P: JwksProvider> Oauth<P> {
             return None;
         }
 
-        let username = claims.get(&self.config.username_claim).and_then(Value::as_str)?.to_string();
+        let username = claims
+            .get(&self.config.username_claim)
+            .and_then(Value::as_str)?
+            .to_string();
         Some((claims, username))
     }
 }
@@ -219,7 +227,9 @@ fn verify_signature(alg: Algorithm, key: &PKey<Public>, signing_input: &[u8], si
                 _ => MessageDigest::sha512(),
             };
             // RSASSA-PKCS1-v1_5 is OpenSSL's default RSA padding — exactly JWS `RS*`.
-            let Ok(mut v) = Verifier::new(md, key) else { return false };
+            let Ok(mut v) = Verifier::new(md, key) else {
+                return false;
+            };
             v.update(signing_input).is_ok() && v.verify(sig).unwrap_or(false)
         }
         Algorithm::ES256 | Algorithm::ES384 => {
@@ -232,17 +242,25 @@ fn verify_signature(alg: Algorithm, key: &PKey<Public>, signing_input: &[u8], si
             if sig.len() != half * 2 {
                 return false;
             }
-            let Ok(ec_key) = key.ec_key() else { return false };
-            let (Ok(r), Ok(s)) = (BigNum::from_slice(&sig[..half]), BigNum::from_slice(&sig[half..]))
-            else {
+            let Ok(ec_key) = key.ec_key() else {
                 return false;
             };
-            let Ok(ecdsa) = EcdsaSig::from_private_components(r, s) else { return false };
+            let (Ok(r), Ok(s)) = (
+                BigNum::from_slice(&sig[..half]),
+                BigNum::from_slice(&sig[half..]),
+            ) else {
+                return false;
+            };
+            let Ok(ecdsa) = EcdsaSig::from_private_components(r, s) else {
+                return false;
+            };
             ecdsa.verify(&hash, &ec_key).unwrap_or(false)
         }
         Algorithm::EdDSA => {
             // PureEdDSA: no pre-hash, no streaming — the one-shot verify.
-            let Ok(mut v) = Verifier::new_without_digest(key) else { return false };
+            let Ok(mut v) = Verifier::new_without_digest(key) else {
+                return false;
+            };
             v.verify_oneshot(sig, signing_input).unwrap_or(false)
         }
     }
@@ -258,7 +276,10 @@ fn aud_contains(aud: Option<&Value>, expected: &str) -> bool {
 }
 
 fn unix_now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 /// Strict base64url (unpadded) decode — rejects any character outside the URL-safe alphabet and any

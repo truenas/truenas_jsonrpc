@@ -18,9 +18,12 @@ struct Empty {}
 
 fn demo_proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("demo", "1")
-        .method(RpcMethod::new(MethodDef::new("ping"), |_a: Empty, _c: &RequestCtx<()>| {
-            Ok::<_, JsonRpcError>(serde_json::json!({ "pong": true }))
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("ping"),
+            |_a: Empty, _c: &RequestCtx<()>| {
+                Ok::<_, JsonRpcError>(serde_json::json!({ "pong": true }))
+            },
+        ))
         .unwrap()
         .build()
 }
@@ -34,7 +37,9 @@ fn server_with_a_transfer() -> (TruenasRpcServer<()>, Arc<Session<()>>, Operatio
     // handle) travels with it, and holding the strong `Arc` keeps it live for the dump.
     let session = proto.new_session(Some(()), Arc::new(NullOutbound));
     let op = session.track_operation(OperationKind::Transfer, Arc::from("snapshot.receive"));
-    let server = TruenasRpcServer::<()>::builder("test-server").protocol("demo", proto).build();
+    let server = TruenasRpcServer::<()>::builder("test-server")
+        .protocol("demo", proto)
+        .build();
     (server, session, op)
 }
 
@@ -64,7 +69,10 @@ fn dump_json_reports_session_state_and_long_lived_operations() {
 fn operations_clear_when_the_guard_drops() {
     let (server, _session, op) = server_with_a_transfer();
     let live = |srv: &TruenasRpcServer<()>| {
-        srv.dump_operations_json()["sessions"][0]["operations"].as_array().unwrap().len()
+        srv.dump_operations_json()["sessions"][0]["operations"]
+            .as_array()
+            .unwrap()
+            .len()
     };
     assert_eq!(live(&server), 1);
     drop(op); // the transfer ended

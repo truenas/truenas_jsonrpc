@@ -14,7 +14,11 @@ const GOLDEN: &str = include_str!("conformance/golden.json");
 
 /// Run one filter case through the Rust engine, mirroring `compile → compile → tnfilter`
 /// so a compile-time error surfaces as `Compile` and a runtime one as `Eval`.
-fn run_filter(data: Vec<Value>, filters: &[Value], opts: &QueryOptions) -> Result<Filtered<Value>, FilterError> {
+fn run_filter(
+    data: Vec<Value>,
+    filters: &[Value],
+    opts: &QueryOptions,
+) -> Result<Filtered<Value>, FilterError> {
     let cf = compile_filters(filters)?;
     let co = compile_options(opts)?;
     tnfilter(data, &cf, &co)
@@ -24,7 +28,10 @@ fn check_result(label: &str, expected: &Value, actual: Result<Filtered<Value>, F
     if let Some(kind) = expected.get("error").and_then(Value::as_str) {
         match actual {
             Err(FilterError::Compile(_)) => {
-                assert_eq!(kind, "compile", "{label}: expected {kind} error, got Compile")
+                assert_eq!(
+                    kind, "compile",
+                    "{label}: expected {kind} error, got Compile"
+                )
             }
             Err(FilterError::Eval(_)) => {
                 assert_eq!(kind, "eval", "{label}: expected {kind} error, got Eval")
@@ -52,12 +59,19 @@ fn differential_against_c_engine() {
     let golden: Value = serde_json::from_str(GOLDEN).expect("golden.json parses");
     let datasets = golden["datasets"].as_object().expect("datasets object");
     let cases = golden["cases"].as_array().expect("cases array");
-    assert!(cases.len() >= 50, "suspiciously small corpus: {}", cases.len());
+    assert!(
+        cases.len() >= 50,
+        "suspiciously small corpus: {}",
+        cases.len()
+    );
 
     for case in cases {
         let label = case["label"].as_str().unwrap();
         let ds = case["dataset"].as_str().unwrap();
-        let data = datasets[ds].as_array().expect("dataset is an array").clone();
+        let data = datasets[ds]
+            .as_array()
+            .expect("dataset is an array")
+            .clone();
         let filters = case["filters"].as_array().expect("filters array").clone();
         let opts: QueryOptions = serde_json::from_value(case["options"].clone())
             .unwrap_or_else(|e| panic!("{label}: options deserialize failed: {e}"));
@@ -73,6 +87,10 @@ fn differential_against_c_engine() {
         let filters = m["filters"].as_array().unwrap().clone();
         let cf = compile_filters(&filters).expect("match filters compile");
         let got = tnmatch(&item, &cf).expect("match should not error");
-        assert_eq!(Value::Bool(got), m["result"]["matched"], "{label}: match mismatch");
+        assert_eq!(
+            Value::Bool(got),
+            m["result"]["matched"],
+            "{label}: match mismatch"
+        );
     }
 }

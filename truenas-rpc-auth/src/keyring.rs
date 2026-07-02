@@ -49,7 +49,10 @@ impl KeyringCredentials {
     /// Look credentials up in `ring`, mapping each record to the default identity
     /// `{ "username": <name> }`.
     pub fn new(ring: KeyRing) -> Self {
-        Self { ring, identity: default_identity }
+        Self {
+            ring,
+            identity: default_identity,
+        }
     }
 }
 

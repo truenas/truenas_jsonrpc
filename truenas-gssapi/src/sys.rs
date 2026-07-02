@@ -62,7 +62,10 @@ pub(crate) fn gss_error(x: OM_uint32) -> OM_uint32 {
 }
 
 fn empty_buffer() -> gss_buffer_desc {
-    gss_buffer_desc { length: 0, value: ptr::null_mut() }
+    gss_buffer_desc {
+        length: 0,
+        value: ptr::null_mut(),
+    }
 }
 
 #[allow(unsafe_code)]
@@ -144,8 +147,10 @@ pub(crate) fn accept_step(
     channel_binding: Option<&[u8]>,
 ) -> StepOut {
     let mut minor: OM_uint32 = 0;
-    let mut in_buf =
-        gss_buffer_desc { length: input.len(), value: input.as_ptr() as *mut c_void };
+    let mut in_buf = gss_buffer_desc {
+        length: input.len(),
+        value: input.as_ptr() as *mut c_void,
+    };
     let mut out_buf = empty_buffer();
     let mut ret_flags: OM_uint32 = 0;
     let mut cb = gss_channel_bindings_struct {
@@ -157,8 +162,10 @@ pub(crate) fn accept_step(
     };
     let cb_ptr: gss_channel_bindings_t = match channel_binding {
         Some(data) => {
-            cb.application_data =
-                gss_buffer_desc { length: data.len(), value: data.as_ptr() as *mut c_void };
+            cb.application_data = gss_buffer_desc {
+                length: data.len(),
+                value: data.as_ptr() as *mut c_void,
+            };
             &mut cb
         }
         None => ptr::null_mut(),
@@ -185,7 +192,11 @@ pub(crate) fn accept_step(
         )
     };
     let token = copy_and_release(&mut out_buf);
-    StepOut { major, minor, token }
+    StepOut {
+        major,
+        minor,
+        token,
+    }
 }
 
 /// The established context's initiator principal as text (`gss_inquire_context` → `gss_display_name`).

@@ -12,12 +12,18 @@ pub struct CodegenError {
 impl CodegenError {
     /// A general error with no source location.
     pub fn new(message: impl Into<String>) -> Self {
-        Self { origin: None, message: message.into() }
+        Self {
+            origin: None,
+            message: message.into(),
+        }
     }
 
     /// An error attributed to a source spec / file.
     pub fn at(origin: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { origin: Some(origin.into()), message: message.into() }
+        Self {
+            origin: Some(origin.into()),
+            message: message.into(),
+        }
     }
 
     /// The error message (without the origin prefix).

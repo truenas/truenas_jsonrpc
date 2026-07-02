@@ -10,7 +10,7 @@ use std::time::Duration;
 use serde_json::json;
 use truenas_audit::{AuditPrincipal, LinuxAuditSink};
 use truenas_rpc::{
-    AuditOutcome, AuditSink, JsonRpcError, JsonRpcProtocol, RequestInfo, NullOutbound, Session,
+    AuditOutcome, AuditSink, JsonRpcError, JsonRpcProtocol, NullOutbound, RequestInfo, Session,
 };
 
 #[test]

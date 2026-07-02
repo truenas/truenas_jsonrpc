@@ -10,10 +10,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome,
-    tnfilter, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod, Filtered,
-    JsonRpcError, JsonRpcProtocol, RequestInfo, MethodDef, NullOutbound, RequestCtx, Roles,
-    Session,
+    tnfilter, AuditOutcome, CompiledFilters, CompiledOptions, Dispatched, FilterableRpcMethod,
+    Filtered, JsonRpcError, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RequestInfo,
+    Roles, Session,
 };
 
 const RID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -40,7 +39,6 @@ fn query(
     Ok(tnfilter(data(), f, o)?)
 }
 
-
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("t", "1.0.0")
         .filterable(FilterableRpcMethod::<NoArgs, Value, _>::new(
@@ -61,16 +59,22 @@ async fn call(p: &JsonRpcProtocol<()>, params: Value) -> Value {
     match p.dispatch(req.to_string().as_bytes(), &s).await {
         Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
         Dispatched::Nothing => panic!("expected a reply"),
-        Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => unreachable!("transfer/passthrough directive unexpected in this test"),
+        Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => {
+            unreachable!("transfer/passthrough directive unexpected in this test")
+        }
     }
 }
 
 fn result(v: &Value) -> Value {
-    v.get("result").cloned().unwrap_or_else(|| panic!("expected result, got {v}"))
+    v.get("result")
+        .cloned()
+        .unwrap_or_else(|| panic!("expected result, got {v}"))
 }
 
 fn err_code(v: &Value) -> i64 {
-    v["error"]["code"].as_i64().unwrap_or_else(|| panic!("expected error, got {v}"))
+    v["error"]["code"]
+        .as_i64()
+        .unwrap_or_else(|| panic!("expected error, got {v}"))
 }
 
 #[tokio::test]
@@ -82,7 +86,12 @@ async fn no_filter_returns_all() {
 #[tokio::test]
 async fn filter_narrows() {
     let r = call(&proto(), json!({"query-filters": [["name", "=", "a"]]})).await;
-    let ids: Vec<i64> = result(&r).as_array().unwrap().iter().map(|x| x["id"].as_i64().unwrap()).collect();
+    let ids: Vec<i64> = result(&r)
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["id"].as_i64().unwrap())
+        .collect();
     assert_eq!(ids, vec![1, 3]);
 }
 
@@ -155,9 +164,16 @@ async fn filterable_is_audited() {
             query,
         ))
         .unwrap()
-        .audit_sink(move |req: &RequestInfo, _outcome: AuditOutcome<'_>, _s: &Session<()>, msg: Option<&str>| {
-            cap.lock().unwrap().push(json!({"method": req.method, "msg": msg}));
-        })
+        .audit_sink(
+            move |req: &RequestInfo,
+                  _outcome: AuditOutcome<'_>,
+                  _s: &Session<()>,
+                  msg: Option<&str>| {
+                cap.lock()
+                    .unwrap()
+                    .push(json!({"method": req.method, "msg": msg}));
+            },
+        )
         .build();
     let _ = call(&p, json!({"query-filters": [["name", "=", "a"]]})).await;
     let got = captured.lock().unwrap();

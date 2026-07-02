@@ -33,21 +33,27 @@ mod tests {
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         let serve_path = path.clone();
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
             rt.block_on(async move {
                 let proto = JsonRpcProtocol::<()>::builder("demo", "1.0.0")
                     .method(RpcMethod::new(
                         MethodDef::new("greet"),
                         |a: GreetArgs, _cx: &RequestCtx<()>| {
-                            Ok::<_, JsonRpcError>(GreetResult { message: format!("hi {}", a.name) })
+                            Ok::<_, JsonRpcError>(GreetResult {
+                                message: format!("hi {}", a.name),
+                            })
                         },
                     ))
                     .unwrap()
                     .build();
                 let listener =
                     TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&serve_path)).unwrap();
-                let srv =
-                    TruenasRpcServer::<()>::builder("demo-server").protocol("demo", proto).build();
+                let srv = TruenasRpcServer::<()>::builder("demo-server")
+                    .protocol("demo", proto)
+                    .build();
                 ready_tx.send(()).unwrap();
                 let _ = srv.serve_unix_listener(listener, JsonRpc).await;
             });
@@ -71,12 +77,19 @@ mod tests {
                 .unwrap()
                 .call_method1("unix", (path.to_str().unwrap(),))
                 .unwrap();
-            let client =
-                module.getattr("DemoClient").unwrap().call_method1("connect", (endpoint,)).unwrap();
+            let client = module
+                .getattr("DemoClient")
+                .unwrap()
+                .call_method1("connect", (endpoint,))
+                .unwrap();
 
             let kwargs = PyDict::new(py);
             kwargs.set_item("name", "world").unwrap();
-            let args = module.getattr("GreetArgs").unwrap().call((), Some(&kwargs)).unwrap();
+            let args = module
+                .getattr("GreetArgs")
+                .unwrap()
+                .call((), Some(&kwargs))
+                .unwrap();
 
             let result = client.call_method1("greet", (args,)).unwrap();
             let message: String = result.getattr("message").unwrap().extract().unwrap();

@@ -13,7 +13,10 @@ const TEST_ID: [u8; 16] = [
 ];
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -42,7 +45,10 @@ fn add_request_matches_golden() {
     assert_eq!(req.proc_id, 1001);
     assert_eq!(req.rid, Some(TEST_ID));
     assert_eq!(req.version, frame::VERSION);
-    assert_eq!(truenas_xdr::from_bytes::<AddArgs>(req.params).unwrap(), AddArgs { a: 2, b: 3 });
+    assert_eq!(
+        truenas_xdr::from_bytes::<AddArgs>(req.params).unwrap(),
+        AddArgs { a: 2, b: 3 }
+    );
 }
 
 #[test]
@@ -50,7 +56,11 @@ fn add_reply_matches_golden() {
     let golden = unhex(
         "545844520000000100000001123e4567e89b12d3a456426614174000000000000000000000000005000000026f6b0000",
     );
-    let result = to_bytes(&AddResult { sum: 5, label: "ok".to_string() }).unwrap();
+    let result = to_bytes(&AddResult {
+        sum: 5,
+        label: "ok".to_string(),
+    })
+    .unwrap();
     let frame = build_reply_ok(Some(TEST_ID), &result).unwrap();
     assert_eq!(frame, golden, "xdr_add reply frame");
 
@@ -59,7 +69,10 @@ fn add_reply_matches_golden() {
     assert_eq!(reply.rid, Some(TEST_ID));
     assert_eq!(
         truenas_xdr::from_bytes::<AddResult>(reply.body).unwrap(),
-        AddResult { sum: 5, label: "ok".to_string() }
+        AddResult {
+            sum: 5,
+            label: "ok".to_string()
+        }
     );
 }
 
@@ -85,7 +98,15 @@ fn notification_has_no_id() {
     let frame = build_request(9, None, b"zz..").unwrap();
     assert!(is_xdr(&frame));
     let req = parse_request(&frame).unwrap();
-    assert_eq!(req, Request { version: 1, proc_id: 9, rid: None, params: b"zz.." });
+    assert_eq!(
+        req,
+        Request {
+            version: 1,
+            proc_id: 9,
+            rid: None,
+            params: b"zz.."
+        }
+    );
 }
 
 #[test]

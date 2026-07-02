@@ -85,11 +85,15 @@ impl AuthStack {
         if names.iter().any(|n| n == FULL_ADMIN) {
             return RoleMask::FULL_ADMIN;
         }
-        let Some(reg) = &self.registry else { return RoleMask::NONE };
-        names.iter().fold(RoleMask::NONE, |acc, n| match reg.get(n) {
-            Some(bit) => acc.union(bit),
-            None => acc,
-        })
+        let Some(reg) = &self.registry else {
+            return RoleMask::NONE;
+        };
+        names
+            .iter()
+            .fold(RoleMask::NONE, |acc, n| match reg.get(n) {
+                Some(bit) => acc.union(bit),
+                None => acc,
+            })
     }
 
     /// Resolve a [`Principal`] to the uid authorization (and the session credential) key off: a
@@ -110,7 +114,11 @@ impl AuthStack {
     fn roles_for(&self, uid: Option<u32>, mechanism: &str) -> Vec<String> {
         match uid {
             Some(0) => vec![FULL_ADMIN.to_string()],
-            Some(uid) => self.role_source.as_ref().map(|f| f(uid, mechanism)).unwrap_or_default(),
+            Some(uid) => self
+                .role_source
+                .as_ref()
+                .map(|f| f(uid, mechanism))
+                .unwrap_or_default(),
             None => Vec::new(),
         }
     }
@@ -170,7 +178,10 @@ impl AuthStack {
         } else {
             match &args.mechanism {
                 None => (self.peercred_default(&channel), "UNIX_SOCKET"),
-                Some(mech) => (self.dispatch(mech, &channel, None), mech_tag(mech).unwrap_or("UNKNOWN")),
+                Some(mech) => (
+                    self.dispatch(mech, &channel, None),
+                    mech_tag(mech).unwrap_or("UNKNOWN"),
+                ),
             }
         };
         Ok(self.build_setup_outcome(outcome, label, session, session_id, &channel))
@@ -203,7 +214,12 @@ impl AuthStack {
         let credential = credential_of(&outcome, mech, uid);
         let (lifecycle, result) = session.with_internal_mut(|slot| match slot.as_mut() {
             Some(auth) => commit(auth, outcome, session_id),
-            None => (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr }),
+            None => (
+                SessionLifecycle::None,
+                AuthResult {
+                    response: AuthResponse::AuthErr,
+                },
+            ),
         });
         session.set_roles(granted);
         if let Some(cred) = credential {
@@ -229,7 +245,9 @@ impl AuthStack {
                         AuthSessionState::InProgress(p) => p,
                         other => {
                             auth.state = other;
-                            let reject = AuthResult { response: AuthResponse::AuthErr };
+                            let reject = AuthResult {
+                                response: AuthResponse::AuthErr,
+                            };
                             return Ok(((SessionLifecycle::None, reject), RoleMask::NONE, None));
                         }
                     };
@@ -258,7 +276,10 @@ impl AuthStackBuilder {
     /// an explicit mechanism. Authorization comes from the peer's **uid** via the
     /// [`role_source`](Self::role_source) (uid 0 ⇒ full admin), not from this closure.
     #[must_use]
-    pub fn peercred(mut self, f: impl Fn(&Channel) -> Option<Identity> + Send + Sync + 'static) -> Self {
+    pub fn peercred(
+        mut self,
+        f: impl Fn(&Channel) -> Option<Identity> + Send + Sync + 'static,
+    ) -> Self {
         self.peercred = Some(Box::new(f));
         self
     }
@@ -278,7 +299,10 @@ impl AuthStackBuilder {
     /// With the `nss` feature, [`resolve_users_via_nss`](Self::resolve_users_via_nss) wires
     /// `getpwnam` here.
     #[must_use]
-    pub fn user_resolver(mut self, f: impl Fn(&str) -> Option<u32> + Send + Sync + 'static) -> Self {
+    pub fn user_resolver(
+        mut self,
+        f: impl Fn(&str) -> Option<u32> + Send + Sync + 'static,
+    ) -> Self {
         self.user_resolver = Some(Box::new(f));
         self
     }
@@ -289,7 +313,10 @@ impl AuthStackBuilder {
     /// anti-lockout net), so the source is consulted only for non-root uids. With the `keyring`
     /// feature, [`roles_from_keyring`](Self::roles_from_keyring) wires the `server_roles` ring here.
     #[must_use]
-    pub fn role_source(mut self, f: impl Fn(u32, &str) -> Vec<String> + Send + Sync + 'static) -> Self {
+    pub fn role_source(
+        mut self,
+        f: impl Fn(u32, &str) -> Vec<String> + Send + Sync + 'static,
+    ) -> Self {
         self.role_source = Some(Box::new(f));
         self
     }
@@ -301,7 +328,10 @@ impl AuthStackBuilder {
     #[must_use]
     pub fn resolve_users_via_nss(self) -> Self {
         self.user_resolver(|name| {
-            nix::unistd::User::from_name(name).ok().flatten().map(|u| u.uid.as_raw())
+            nix::unistd::User::from_name(name)
+                .ok()
+                .flatten()
+                .map(|u| u.uid.as_raw())
         })
     }
 
@@ -326,7 +356,11 @@ impl AuthStackBuilder {
 
     /// Enable a mechanism under its wire `tag` (the `"mechanism"` value clients send).
     #[must_use]
-    pub fn mechanism(mut self, tag: impl Into<String>, mechanism: impl Mechanism + 'static) -> Self {
+    pub fn mechanism(
+        mut self,
+        tag: impl Into<String>,
+        mechanism: impl Mechanism + 'static,
+    ) -> Self {
         self.mechanisms.insert(tag.into(), Box::new(mechanism));
         self
     }
@@ -355,11 +389,15 @@ pub fn install(
     builder
         .session_setup_takeover(
             MethodDef::new("$/sessionSetup").secret_fields(["mechanism"]),
-            move |args: SetupArgs, session: &Arc<Session<AuthSession>>| setup.on_setup(args, session),
+            move |args: SetupArgs, session: &Arc<Session<AuthSession>>| {
+                setup.on_setup(args, session)
+            },
         )
         .session_setup_continue(
             MethodDef::new("$/sessionSetupContinue").secret_fields(["mechanism"]),
-            move |args: ContinueArgs, session: &Session<AuthSession>| cont.on_continue(args, session),
+            move |args: ContinueArgs, session: &Session<AuthSession>| {
+                cont.on_continue(args, session)
+            },
         )
 }
 
@@ -387,7 +425,10 @@ pub(crate) fn credential_of(outcome: &Outcome, mech: &str, uid: Option<u32>) -> 
         Principal::User(name) => format!(" user={name}"),
         Principal::None => String::new(),
     };
-    Some(Credential { description: format!("{mech}{who}"), uid })
+    Some(Credential {
+        description: format!("{mech}{who}"),
+        uid,
+    })
 }
 
 /// Map a mechanism [`Outcome`] onto the `(lifecycle, reply)` the core commits, advancing the
@@ -400,10 +441,18 @@ pub(crate) fn commit(
 ) -> (SessionLifecycle, AuthResult) {
     match outcome {
         // The `principal` was resolved to the session's role mask + uid by the caller (`authorize`).
-        Outcome::Authenticated { identity, principal: _, user_info, extra } => {
+        Outcome::Authenticated {
+            identity,
+            principal: _,
+            user_info,
+            extra,
+        } => {
             auth.state = AuthSessionState::Authenticated(identity);
-            let response =
-                AuthResponse::Success { session_id: session_id.to_string(), user_info, extra };
+            let response = AuthResponse::Success {
+                session_id: session_id.to_string(),
+                user_info,
+                extra,
+            };
             (SessionLifecycle::Established, AuthResult { response })
         }
         Outcome::Challenge { reply, next } => {
@@ -412,14 +461,24 @@ pub(crate) fn commit(
         }
         Outcome::Reject(kind) => {
             auth.state = AuthSessionState::Unauthenticated;
-            (SessionLifecycle::None, AuthResult { response: kind.into() })
+            (
+                SessionLifecycle::None,
+                AuthResult {
+                    response: kind.into(),
+                },
+            )
         }
         // Passthrough is intercepted before `commit` (it becomes a takeover, not a sync commit);
         // this arm only keeps the match exhaustive.
         #[cfg(feature = "passthrough")]
         Outcome::Passthrough(_) => {
             auth.state = AuthSessionState::Unauthenticated;
-            (SessionLifecycle::None, AuthResult { response: AuthResponse::AuthErr })
+            (
+                SessionLifecycle::None,
+                AuthResult {
+                    response: AuthResponse::AuthErr,
+                },
+            )
         }
     }
 }

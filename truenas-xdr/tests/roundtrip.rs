@@ -4,7 +4,9 @@
 //! `sctrl` union goldens live in `conformance.rs` / `golden_sctrl.rs`.)
 
 use serde::{Deserialize, Serialize};
-use truenas_xdr::{from_bytes, from_bytes_exact, serialized_size, to_bytes, FixedOpaque, VarOpaque};
+use truenas_xdr::{
+    from_bytes, from_bytes_exact, serialized_size, to_bytes, FixedOpaque, VarOpaque,
+};
 
 /// Encode `value`, assert the exact bytes, assert `serialized_size` agrees, then decode
 /// and assert the value round-trips.
@@ -15,7 +17,11 @@ where
     let bytes = to_bytes(value).expect("encode");
     assert_eq!(bytes, expected, "encoded bytes for {value:?}");
     assert_eq!(bytes.len() % 4, 0, "XDR output must be 4-aligned");
-    assert_eq!(serialized_size(value).expect("size"), bytes.len(), "serialized_size for {value:?}");
+    assert_eq!(
+        serialized_size(value).expect("size"),
+        bytes.len(),
+        "serialized_size for {value:?}"
+    );
     let decoded: T = from_bytes(&bytes).expect("decode");
     assert_eq!(&decoded, value, "round-trip for {value:?}");
 }
@@ -81,11 +87,17 @@ fn var_opaque_is_length_prefixed_padded() {
 
 #[test]
 fn fixed_opaque_has_no_length_prefix() {
-    check(&FixedOpaque([0xaa, 0xbb, 0xcc, 0xdd]), &[0xaa, 0xbb, 0xcc, 0xdd]);
+    check(
+        &FixedOpaque([0xaa, 0xbb, 0xcc, 0xdd]),
+        &[0xaa, 0xbb, 0xcc, 0xdd],
+    );
     // 2 bytes + 2 pad, no length prefix.
     check(&FixedOpaque([1u8, 2]), &[1, 2, 0, 0]);
     // 6 bytes + 2 pad.
-    check(&FixedOpaque([1u8, 2, 3, 4, 5, 6]), &[1, 2, 3, 4, 5, 6, 0, 0]);
+    check(
+        &FixedOpaque([1u8, 2, 3, 4, 5, 6]),
+        &[1, 2, 3, 4, 5, 6, 0, 0],
+    );
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
@@ -143,10 +155,16 @@ fn from_bytes_exact_rejects_trailing_bytes() {
 fn decode_out_of_range_is_an_error() {
     // 256 encoded as a u32, decoded into a u8, overflows.
     let bytes = to_bytes(&256u32).unwrap();
-    assert!(matches!(from_bytes::<u8>(&bytes), Err(truenas_xdr::XdrError::Range)));
+    assert!(matches!(
+        from_bytes::<u8>(&bytes),
+        Err(truenas_xdr::XdrError::Range)
+    ));
 }
 
 #[test]
 fn decode_truncated_input_is_eof() {
-    assert!(matches!(from_bytes::<u32>(&[0, 0]), Err(truenas_xdr::XdrError::Eof { .. })));
+    assert!(matches!(
+        from_bytes::<u32>(&[0, 0]),
+        Err(truenas_xdr::XdrError::Eof { .. })
+    ));
 }

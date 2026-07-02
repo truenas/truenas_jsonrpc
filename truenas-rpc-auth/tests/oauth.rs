@@ -70,7 +70,12 @@ struct StaticKey(Vec<u8>);
 
 impl StaticKey {
     fn from_pem(spki_pem: &[u8]) -> Self {
-        Self(PKey::public_key_from_pem(spki_pem).unwrap().public_key_to_der().unwrap())
+        Self(
+            PKey::public_key_from_pem(spki_pem)
+                .unwrap()
+                .public_key_to_der()
+                .unwrap(),
+        )
     }
     fn from_pkey(key: &PKey<Public>) -> Self {
         Self(key.public_key_to_der().unwrap())
@@ -84,7 +89,10 @@ impl JwksProvider for StaticKey {
 }
 
 fn now() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
 }
 
 /// A valid set of ID-token claims (correct iss/aud, alice, unexpired).
@@ -135,17 +143,22 @@ fn jwt(header: &Value, claims: &Value, sign: impl FnOnce(&[u8]) -> Vec<u8>) -> S
 /// Mint an RS256 ID token with the embedded RSA key.
 fn mint(claims: &Value) -> String {
     let pkey = PKey::private_key_from_pem(PRIV_PEM).unwrap();
-    jwt(&json!({ "alg": "RS256", "typ": "JWT", "kid": "test-key" }), claims, |input| {
-        let mut signer = Signer::new(MessageDigest::sha256(), &pkey).unwrap();
-        signer.update(input).unwrap();
-        signer.sign_to_vec().unwrap()
-    })
+    jwt(
+        &json!({ "alg": "RS256", "typ": "JWT", "kid": "test-key" }),
+        claims,
+        |input| {
+            let mut signer = Signer::new(MessageDigest::sha256(), &pkey).unwrap();
+            signer.update(input).unwrap();
+            signer.sign_to_vec().unwrap()
+        },
+    )
 }
 
 fn es256_keypair() -> (PKey<Private>, PKey<Public>) {
     let group = EcGroup::from_curve_name(Nid::X9_62_PRIME256V1).unwrap();
     let ec = EcKey::generate(&group).unwrap();
-    let public = PKey::from_ec_key(EcKey::from_public_key(&group, ec.public_key()).unwrap()).unwrap();
+    let public =
+        PKey::from_ec_key(EcKey::from_public_key(&group, ec.public_key()).unwrap()).unwrap();
     (PKey::from_ec_key(ec).unwrap(), public)
 }
 
@@ -153,19 +166,24 @@ fn es256_keypair() -> (PKey<Private>, PKey<Public>) {
 /// form, not DER), each half left-padded to 32 bytes.
 fn mint_es256(claims: &Value, key: &PKey<Private>) -> String {
     let ec = key.ec_key().unwrap();
-    jwt(&json!({ "alg": "ES256", "typ": "JWT" }), claims, move |input| {
-        let sig = EcdsaSig::sign(&sha256(input), &ec).unwrap();
-        let (r, s) = (sig.r().to_vec(), sig.s().to_vec());
-        let mut raw = vec![0u8; 64];
-        raw[32 - r.len()..32].copy_from_slice(&r);
-        raw[64 - s.len()..64].copy_from_slice(&s);
-        raw
-    })
+    jwt(
+        &json!({ "alg": "ES256", "typ": "JWT" }),
+        claims,
+        move |input| {
+            let sig = EcdsaSig::sign(&sha256(input), &ec).unwrap();
+            let (r, s) = (sig.r().to_vec(), sig.s().to_vec());
+            let mut raw = vec![0u8; 64];
+            raw[32 - r.len()..32].copy_from_slice(&r);
+            raw[64 - s.len()..64].copy_from_slice(&s);
+            raw
+        },
+    )
 }
 
 fn ed25519_keypair() -> (PKey<Private>, PKey<Public>) {
     let private = PKey::generate_ed25519().unwrap();
-    let public = PKey::public_key_from_raw_bytes(&private.raw_public_key().unwrap(), Id::ED25519).unwrap();
+    let public =
+        PKey::public_key_from_raw_bytes(&private.raw_public_key().unwrap(), Id::ED25519).unwrap();
     (private, public)
 }
 
@@ -203,14 +221,21 @@ fn rsa_server(registry: Roles) -> JsonRpcProtocol<AuthSession> {
 
 fn tls_session(proto: &JsonRpcProtocol<AuthSession>) -> Arc<Session<AuthSession>> {
     let peer = Peer {
-        tls: Some(TlsPeer { peer_cert: None, channel_binding: None }),
+        tls: Some(TlsPeer {
+            peer_cert: None,
+            channel_binding: None,
+        }),
         posture: Some(TransportPosture::KernelTls),
         ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
     };
     proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))
 }
 
-async fn setup(proto: &JsonRpcProtocol<AuthSession>, s: &Arc<Session<AuthSession>>, token: &str) -> Value {
+async fn setup(
+    proto: &JsonRpcProtocol<AuthSession>,
+    s: &Arc<Session<AuthSession>>,
+    token: &str,
+) -> Value {
     let wire = serde_json::to_vec(&json!({
         "jsonrpc": "2.0", "method": "$/sessionSetup", "id": ID,
         "params": { "mechanism": { "mechanism": "OAUTH", "token": token } },
@@ -315,11 +340,15 @@ async fn a_disallowed_algorithm_is_rejected() {
     let proto = rsa_server(Roles::new(["ops"]));
     let s = tls_session(&proto);
     let mac = PKey::hmac(b"a-shared-secret").unwrap();
-    let token = jwt(&json!({ "alg": "HS256", "typ": "JWT" }), &valid_claims(), |input| {
-        let mut signer = Signer::new(MessageDigest::sha256(), &mac).unwrap();
-        signer.update(input).unwrap();
-        signer.sign_to_vec().unwrap()
-    });
+    let token = jwt(
+        &json!({ "alg": "HS256", "typ": "JWT" }),
+        &valid_claims(),
+        |input| {
+            let mut signer = Signer::new(MessageDigest::sha256(), &mac).unwrap();
+            signer.update(input).unwrap();
+            signer.sign_to_vec().unwrap()
+        },
+    );
     let r = setup(&proto, &s, &token).await;
     assert_eq!(rtype(&r), "AUTH_ERR");
 }

@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixStream;
-use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc::{JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RpcMethod};
 use truenas_rpc_server::{framing, JsonRpc, TruenasRpcServer, UnixConfig};
 
 #[derive(Deserialize, Serialize)]
@@ -50,7 +50,9 @@ fn demo_protocol() -> JsonRpcProtocol<()> {
         .method(RpcMethod::new(
             MethodDef::new("greeting.hello"),
             |a: HelloArgs, _cx: &RequestCtx<()>| {
-                Ok::<_, JsonRpcError>(HelloResult { greeting: format!("hello, {}!", a.name) })
+                Ok::<_, JsonRpcError>(HelloResult {
+                    greeting: format!("hello, {}!", a.name),
+                })
             },
         ))
         .unwrap()
@@ -61,7 +63,10 @@ fn demo_protocol() -> JsonRpcProtocol<()> {
 async fn call<S: AsyncRead + AsyncWrite + Unpin>(stream: &mut S, req: Value) -> Value {
     let bytes = serde_json::to_vec(&req).unwrap();
     stream.write_all(&framing::frame(&bytes)).await.unwrap();
-    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT).await.unwrap().unwrap();
+    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT)
+        .await
+        .unwrap()
+        .unwrap();
     serde_json::from_slice(&reply).unwrap()
 }
 

@@ -27,10 +27,15 @@ impl CredentialSource for InMemory {
 
 /// A protocol whose `$/sessionSetup` runs a SCRAM stack with a single account, `alice`.
 fn proto() -> JsonRpcProtocol<AuthSession> {
-    let creds =
-        ScramCredentials::mint(ALICE_KEY, b"0123456789abcdef".to_vec(), 4096, json!({ "user": "alice" }));
-    let stack =
-        AuthStack::builder().scram(InMemory(HashMap::from([("alice".to_string(), creds)]))).build();
+    let creds = ScramCredentials::mint(
+        ALICE_KEY,
+        b"0123456789abcdef".to_vec(),
+        4096,
+        json!({ "user": "alice" }),
+    );
+    let stack = AuthStack::builder()
+        .scram(InMemory(HashMap::from([("alice".to_string(), creds)])))
+        .build();
     install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build()
 }
 
@@ -41,7 +46,9 @@ async fn serve() -> std::net::SocketAddr {
         .state_from_peer(AuthSession::from_peer)
         .protocol("main", proto())
         .build();
-    let (listener, addr) = TruenasRpcServer::<AuthSession>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<AuthSession>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await });
     addr
 }
@@ -79,8 +86,14 @@ async fn scram_wrong_password_is_refused() {
     let client = connect(addr).await;
 
     // A wrong key → a wrong client proof → the server refuses (mutual auth never reached).
-    let outcome = client.authenticate_scram("alice", b"not-the-right-key").await.unwrap();
-    assert!(matches!(outcome, AuthOutcome::AuthErr), "expected AuthErr, got {outcome:?}");
+    let outcome = client
+        .authenticate_scram("alice", b"not-the-right-key")
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, AuthOutcome::AuthErr),
+        "expected AuthErr, got {outcome:?}"
+    );
 }
 
 /// A throwaway self-signed server cert + key (PEM), `CN=localhost`, sha256-signed.
@@ -108,8 +121,13 @@ fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
     b.set_subject_name(&name).unwrap();
     b.set_issuer_name(&name).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     b.sign(&key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }

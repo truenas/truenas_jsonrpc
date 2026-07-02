@@ -9,8 +9,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    Dispatched, RpcMethod, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RoleMask,
-    Session,
+    Dispatched, JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RoleMask, RpcMethod, Session,
 };
 
 const ID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -62,13 +61,15 @@ async fn call(proto: &JsonRpcProtocol<()>, s: &Arc<Session<()>>, wire: &[u8]) ->
 
 fn proto() -> JsonRpcProtocol<()> {
     JsonRpcProtocol::<()>::builder("test", "1.0.0")
-        .method(RpcMethod::new(MethodDef::new("echo"), |a: EchoArgs, _c: &RequestCtx<()>| {
-            Ok(EchoResult { echo: a.msg })
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("echo"),
+            |a: EchoArgs, _c: &RequestCtx<()>| Ok(EchoResult { echo: a.msg }),
+        ))
         .unwrap()
-        .method(RpcMethod::new(MethodDef::new("add"), |a: AddArgs, _c: &RequestCtx<()>| {
-            Ok(AddResult { sum: a.a + a.b })
-        }))
+        .method(RpcMethod::new(
+            MethodDef::new("add"),
+            |a: AddArgs, _c: &RequestCtx<()>| Ok(AddResult { sum: a.a + a.b }),
+        ))
         .unwrap()
         .build()
 }
@@ -89,8 +90,14 @@ async fn two_requests_reply_in_request_order() {
     let arr = resp.as_array().expect("a batch replies with an array");
     assert_eq!(arr.len(), 2);
     // Response order follows request order (v1 is sequential; the client could also match by id).
-    assert_eq!(arr[0], json!({"jsonrpc": "2.0", "result": {"echo": "hi"}, "id": ID}));
-    assert_eq!(arr[1], json!({"jsonrpc": "2.0", "result": {"sum": 5}, "id": ID2}));
+    assert_eq!(
+        arr[0],
+        json!({"jsonrpc": "2.0", "result": {"echo": "hi"}, "id": ID})
+    );
+    assert_eq!(
+        arr[1],
+        json!({"jsonrpc": "2.0", "result": {"sum": 5}, "id": ID2})
+    );
 }
 
 #[tokio::test]
@@ -126,7 +133,10 @@ async fn empty_batch_is_invalid_request() {
     let s = session(&proto);
     // An empty array is itself an invalid request — a single error object (not an array), id null.
     let resp = call(&proto, &s, b"[]").await.unwrap();
-    assert!(resp.is_object(), "the empty-batch error is a single object, not an array");
+    assert!(
+        resp.is_object(),
+        "the empty-batch error is a single object, not an array"
+    );
     assert_eq!(resp["error"]["code"], -32600);
     assert_eq!(resp["id"], Value::Null);
 }
@@ -137,9 +147,15 @@ async fn leading_whitespace_array_is_a_batch() {
     let s = session(&proto);
     // Insignificant leading whitespace before `[` is tolerated (same as a `{` object).
     let mut wire = b"  \n\t".to_vec();
-    wire.extend_from_slice(&batch(vec![obj("echo", Some(json!({"msg": "ws"})), Some(ID))]));
+    wire.extend_from_slice(&batch(vec![obj(
+        "echo",
+        Some(json!({"msg": "ws"})),
+        Some(ID),
+    )]));
     let arr = call(&proto, &s, &wire).await.unwrap();
-    let arr = arr.as_array().expect("still a batch despite the leading whitespace");
+    let arr = arr
+        .as_array()
+        .expect("still a batch despite the leading whitespace");
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["result"], json!({"echo": "ws"}));
 }
@@ -149,7 +165,10 @@ async fn invalid_non_object_element_yields_error_object() {
     let proto = proto();
     let s = session(&proto);
     // A primitive element (not a request object) → an INVALID_REQUEST error object in its slot.
-    let wire = batch(vec![obj("echo", Some(json!({"msg": "ok"})), Some(ID)), json!(42)]);
+    let wire = batch(vec![
+        obj("echo", Some(json!({"msg": "ok"})), Some(ID)),
+        json!(42),
+    ]);
     let arr = call(&proto, &s, &wire).await.unwrap();
     let arr = arr.as_array().unwrap();
     assert_eq!(arr.len(), 2);
@@ -169,8 +188,15 @@ async fn mixed_request_notfound_and_notification() {
     ]);
     let arr = call(&proto, &s, &wire).await.unwrap();
     let arr = arr.as_array().unwrap();
-    assert_eq!(arr.len(), 2, "two responses: the result and the error; the notification is omitted");
-    assert_eq!(arr[0], json!({"jsonrpc": "2.0", "result": {"sum": 9}, "id": ID}));
+    assert_eq!(
+        arr.len(),
+        2,
+        "two responses: the result and the error; the notification is omitted"
+    );
+    assert_eq!(
+        arr[0],
+        json!({"jsonrpc": "2.0", "result": {"sum": 9}, "id": ID})
+    );
     assert_eq!(arr[1]["error"]["code"], -32601);
     assert_eq!(arr[1]["id"], ID2);
 }
@@ -181,7 +207,10 @@ async fn malformed_batch_json_is_a_single_parse_error() {
     let s = session(&proto);
     // A leading `[` that is not a well-formed JSON array → one Parse-error reply for the whole batch.
     let resp = call(&proto, &s, b"[ {\"jsonrpc\"").await.unwrap();
-    assert!(resp.is_object(), "a malformed batch yields a single error object");
+    assert!(
+        resp.is_object(),
+        "a malformed batch yields a single error object"
+    );
     assert_eq!(resp["error"]["code"], -32700);
     assert_eq!(resp["id"], Value::Null);
 }
@@ -191,8 +220,8 @@ async fn connection_directive_element_is_invalid_in_a_batch() {
     let proto = proto();
     let s = session(&proto);
     s.set_roles(RoleMask::FULL_ADMIN); // authorizes `$/sessions` (which would yield a Sessions directive)
-    // `$/sessions` is a server-assembled listing with no inline reply — it has no meaning inside a
-    // batch, so it is surfaced as an INVALID_REQUEST element rather than the directive.
+                                       // `$/sessions` is a server-assembled listing with no inline reply — it has no meaning inside a
+                                       // batch, so it is surfaced as an INVALID_REQUEST element rather than the directive.
     let wire = batch(vec![
         obj("echo", Some(json!({"msg": "ok"})), Some(ID)),
         obj("$/sessions", None, Some(ID2)),

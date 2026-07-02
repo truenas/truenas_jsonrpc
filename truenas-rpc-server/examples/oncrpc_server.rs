@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
-use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc::{JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RpcMethod};
 use truenas_rpc_server::{framing, JsonRpc, OncRpc, TruenasRpcServer, UnixConfig};
 use truenas_xdr::{from_bytes, from_bytes_with, to_bytes, Strictness, VarOpaque};
 
@@ -51,13 +51,20 @@ fn demo() -> JsonRpcProtocol<()> {
 async fn json_call(stream: &mut UnixStream, req: Value) -> Value {
     let bytes = serde_json::to_vec(&req).unwrap();
     stream.write_all(&framing::frame(&bytes)).await.unwrap();
-    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT).await.unwrap().unwrap();
+    let reply = framing::read_message(stream, framing::DEFAULT_LIMIT)
+        .await
+        .unwrap()
+        .unwrap();
     serde_json::from_slice(&reply).unwrap()
 }
 
 async fn add_over_json_rpc(path: &std::path::Path) -> i64 {
     let mut s = UnixStream::connect(path).await.unwrap();
-    json_call(&mut s, json!({"jsonrpc":"2.0","id":"neg","method":"$/negotiate","params":{"protocol":"demo"}})).await;
+    json_call(
+        &mut s,
+        json!({"jsonrpc":"2.0","id":"neg","method":"$/negotiate","params":{"protocol":"demo"}}),
+    )
+    .await;
     let add = json_call(
         &mut s,
         json!({"jsonrpc":"2.0","id":"00000000-0000-0000-0000-000000000001","method":"math.add","params":{"a":20,"b":22}}),
@@ -77,7 +84,15 @@ fn rm_frame(payload: &[u8]) -> Vec<u8> {
 /// A record-marked ONC RPC CALL (AUTH_NONE) for `procedure` with XDR-encoded `args`.
 fn onc_call(xid: u32, procedure: u32, args: &[u8]) -> Vec<u8> {
     let prefix = (
-        xid, 0u32, 2u32, PROG, VERS, procedure, 0u32, VarOpaque(Vec::new()), 0u32,
+        xid,
+        0u32,
+        2u32,
+        PROG,
+        VERS,
+        procedure,
+        0u32,
+        VarOpaque(Vec::new()),
+        0u32,
         VarOpaque(Vec::new()),
     );
     let mut msg = to_bytes(&prefix).unwrap();
@@ -97,19 +112,25 @@ async fn add_over_oncrpc(path: &std::path::Path) -> i64 {
     s.read_exact(&mut msg).await.unwrap();
     let ((_xid, _mtype, _reply_stat, _vf, _vb, accept_stat), results) =
         from_bytes_with::<(u32, u32, u32, u32, VarOpaque, u32)>(&msg, Strictness::Lenient).unwrap();
-    assert_eq!(accept_stat, 0, "ONC RPC call should be accepted + successful");
+    assert_eq!(
+        accept_stat, 0,
+        "ONC RPC call should be accepted + successful"
+    );
     from_bytes::<AddResult>(results).unwrap().sum
 }
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> std::io::Result<()> {
     let json_path = std::env::temp_dir().join(format!("dualwire-{}-json.sock", std::process::id()));
-    let onc_path = std::env::temp_dir().join(format!("dualwire-{}-oncrpc.sock", std::process::id()));
+    let onc_path =
+        std::env::temp_dir().join(format!("dualwire-{}-oncrpc.sock", std::process::id()));
     let _ = std::fs::remove_file(&json_path);
     let _ = std::fs::remove_file(&onc_path);
 
     // One server, one registered protocol — served on two listeners with two engines.
-    let server = TruenasRpcServer::<()>::builder("dual-wire").protocol("demo", demo()).build();
+    let server = TruenasRpcServer::<()>::builder("dual-wire")
+        .protocol("demo", demo())
+        .build();
     let json_listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&json_path))?;
     let onc_listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&onc_path))?;
 
@@ -117,10 +138,11 @@ async fn main() -> std::io::Result<()> {
     let json_task =
         tokio::spawn(async move { json_srv.serve_unix_listener(json_listener, JsonRpc).await });
     let onc_srv = server.clone();
-    let onc_task =
-        tokio::spawn(
-            async move { onc_srv.serve_unix_listener(onc_listener, OncRpc::protocol("demo")).await },
-        );
+    let onc_task = tokio::spawn(async move {
+        onc_srv
+            .serve_unix_listener(onc_listener, OncRpc::protocol("demo"))
+            .await
+    });
 
     // Call the same method over each wire.
     let json_sum = add_over_json_rpc(&json_path).await;
@@ -130,7 +152,11 @@ async fn main() -> std::io::Result<()> {
     println!("math.add(20, 22) over ONC RPC  -> {onc_sum}");
     println!(
         "one registered method, two wires: {}",
-        if json_sum == onc_sum { "consistent" } else { "MISMATCH" }
+        if json_sum == onc_sum {
+            "consistent"
+        } else {
+            "MISMATCH"
+        }
     );
 
     json_task.abort();

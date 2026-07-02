@@ -28,7 +28,10 @@ fn tmp(tag: &str) -> PathBuf {
 }
 
 async fn send(client: &mut UnixStream, v: serde_json::Value) {
-    client.write_all(&framing::frame(&serde_json::to_vec(&v).unwrap())).await.unwrap();
+    client
+        .write_all(&framing::frame(&serde_json::to_vec(&v).unwrap()))
+        .await
+        .unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -62,20 +65,31 @@ async fn passthrough_over_a_real_unix_server_hands_off_to_the_broker() {
         .state_from_peer(AuthSession::from_peer)
         .protocol("main", proto)
         .build();
-    let listener = TruenasRpcServer::<AuthSession>::bind_unix(&UnixConfig::new(&server_path)).unwrap();
+    let listener =
+        TruenasRpcServer::<AuthSession>::bind_unix(&UnixConfig::new(&server_path)).unwrap();
     let task = tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await });
 
     let got = tokio::time::timeout(Duration::from_secs(5), async {
         let mut client = UnixStream::connect(&server_path).await.unwrap();
         // Negotiate the protocol (framed reply). Request ids must be UUID strings.
         let id = "123e4567-e89b-12d3-a456-426614174000";
-        send(&mut client, json!({"jsonrpc":"2.0","method":"$/negotiate","id":id,"params":{"protocol":"main"}})).await;
-        framing::read_message(&mut client, framing::DEFAULT_LIMIT).await.unwrap().unwrap();
+        send(
+            &mut client,
+            json!({"jsonrpc":"2.0","method":"$/negotiate","id":id,"params":{"protocol":"main"}}),
+        )
+        .await;
+        framing::read_message(&mut client, framing::DEFAULT_LIMIT)
+            .await
+            .unwrap()
+            .unwrap();
         // Ask for passthrough: the server hands our fd to the broker and sends no reply itself.
-        send(&mut client, json!({
-            "jsonrpc":"2.0","method":"$/sessionSetup","id":id,
-            "params":{"mechanism":{"mechanism":"PASSTHROUGH"}},
-        }))
+        send(
+            &mut client,
+            json!({
+                "jsonrpc":"2.0","method":"$/sessionSetup","id":id,
+                "params":{"mechanism":{"mechanism":"PASSTHROUGH"}},
+            }),
+        )
         .await;
         // The broker now owns our fd (reader paused server-side) and writes a raw line — read it.
         let mut buf = vec![0u8; b"BROKER-AUTHED\n".len()];
@@ -89,5 +103,8 @@ async fn passthrough_over_a_real_unix_server_hands_off_to_the_broker() {
     let _ = std::fs::remove_file(&broker_path);
     let _ = std::fs::remove_file(&server_path);
 
-    assert_eq!(got.expect("timed out waiting for the broker"), b"BROKER-AUTHED\n");
+    assert_eq!(
+        got.expect("timed out waiting for the broker"),
+        b"BROKER-AUTHED\n"
+    );
 }

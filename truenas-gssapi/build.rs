@@ -12,7 +12,10 @@ fn main() {
     }
 
     // Fallback: ask krb5-config for the install prefix to find the lib dir, then link gssapi_krb5.
-    if let Ok(out) = std::process::Command::new("krb5-config").arg("--prefix").output() {
+    if let Ok(out) = std::process::Command::new("krb5-config")
+        .arg("--prefix")
+        .output()
+    {
         if out.status.success() {
             let prefix = String::from_utf8_lossy(&out.stdout);
             println!("cargo:rustc-link-search=native={}/lib", prefix.trim());

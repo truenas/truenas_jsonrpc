@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{connect_async, WebSocketStream};
-use truenas_rpc::{JsonRpcError, RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+use truenas_rpc::{JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RpcMethod};
 use truenas_rpc_server::TruenasRpcServer;
 
 const UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
@@ -41,7 +41,9 @@ fn server() -> TruenasRpcServer<()> {
 }
 
 async fn send_json<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S>, v: &Value) {
-    ws.send(Message::Text(serde_json::to_string(v).unwrap())).await.unwrap();
+    ws.send(Message::Text(serde_json::to_string(v).unwrap()))
+        .await
+        .unwrap();
 }
 
 async fn recv_json<S: AsyncRead + AsyncWrite + Unpin>(ws: &mut WebSocketStream<S>) -> Value {
@@ -79,16 +81,23 @@ fn self_signed_pem() -> (Vec<u8>, Vec<u8>) {
     b.set_subject_name(&name).unwrap();
     b.set_issuer_name(&name).unwrap();
     b.set_pubkey(&key).unwrap();
-    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
-    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap())
+        .unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap())
+        .unwrap();
     b.sign(&key, MessageDigest::sha256()).unwrap();
-    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+    (
+        b.build().to_pem().unwrap(),
+        key.private_key_to_pem_pkcs8().unwrap(),
+    )
 }
 
 #[tokio::test]
 async fn websocket_round_trip() {
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_websocket_listener(listener).await })
@@ -96,12 +105,20 @@ async fn websocket_round_trip() {
 
     let (mut ws, _resp) = connect_async(format!("ws://{addr}")).await.unwrap();
 
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    )
+    .await;
     let neg = recv_json(&mut ws).await;
     assert_eq!(neg["result"]["protocol"], "main");
     assert_eq!(neg["result"]["server"], "ws-server");
 
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}}),
+    )
+    .await;
     let add = recv_json(&mut ws).await;
     assert_eq!(add["result"]["sum"], 42);
     assert_eq!(add["id"], UUID);
@@ -122,17 +139,30 @@ async fn websocket_over_unix_round_trip() {
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     let task = {
         let srv = srv.clone();
-        tokio::spawn(async move { srv.serve_websocket_unix_listener(listener, UnixTrust::Local).await })
+        tokio::spawn(async move {
+            srv.serve_websocket_unix_listener(listener, UnixTrust::Local)
+                .await
+        })
     };
 
     let unix = tokio::net::UnixStream::connect(&path).await.unwrap();
-    let (mut ws, _resp) = tokio_tungstenite::client_async("ws://localhost/", unix).await.unwrap();
+    let (mut ws, _resp) = tokio_tungstenite::client_async("ws://localhost/", unix)
+        .await
+        .unwrap();
 
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    )
+    .await;
     let neg = recv_json(&mut ws).await;
     assert_eq!(neg["result"]["protocol"], "main");
 
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}}),
+    )
+    .await;
     let add = recv_json(&mut ws).await;
     assert_eq!(add["result"]["sum"], 42);
 
@@ -153,10 +183,13 @@ async fn websocket_unix_forwarded_origin_surfaces_the_real_client() {
 
     // $/sessionSetup grants FULL_ADMIN so this connection may call $/sessions.
     let proto = JsonRpcProtocol::<()>::builder("main", "1")
-        .session_setup(MethodDef::new("$/sessionSetup"), |_a: Empty, s: &Session<()>| {
-            s.set_roles(RoleMask::FULL_ADMIN);
-            Ok::<_, JsonRpcError>((SessionLifecycle::Established, json!({ "ok": true })))
-        })
+        .session_setup(
+            MethodDef::new("$/sessionSetup"),
+            |_a: Empty, s: &Session<()>| {
+                s.set_roles(RoleMask::FULL_ADMIN);
+                Ok::<_, JsonRpcError>((SessionLifecycle::Established, json!({ "ok": true })))
+            },
+        )
         .build();
     let srv = TruenasRpcServer::<()>::builder("fwd-server")
         .protocol("main", proto)
@@ -169,7 +202,8 @@ async fn websocket_unix_forwarded_origin_surfaces_the_real_client() {
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move {
-            srv.serve_websocket_unix_listener(listener, UnixTrust::Proxied).await
+            srv.serve_websocket_unix_listener(listener, UnixTrust::Proxied)
+                .await
         })
     };
 
@@ -190,12 +224,24 @@ async fn websocket_unix_forwarded_origin_surfaces_the_real_client() {
     let (mut ws, _resp) = tokio_tungstenite::client_async(req, unix).await.unwrap();
 
     let uuid = "123e4567-e89b-12d3-a456-426614174000";
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    )
+    .await;
     assert_eq!(recv_json(&mut ws).await["result"]["protocol"], "main");
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/sessionSetup","id":uuid,"params":{}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"$/sessionSetup","id":uuid,"params":{}}),
+    )
+    .await;
     assert_eq!(recv_json(&mut ws).await["result"]["ok"], true);
 
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/sessions","id":uuid})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"$/sessions","id":uuid}),
+    )
+    .await;
     let list = recv_json(&mut ws).await;
     let entry = &list["result"][0];
     assert_eq!(entry["origin"], "203.0.113.7:54321"); // the real client, not the unix peer
@@ -216,7 +262,9 @@ async fn wss_round_trip() {
     let (cert, key) = self_signed_pem();
     let tls = TlsConfig::from_pem(&cert, &key, TlsMode::Userspace).unwrap();
     let srv = server();
-    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0")
+        .await
+        .unwrap();
     let task = {
         let srv = srv.clone();
         tokio::spawn(async move { srv.serve_wss_listener(listener, tls).await })
@@ -226,16 +274,31 @@ async fn wss_round_trip() {
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_verify(SslVerifyMode::NONE);
     let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
-    let ssl = builder.build().configure().unwrap().into_ssl("localhost").unwrap();
+    let ssl = builder
+        .build()
+        .configure()
+        .unwrap()
+        .into_ssl("localhost")
+        .unwrap();
     let mut tls_stream = tokio_openssl::SslStream::new(ssl, tcp).unwrap();
     std::pin::Pin::new(&mut tls_stream).connect().await.unwrap();
-    let (mut ws, _resp) = tokio_tungstenite::client_async("wss://localhost/", tls_stream).await.unwrap();
+    let (mut ws, _resp) = tokio_tungstenite::client_async("wss://localhost/", tls_stream)
+        .await
+        .unwrap();
 
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    )
+    .await;
     let neg = recv_json(&mut ws).await;
     assert_eq!(neg["result"]["protocol"], "main");
 
-    send_json(&mut ws, &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}})).await;
+    send_json(
+        &mut ws,
+        &json!({"jsonrpc":"2.0","method":"math.add","id":UUID,"params":{"a":2,"b":40}}),
+    )
+    .await;
     let add = recv_json(&mut ws).await;
     assert_eq!(add["result"]["sum"], 42);
 

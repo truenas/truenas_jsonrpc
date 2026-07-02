@@ -79,9 +79,7 @@ impl<T: FileTransfer + ?Sized> FileTransferExt for T {
         while got < buf.len() {
             // SAFETY: `fd` is the connection's live, blocking socket; `buf[got..]` is valid.
             #[allow(unsafe_code)]
-            let n = unsafe {
-                libc::read(fd, buf[got..].as_mut_ptr().cast(), buf.len() - got)
-            };
+            let n = unsafe { libc::read(fd, buf[got..].as_mut_ptr().cast(), buf.len() - got) };
             if n < 0 {
                 return Err(std::io::Error::last_os_error());
             }
@@ -111,8 +109,13 @@ impl<T: FileTransfer + ?Sized> FileTransferExt for T {
             unsafe { libc::CMSG_SPACE((max_fds * std::mem::size_of::<RawFd>()) as libc::c_uint) };
         let mut cmsg_buf: Vec<u8> = Vec::with_capacity(space as usize);
 
-        let msg = recvmsg::<UnixAddr>(self.as_raw_fd(), &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())
-            .map_err(std::io::Error::from)?;
+        let msg = recvmsg::<UnixAddr>(
+            self.as_raw_fd(),
+            &mut iov,
+            Some(&mut cmsg_buf),
+            MsgFlags::empty(),
+        )
+        .map_err(std::io::Error::from)?;
 
         let mut out = Vec::new();
         for cmsg in msg.cmsgs().map_err(std::io::Error::from)? {
@@ -155,7 +158,7 @@ impl<T: FileTransfer + ?Sized> FileTransferExt for T {
         let in_fd = self.as_raw_fd();
         match splice_to_fd(in_fd, file_fd, count)? {
             Some(moved) => return Ok(moved), // zero-copy path
-            None => {}                        // unsupported here → buffered fallback
+            None => {}                       // unsupported here → buffered fallback
         }
         let mut buf = vec![0u8; 1 << 16];
         let mut got = 0;
@@ -202,18 +205,35 @@ fn splice_to_fd(src: RawFd, dst: RawFd, count: usize) -> std::io::Result<Option<
     result
 }
 
-fn splice_loop(src: RawFd, dst: RawFd, count: usize, r: RawFd, w: RawFd) -> std::io::Result<Option<usize>> {
+fn splice_loop(
+    src: RawFd,
+    dst: RawFd,
+    count: usize,
+    r: RawFd,
+    w: RawFd,
+) -> std::io::Result<Option<usize>> {
     let mut moved = 0;
     while moved < count {
         // SAFETY: src/w are live fds; null offsets mean "use the fds' own positions".
         #[allow(unsafe_code)]
         let n = unsafe {
-            libc::splice(src, std::ptr::null_mut(), w, std::ptr::null_mut(), count - moved, 0)
+            libc::splice(
+                src,
+                std::ptr::null_mut(),
+                w,
+                std::ptr::null_mut(),
+                count - moved,
+                0,
+            )
         };
         if n < 0 {
             // First call rejected (unsupported fds, or a kTLS control record → EINVAL) →
             // signal a buffered fallback; a failure mid-stream is a real I/O error.
-            return if moved == 0 { Ok(None) } else { Err(std::io::Error::last_os_error()) };
+            return if moved == 0 {
+                Ok(None)
+            } else {
+                Err(std::io::Error::last_os_error())
+            };
         }
         if n == 0 {
             break; // peer closed
@@ -223,7 +243,14 @@ fn splice_loop(src: RawFd, dst: RawFd, count: usize, r: RawFd, w: RawFd) -> std:
             // SAFETY: r/dst are live fds; drain the n buffered bytes pipe → dst.
             #[allow(unsafe_code)]
             let m = unsafe {
-                libc::splice(r, std::ptr::null_mut(), dst, std::ptr::null_mut(), (n - off) as usize, 0)
+                libc::splice(
+                    r,
+                    std::ptr::null_mut(),
+                    dst,
+                    std::ptr::null_mut(),
+                    (n - off) as usize,
+                    0,
+                )
             };
             if m < 0 {
                 return Err(std::io::Error::last_os_error());

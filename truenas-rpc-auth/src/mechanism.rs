@@ -21,6 +21,10 @@ pub trait Mechanism: Send + Sync {
     /// Advance the exchange. `payload` is the request's mechanism object (its `"mechanism"` tag
     /// already matched); `channel` is the immutable channel context; `progress` is the state this
     /// mechanism carried from the previous round (`None` on the first round).
-    fn step(&self, payload: &serde_json::Value, channel: &Channel, progress: Option<AuthProgress>)
-        -> Outcome;
+    fn step(
+        &self,
+        payload: &serde_json::Value,
+        channel: &Channel,
+        progress: Option<AuthProgress>,
+    ) -> Outcome;
 }

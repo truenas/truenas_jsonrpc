@@ -68,7 +68,10 @@ impl<'a, S: Send + Sync + 'static> WireHost<'a, S> {
     /// A registered protocol's wire-neutral op-table, for a binary wire-view to serve over its own
     /// framing. `None` if no protocol of that name is registered.
     pub fn service(self, protocol: &str) -> Option<Arc<Service<S>>> {
-        self.shared.protocols.get(protocol).map(|p| p.service().clone())
+        self.shared
+            .protocols
+            .get(protocol)
+            .map(|p| p.service().clone())
     }
 
     /// The sole registered protocol's op-table, if *exactly one* is registered (for a wire that does

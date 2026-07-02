@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use truenas_rpc::{
-    FileTransfer, JsonRpcError, RpcFdPassMethod, RpcFdTransferMethod, JsonRpcProtocol,
-    MethodDef, RequestCtx, TransferDirection,
+    FileTransfer, JsonRpcError, JsonRpcProtocol, MethodDef, RequestCtx, RpcFdPassMethod,
+    RpcFdTransferMethod, TransferDirection,
 };
 use truenas_rpc_server::{framing, FileTransferExt, JsonRpc, TruenasRpcServer, UnixConfig};
 
@@ -51,29 +51,36 @@ fn pattern_byte(i: usize) -> u8 {
 fn server() -> TruenasRpcServer<()> {
     let proto = JsonRpcProtocol::<()>::builder("conf", "1")
         // download: the server produces `n` bytes of the pattern over the fd.
-        .fd_transfer_method(RpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
-            MethodDef::new("x.download"),
-            TransferDirection::Download,
-            |a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DownloadReady { size: a.n }),
-            |a: Args, ft: &dyn FileTransfer| {
-                let buf: Vec<u8> = (0..a.n).map(pattern_byte).collect();
-                ft.write_all(&buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-                Ok(DownloadDone { sent: a.n })
-            },
-        ))
+        .fd_transfer_method(
+            RpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
+                MethodDef::new("x.download"),
+                TransferDirection::Download,
+                |a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DownloadReady { size: a.n }),
+                |a: Args, ft: &dyn FileTransfer| {
+                    let buf: Vec<u8> = (0..a.n).map(pattern_byte).collect();
+                    ft.write_all(&buf)
+                        .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                    Ok(DownloadDone { sent: a.n })
+                },
+            ),
+        )
         .unwrap()
         // upload: the server consumes `n` bytes from the fd and reports a checksum.
-        .fd_transfer_method(RpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
-            MethodDef::new("x.upload"),
-            TransferDirection::Upload,
-            |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
-            |a: Args, ft: &dyn FileTransfer| {
-                let mut buf = vec![0u8; a.n];
-                let got = ft.read_exact(&mut buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-                let sum: u64 = buf[..got].iter().map(|&b| u64::from(b)).sum();
-                Ok(UploadDone { received: got, sum })
-            },
-        ))
+        .fd_transfer_method(
+            RpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
+                MethodDef::new("x.upload"),
+                TransferDirection::Upload,
+                |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
+                |a: Args, ft: &dyn FileTransfer| {
+                    let mut buf = vec![0u8; a.n];
+                    let got = ft
+                        .read_exact(&mut buf)
+                        .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                    let sum: u64 = buf[..got].iter().map(|&b| u64::from(b)).sum();
+                    Ok(UploadDone { received: got, sum })
+                },
+            ),
+        )
         .unwrap()
         // fd-pass upload: the client passes an fd; the server reads the file it points to.
         .fd_pass_method(RpcFdPassMethod::<Args, UploadReady, FdDone, _, _>::new(
@@ -81,7 +88,9 @@ fn server() -> TruenasRpcServer<()> {
             TransferDirection::Upload,
             |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
             |_a: Args, ft: &dyn FileTransfer| {
-                let fds = ft.recv_fds(1).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                let fds = ft
+                    .recv_fds(1)
+                    .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
                 let passed = fds
                     .into_iter()
                     .next()
@@ -95,40 +104,55 @@ fn server() -> TruenasRpcServer<()> {
         ))
         .unwrap()
         // download via sendfile(2): stream `n` pattern bytes from a temp file (zero-copy).
-        .fd_transfer_method(RpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
-            MethodDef::new("x.download_sf"),
-            TransferDirection::Download,
-            |a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DownloadReady { size: a.n }),
-            |a: Args, ft: &dyn FileTransfer| {
-                let path = std::env::temp_dir().join(format!("tnrpc-sf-{}.bin", std::process::id()));
-                let data: Vec<u8> = (0..a.n).map(pattern_byte).collect();
-                std::fs::write(&path, &data).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-                let f = std::fs::File::open(&path).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-                let sent = ft.sendfile(f.as_raw_fd(), 0, a.n).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-                let _ = std::fs::remove_file(&path);
-                Ok(DownloadDone { sent })
-            },
-        ))
+        .fd_transfer_method(
+            RpcFdTransferMethod::<Args, DownloadReady, DownloadDone, _, _>::new(
+                MethodDef::new("x.download_sf"),
+                TransferDirection::Download,
+                |a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(DownloadReady { size: a.n }),
+                |a: Args, ft: &dyn FileTransfer| {
+                    let path =
+                        std::env::temp_dir().join(format!("tnrpc-sf-{}.bin", std::process::id()));
+                    let data: Vec<u8> = (0..a.n).map(pattern_byte).collect();
+                    std::fs::write(&path, &data)
+                        .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                    let f = std::fs::File::open(&path)
+                        .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                    let sent = ft
+                        .sendfile(f.as_raw_fd(), 0, a.n)
+                        .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                    let _ = std::fs::remove_file(&path);
+                    Ok(DownloadDone { sent })
+                },
+            ),
+        )
         .unwrap()
         // upload via recvfile(2): splice `n` bytes into a temp file, then checksum it.
-        .fd_transfer_method(RpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
-            MethodDef::new("x.upload_rf"),
-            TransferDirection::Upload,
-            |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
-            |a: Args, ft: &dyn FileTransfer| {
-                let path = std::env::temp_dir().join(format!("tnrpc-rf-{}.bin", std::process::id()));
-                let f = std::fs::File::create(&path).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-                let got = ft.recvfile(f.as_raw_fd(), a.n).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
-                drop(f);
-                let content = std::fs::read(&path).unwrap_or_default();
-                let _ = std::fs::remove_file(&path);
-                let sum: u64 = content.iter().map(|&b| u64::from(b)).sum();
-                Ok(UploadDone { received: got, sum })
-            },
-        ))
+        .fd_transfer_method(
+            RpcFdTransferMethod::<Args, UploadReady, UploadDone, _, _>::new(
+                MethodDef::new("x.upload_rf"),
+                TransferDirection::Upload,
+                |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(UploadReady {}),
+                |a: Args, ft: &dyn FileTransfer| {
+                    let path =
+                        std::env::temp_dir().join(format!("tnrpc-rf-{}.bin", std::process::id()));
+                    let f = std::fs::File::create(&path)
+                        .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                    let got = ft
+                        .recvfile(f.as_raw_fd(), a.n)
+                        .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                    drop(f);
+                    let content = std::fs::read(&path).unwrap_or_default();
+                    let _ = std::fs::remove_file(&path);
+                    let sum: u64 = content.iter().map(|&b| u64::from(b)).sum();
+                    Ok(UploadDone { received: got, sum })
+                },
+            ),
+        )
         .unwrap()
         .build();
-    TruenasRpcServer::<()>::builder("xfer-server").protocol("main", proto).build()
+    TruenasRpcServer::<()>::builder("xfer-server")
+        .protocol("main", proto)
+        .build()
 }
 
 /// Send one fd to `sock` via `SCM_RIGHTS` (the client side of fd passing).
@@ -145,21 +169,36 @@ fn unique(tag: &str) -> std::path::PathBuf {
 }
 
 async fn send_framed(c: &mut UnixStream, v: &Value) {
-    c.write_all(&framing::frame(&serde_json::to_vec(v).unwrap())).await.unwrap();
+    c.write_all(&framing::frame(&serde_json::to_vec(v).unwrap()))
+        .await
+        .unwrap();
 }
 
 async fn read_framed(c: &mut UnixStream) -> Value {
-    let msg = framing::read_message(c, framing::DEFAULT_LIMIT).await.unwrap().unwrap();
+    let msg = framing::read_message(c, framing::DEFAULT_LIMIT)
+        .await
+        .unwrap()
+        .unwrap();
     serde_json::from_slice(&msg).unwrap()
 }
 
 async fn negotiate(c: &mut UnixStream) {
-    send_framed(c, &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}})).await;
+    send_framed(
+        c,
+        &json!({"jsonrpc":"2.0","method":"$/negotiate","id":"neg","params":{"protocol":"main"}}),
+    )
+    .await;
     assert_eq!(read_framed(c).await["result"]["protocol"], "main");
 }
 
 /// Bind, spawn the accept loop, connect a client.
-async fn connect(tag: &str) -> (UnixStream, std::path::PathBuf, tokio::task::JoinHandle<std::io::Result<()>>) {
+async fn connect(
+    tag: &str,
+) -> (
+    UnixStream,
+    std::path::PathBuf,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+) {
     let path = unique(tag);
     let _ = std::fs::remove_file(&path);
     let srv = server();
@@ -177,7 +216,11 @@ async fn download_streams_then_final_response() {
     let (mut c, path, task) = connect("dl").await;
     negotiate(&mut c).await;
 
-    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.download","id":UUID,"params":{"n":N}})).await;
+    send_framed(
+        &mut c,
+        &json!({"jsonrpc":"2.0","method":"x.download","id":UUID,"params":{"n":N}}),
+    )
+    .await;
     let ready = read_framed(&mut c).await;
     assert_eq!(ready["method"], "$/transferReady");
     assert_eq!(ready["params"]["id"], UUID);
@@ -188,7 +231,10 @@ async fn download_streams_then_final_response() {
     send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"$/transferGo"})).await;
     let mut buf = vec![0u8; N];
     c.read_exact(&mut buf).await.unwrap();
-    assert!(buf.iter().enumerate().all(|(i, &b)| b == pattern_byte(i)), "stream pattern mismatch");
+    assert!(
+        buf.iter().enumerate().all(|(i, &b)| b == pattern_byte(i)),
+        "stream pattern mismatch"
+    );
 
     // Normal JSON-RPC resumes: the final response follows the raw stream.
     let fin = read_framed(&mut c).await;
@@ -204,7 +250,11 @@ async fn upload_consumes_stream_then_final_response() {
     let (mut c, path, task) = connect("ul").await;
     negotiate(&mut c).await;
 
-    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.upload","id":UUID,"params":{"n":N}})).await;
+    send_framed(
+        &mut c,
+        &json!({"jsonrpc":"2.0","method":"x.upload","id":UUID,"params":{"n":N}}),
+    )
+    .await;
     let ready = read_framed(&mut c).await;
     assert_eq!(ready["params"]["direction"], "upload");
 
@@ -227,7 +277,11 @@ async fn fd_pass_upload_passes_a_descriptor() {
     let (mut c, path, task) = connect("fd").await;
     negotiate(&mut c).await;
 
-    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.recvfd","id":UUID,"params":{"n":0}})).await;
+    send_framed(
+        &mut c,
+        &json!({"jsonrpc":"2.0","method":"x.recvfd","id":UUID,"params":{"n":0}}),
+    )
+    .await;
     let ready = read_framed(&mut c).await;
     assert_eq!(ready["params"]["direction"], "upload");
 
@@ -251,14 +305,21 @@ async fn download_via_sendfile() {
     let (mut c, path, task) = connect("dlsf").await;
     negotiate(&mut c).await;
 
-    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.download_sf","id":UUID,"params":{"n":N}})).await;
+    send_framed(
+        &mut c,
+        &json!({"jsonrpc":"2.0","method":"x.download_sf","id":UUID,"params":{"n":N}}),
+    )
+    .await;
     let ready = read_framed(&mut c).await;
     assert_eq!(ready["params"]["direction"], "download");
 
     send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"$/transferGo"})).await;
     let mut buf = vec![0u8; N];
     c.read_exact(&mut buf).await.unwrap();
-    assert!(buf.iter().enumerate().all(|(i, &b)| b == pattern_byte(i)), "sendfile stream mismatch");
+    assert!(
+        buf.iter().enumerate().all(|(i, &b)| b == pattern_byte(i)),
+        "sendfile stream mismatch"
+    );
 
     let fin = read_framed(&mut c).await;
     assert_eq!(fin["result"]["sent"], N);
@@ -272,7 +333,11 @@ async fn upload_via_recvfile() {
     let (mut c, path, task) = connect("ulrf").await;
     negotiate(&mut c).await;
 
-    send_framed(&mut c, &json!({"jsonrpc":"2.0","method":"x.upload_rf","id":UUID,"params":{"n":N}})).await;
+    send_framed(
+        &mut c,
+        &json!({"jsonrpc":"2.0","method":"x.upload_rf","id":UUID,"params":{"n":N}}),
+    )
+    .await;
     let ready = read_framed(&mut c).await;
     assert_eq!(ready["params"]["direction"], "upload");
 

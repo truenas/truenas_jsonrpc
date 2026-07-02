@@ -63,7 +63,12 @@ fn transfer_ready_ty(m: &MethodSpec) -> Result<String> {
 
 /// The `TransferDirection` variant name for a transfer method.
 fn transfer_direction(m: &MethodSpec) -> &'static str {
-    match m.transfer.as_ref().expect("transfer present (kind is Transfer)").direction {
+    match m
+        .transfer
+        .as_ref()
+        .expect("transfer present (kind is Transfer)")
+        .direction
+    {
         TransferKind::Download => "Download",
         TransferKind::Upload => "Upload",
     }
@@ -75,14 +80,20 @@ fn emit_handlers_trait(spec: &Spec) -> Result<String> {
         let params = ref_name_of(&m.params, "params")?;
         match kind_of(m) {
             Kind::Plain => {
-                let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
+                let result = ref_name_of(
+                    m.result.as_ref().ok_or_else(|| miss(m, "result"))?,
+                    "result",
+                )?;
                 methods.push_str(&format!(
                     "    /// Handler for `{}`.\n    fn {}(&self, request: {params}, cx: &truenas_rpc::RequestCtx<S>) -> Result<{result}, truenas_rpc::JsonRpcError>;\n",
                     wire_doc(spec, m), m.handler
                 ));
             }
             Kind::Async => {
-                let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
+                let result = ref_name_of(
+                    m.result.as_ref().ok_or_else(|| miss(m, "result"))?,
+                    "result",
+                )?;
                 // RPITIT (`-> impl Future + Send`, stable since 1.75) — no `async-trait` dep on the
                 // generated code. Implement it with `async fn {handler}(..)`. `cx` is by value (the
                 // future is awaited on the runtime, not borrowing the dispatch frame).
@@ -93,7 +104,9 @@ fn emit_handlers_trait(spec: &Spec) -> Result<String> {
             }
             Kind::Filterable => {
                 let entry = ref_name_of(
-                    m.entry.as_ref().expect("filterable entry present (guaranteed by validate)"),
+                    m.entry
+                        .as_ref()
+                        .expect("filterable entry present (guaranteed by validate)"),
                     "entry",
                 )?;
                 methods.push_str(&format!(
@@ -104,7 +117,10 @@ fn emit_handlers_trait(spec: &Spec) -> Result<String> {
             Kind::Transfer => {
                 // Two callbacks: `negotiate` (returns the `$/transferReady` interim) and the
                 // `transfer` itself (lent the raw fd → the final result).
-                let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
+                let result = ref_name_of(
+                    m.result.as_ref().ok_or_else(|| miss(m, "result"))?,
+                    "result",
+                )?;
                 let ready = transfer_ready_ty(m)?;
                 let doc = wire_doc(spec, m);
                 let handler = &m.handler;
@@ -148,7 +164,9 @@ fn emit_register(spec: &Spec) -> Result<String> {
                 uses_handlers = true;
                 let params = ref_name_of(&m.params, "params")?;
                 let entry = ref_name_of(
-                    m.entry.as_ref().expect("filterable entry present (guaranteed by validate)"),
+                    m.entry
+                        .as_ref()
+                        .expect("filterable entry present (guaranteed by validate)"),
                     "entry",
                 )?;
                 body.push_str(&format!(
@@ -158,18 +176,26 @@ fn emit_register(spec: &Spec) -> Result<String> {
             }
             Kind::Subscription => {
                 let params = ref_name_of(&m.params, "params")?;
-                let notifies = ref_name_of(m.notifies.as_ref().ok_or_else(|| miss(m, "notifies"))?, "notifies")?;
+                let notifies = ref_name_of(
+                    m.notifies.as_ref().ok_or_else(|| miss(m, "notifies"))?,
+                    "notifies",
+                )?;
                 body.push_str(&format!(
                     "    let builder = builder.subscription(truenas_rpc::SubscriptionDef::<{params}, {notifies}>::new({def}))?;\n"
                 ));
             }
             Kind::Python => {
-                body.push_str(&format!("    let builder = builder.python_method({def})?;\n"));
+                body.push_str(&format!(
+                    "    let builder = builder.python_method({def})?;\n"
+                ));
             }
             Kind::Transfer => {
                 uses_handlers = true;
                 let params = ref_name_of(&m.params, "params")?;
-                let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
+                let result = ref_name_of(
+                    m.result.as_ref().ok_or_else(|| miss(m, "result"))?,
+                    "result",
+                )?;
                 let ready = transfer_ready_ty(m)?;
                 let dir = transfer_direction(m);
                 let handler = &m.handler;
@@ -179,7 +205,11 @@ fn emit_register(spec: &Spec) -> Result<String> {
             }
         }
     }
-    let prelude = if uses_handlers { "" } else { "    let _ = &handlers;\n" };
+    let prelude = if uses_handlers {
+        ""
+    } else {
+        "    let _ = &handlers;\n"
+    };
     // On by default: install the spec-configured audit sink (empty identity — override via
     // `make_audit_sink`). Emitted only when auditing is enabled (so a disabled spec needs no
     // `truenas-audit` dependency).
@@ -196,7 +226,9 @@ fn emit_register(spec: &Spec) -> Result<String> {
 /// Emit the `make_audit_sink` helper — only when auditing is enabled. It carries the spec's
 /// configured `service` + `queueBound`; the consumer supplies the identity extractor.
 fn emit_audit(spec: &Spec) -> String {
-    let Some(audit) = spec.resolved_audit() else { return String::new() };
+    let Some(audit) = spec.resolved_audit() else {
+        return String::new();
+    };
     let queue = match audit.queue_bound {
         Some(n) => format!(".queue_bound({n}usize)"),
         None => String::new(),
@@ -303,7 +335,12 @@ fn json_value_bytes(node: &SchemaNode, spec: &Spec, depth: usize) -> usize {
         Some("number") => 24,
         Some("boolean") => 5,
         Some("string") => 24, // "<short string>"; content variable
-        Some("array") => 2 + node.items.as_ref().map_or(16, |it| json_value_bytes(it, spec, depth + 1)),
+        Some("array") => {
+            2 + node
+                .items
+                .as_ref()
+                .map_or(16, |it| json_value_bytes(it, spec, depth + 1))
+        }
         Some("object") => {
             2 + node
                 .properties
@@ -326,21 +363,36 @@ fn reply_capacity(spec: &Spec, m: &MethodSpec) -> Option<usize> {
 /// The wire-names of the secret properties in a method's params `$def` (fed to
 /// `MethodDef::secret_fields` for the core's name-based audit redaction).
 fn secret_param_fields(spec: &Spec, m: &MethodSpec) -> Vec<String> {
-    let Some(reference) = &m.params.reference else { return Vec::new() };
-    let Ok(name) = ref_name(reference) else { return Vec::new() };
-    let Some(def) = spec.defs.get(&name) else { return Vec::new() };
-    def.properties.iter().filter(|(_, p)| p.secret).map(|(k, _)| k.to_string()).collect()
+    let Some(reference) = &m.params.reference else {
+        return Vec::new();
+    };
+    let Ok(name) = ref_name(reference) else {
+        return Vec::new();
+    };
+    let Some(def) = spec.defs.get(&name) else {
+        return Vec::new();
+    };
+    def.properties
+        .iter()
+        .filter(|(_, p)| p.secret)
+        .map(|(k, _)| k.to_string())
+        .collect()
 }
 
 fn ref_name_of(node: &SchemaNode, slot: &str) -> Result<String> {
     match &node.reference {
         Some(r) => ref_name(r),
-        None => Err(CodegenError::new(format!("{slot} must be a $ref to a $def"))),
+        None => Err(CodegenError::new(format!(
+            "{slot} must be a $ref to a $def"
+        ))),
     }
 }
 
 fn miss(m: &MethodSpec, slot: &str) -> CodegenError {
-    CodegenError::new(format!("method with handler {:?} is missing '{slot}'", m.handler))
+    CodegenError::new(format!(
+        "method with handler {:?} is missing '{slot}'",
+        m.handler
+    ))
 }
 
 fn wire_doc(_spec: &Spec, m: &MethodSpec) -> String {
@@ -368,15 +420,40 @@ mod tests {
     fn reply_capacity_size_walker_guards_and_defaults() {
         let s = spec(serde_json::json!({ "A": { "$ref": "#/$defs/A" } }));
 
-        let self_ref = SchemaNode { reference: Some("#/$defs/A".to_string()), ..Default::default() };
-        assert_eq!(json_value_bytes(&self_ref, &s, 0), 16, "recursion guard (depth > 8)");
+        let self_ref = SchemaNode {
+            reference: Some("#/$defs/A".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            json_value_bytes(&self_ref, &s, 0),
+            16,
+            "recursion guard (depth > 8)"
+        );
 
-        let dangling = SchemaNode { reference: Some("#/$defs/Missing".to_string()), ..Default::default() };
-        assert_eq!(json_value_bytes(&dangling, &s, 0), 16, "unresolved $ref (name resolves, def absent)");
+        let dangling = SchemaNode {
+            reference: Some("#/$defs/Missing".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            json_value_bytes(&dangling, &s, 0),
+            16,
+            "unresolved $ref (name resolves, def absent)"
+        );
 
-        let malformed = SchemaNode { reference: Some("#/components/Foo".to_string()), ..Default::default() };
-        assert_eq!(json_value_bytes(&malformed, &s, 0), 16, "malformed $ref (ref_name errors)");
+        let malformed = SchemaNode {
+            reference: Some("#/components/Foo".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(
+            json_value_bytes(&malformed, &s, 0),
+            16,
+            "malformed $ref (ref_name errors)"
+        );
 
-        assert_eq!(json_value_bytes(&SchemaNode::default(), &s, 0), 16, "unknown / typeless node");
+        assert_eq!(
+            json_value_bytes(&SchemaNode::default(), &s, 0),
+            16,
+            "unknown / typeless node"
+        );
     }
 }

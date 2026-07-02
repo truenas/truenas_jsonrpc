@@ -87,7 +87,17 @@ impl<S: Send + Sync + 'static> ProtocolEngine for JsonRpcEngine<S> {
     fn serve<'a>(&'a self, ctx: ConnContext) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
         // The JSON-RPC loop reads its size limit from the captured substrate, so `ctx.limit` is
         // unused on this path; every other engine draws the limit from the context instead.
-        let ConnContext { stream, transfer_fd, peer, limit: _ } = ctx;
-        Box::pin(connection::serve(stream, transfer_fd, peer, self.shared.clone()))
+        let ConnContext {
+            stream,
+            transfer_fd,
+            peer,
+            limit: _,
+        } = ctx;
+        Box::pin(connection::serve(
+            stream,
+            transfer_fd,
+            peer,
+            self.shared.clone(),
+        ))
     }
 }

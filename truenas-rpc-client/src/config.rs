@@ -70,12 +70,19 @@ impl Endpoint {
         server_name: impl Into<String>,
         tls: crate::tls::ClientTls,
     ) -> Self {
-        Endpoint::Tls { addr: addr.into(), server_name: server_name.into(), tls }
+        Endpoint::Tls {
+            addr: addr.into(),
+            server_name: server_name.into(),
+            tls,
+        }
     }
     /// A `ws://` endpoint at `addr` (`host:port`) with request `path` (e.g. `/`).
     #[cfg(feature = "websocket")]
     pub fn ws(addr: impl Into<String>, path: impl Into<String>) -> Self {
-        Endpoint::Ws { addr: addr.into(), path: path.into() }
+        Endpoint::Ws {
+            addr: addr.into(),
+            path: path.into(),
+        }
     }
     /// A WebSocket endpoint over the AF_UNIX socket at `path` (WebSocket-over-unix).
     #[cfg(feature = "websocket")]
@@ -90,7 +97,12 @@ impl Endpoint {
         path: impl Into<String>,
         tls: crate::tls::ClientTls,
     ) -> Self {
-        Endpoint::Wss { addr: addr.into(), server_name: server_name.into(), path: path.into(), tls }
+        Endpoint::Wss {
+            addr: addr.into(),
+            server_name: server_name.into(),
+            path: path.into(),
+            tls,
+        }
     }
 }
 
@@ -113,6 +125,9 @@ pub struct ClientConfig {
 
 impl Default for ClientConfig {
     fn default() -> Self {
-        ClientConfig { tcp_keepalive: Some(Duration::from_secs(30)), limit: 4 * 1024 * 1024 }
+        ClientConfig {
+            tcp_keepalive: Some(Duration::from_secs(30)),
+            limit: 4 * 1024 * 1024,
+        }
     }
 }

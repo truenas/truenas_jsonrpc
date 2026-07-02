@@ -39,7 +39,9 @@ fn proto() -> JsonRpcProtocol<()> {
             TransferDirection::Upload,
             |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(Ready {}),
             |_a: Args, ft: &dyn FileTransfer| {
-                let fds = ft.recv_fds(1).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+                let fds = ft
+                    .recv_fds(1)
+                    .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
                 let fd = fds
                     .into_iter()
                     .next()
@@ -58,7 +60,8 @@ fn proto() -> JsonRpcProtocol<()> {
             TransferDirection::Download,
             |_a: &Args, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(Ready {}),
             |_a: Args, ft: &dyn FileTransfer| {
-                let path = std::env::temp_dir().join(format!("tnrpc-fd-srv-{}.dat", std::process::id()));
+                let path =
+                    std::env::temp_dir().join(format!("tnrpc-fd-srv-{}.dat", std::process::id()));
                 std::fs::write(&path, b"server-sent-fd")
                     .map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
                 let file = std::fs::File::open(&path)
@@ -76,7 +79,9 @@ fn proto() -> JsonRpcProtocol<()> {
 async fn connect(tag: &str) -> (std::path::PathBuf, JsonRpcClient) {
     let path = std::env::temp_dir().join(format!("tnrpc-fdpass-{tag}-{}.sock", std::process::id()));
     let _ = std::fs::remove_file(&path);
-    let srv = TruenasRpcServer::<()>::builder("fd-server").protocol("fd", proto()).build();
+    let srv = TruenasRpcServer::<()>::builder("fd-server")
+        .protocol("fd", proto())
+        .build();
     let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
     tokio::spawn(async move { srv.serve_unix_listener(listener, JsonRpc).await });
     let (client, _neg, _notifs) =
@@ -97,10 +102,17 @@ async fn send_fds_passes_a_descriptor_to_the_server() {
 
     let params = serde_json::to_vec(&Args { n: 0 }).unwrap();
     let reply = client
-        .send_fds(&JsonRpcMethod::Name("x.recvfd".into()), &params, &[file.as_raw_fd()])
+        .send_fds(
+            &JsonRpcMethod::Name("x.recvfd".into()),
+            &params,
+            &[file.as_raw_fd()],
+        )
         .await
         .unwrap();
-    assert_eq!(serde_json::from_slice::<RecvDone>(&reply).unwrap().content, "client-sent-fd");
+    assert_eq!(
+        serde_json::from_slice::<RecvDone>(&reply).unwrap().content,
+        "client-sent-fd"
+    );
 
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&path);
@@ -111,14 +123,18 @@ async fn recv_fds_receives_a_descriptor_from_the_server() {
     let (path, client) = connect("recv").await;
 
     let params = serde_json::to_vec(&Args { n: 0 }).unwrap();
-    let (reply, fds) =
-        client.recv_fds(&JsonRpcMethod::Name("x.sendfd".into()), &params, 1).await.unwrap();
+    let (reply, fds) = client
+        .recv_fds(&JsonRpcMethod::Name("x.sendfd".into()), &params, 1)
+        .await
+        .unwrap();
     assert!(serde_json::from_slice::<SendDone>(&reply).unwrap().sent);
     assert_eq!(fds.len(), 1);
 
     // Read the received descriptor → the content the server wrote.
     let mut content = String::new();
-    std::fs::File::from(fds.into_iter().next().unwrap()).read_to_string(&mut content).unwrap();
+    std::fs::File::from(fds.into_iter().next().unwrap())
+        .read_to_string(&mut content)
+        .unwrap();
     assert_eq!(content, "server-sent-fd");
 
     let _ = std::fs::remove_file(&path);

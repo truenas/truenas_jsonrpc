@@ -30,10 +30,10 @@ use futures_util::StreamExt;
 use serde::Serialize;
 use serde_json::value::RawValue;
 use serde_json::{json, Value};
+use tokio::io::AsyncRead;
 use tokio::io::{split, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::Mutex;
-use tokio::io::AsyncRead;
 use truenas_rpc::{
     Dispatched, ErrorCode, JsonRpcProtocol, Outbound, Session, SessionOrigin, SetupTakeover,
     Transfer, TransferDirection,
@@ -165,7 +165,10 @@ async fn write_all_vectored<W: AsyncWrite + Unpin>(
     bodies: &[Vec<u8>],
 ) -> std::io::Result<()> {
     // The length prefixes need stable storage for the `IoSlice`s to borrow across the writes.
-    let headers: Vec<[u8; 4]> = bodies.iter().map(|b| (b.len() as u32).to_be_bytes()).collect();
+    let headers: Vec<[u8; 4]> = bodies
+        .iter()
+        .map(|b| (b.len() as u32).to_be_bytes())
+        .collect();
     let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(bodies.len() * 2);
     for (header, body) in headers.iter().zip(bodies) {
         slices.push(IoSlice::new(header));
@@ -223,7 +226,9 @@ pub(crate) async fn serve<S, IO>(
                     Some((proto, session)) => {
                         let proto = proto.clone();
                         let session = session.clone();
-                        inflight.push(Box::pin(async move { proto.dispatch(&msg, &session).await }));
+                        inflight.push(Box::pin(
+                            async move { proto.dispatch(&msg, &session).await },
+                        ));
                     }
                     // AWAIT_NEGOTIATE: bind a protocol (or reply with an error and keep waiting).
                     None => match handle_negotiate(&msg, &peer, &shared, &outbound) {
@@ -242,7 +247,10 @@ pub(crate) async fn serve<S, IO>(
                         None,
                         ErrorCode::InvalidRequest.code(),
                         "Message too large",
-                        Some(json!(format!("frame of {len} bytes exceeds limit of {}", shared.limit))),
+                        Some(json!(format!(
+                            "frame of {len} bytes exceeds limit of {}",
+                            shared.limit
+                        ))),
                     ));
                     break 'conn;
                 }
@@ -370,9 +378,12 @@ async fn run_transfer<IO>(
     let ft = ConnFileTransfer { fd: raw_fd };
     let final_bytes = match tokio::task::spawn_blocking(move || t.complete(&ft)).await {
         Ok(bytes) => bytes,
-        Err(_panicked) => {
-            error_envelope(Some(&rid), ErrorCode::InternalError.code(), "Internal error", None)
-        }
+        Err(_panicked) => error_envelope(
+            Some(&rid),
+            ErrorCode::InternalError.code(),
+            "Internal error",
+            None,
+        ),
     };
     let _ = set_blocking(raw_fd, false);
 
@@ -457,7 +468,12 @@ where
     S: Send + Sync + 'static,
 {
     let env: Envelope = serde_json::from_slice(msg).map_err(|e| {
-        error_envelope(None, ErrorCode::InvalidJson.code(), "Parse error", Some(json!(e.to_string())))
+        error_envelope(
+            None,
+            ErrorCode::InvalidJson.code(),
+            "Parse error",
+            Some(json!(e.to_string())),
+        )
     })?;
     let rid = env.id.as_ref().and_then(Value::as_str);
 
@@ -479,7 +495,12 @@ where
     }
     let params: NegotiateParams = match env.params {
         Some(raw) => serde_json::from_str(raw.get()).map_err(|e| {
-            error_envelope(rid, ErrorCode::InvalidParams.code(), "Invalid params", Some(json!(e.to_string())))
+            error_envelope(
+                rid,
+                ErrorCode::InvalidParams.code(),
+                "Invalid params",
+                Some(json!(e.to_string())),
+            )
         })?,
         None => {
             return Err(error_envelope(
@@ -542,7 +563,12 @@ pub(crate) fn success_envelope<T: Serialize>(id: Option<&str>, result: &T) -> Ve
         .expect("encoding a success reply cannot fail")
 }
 
-pub(crate) fn error_envelope(id: Option<&str>, code: i32, message: &str, data: Option<Value>) -> Vec<u8> {
+pub(crate) fn error_envelope(
+    id: Option<&str>,
+    code: i32,
+    message: &str,
+    data: Option<Value>,
+) -> Vec<u8> {
     let mut error = json!({ "code": code, "message": message });
     if let Some(data) = data {
         error["data"] = data;
@@ -610,7 +636,10 @@ mod tests {
         let bodies = vec![b"hello".to_vec(), Vec::new(), b"world!".to_vec()];
         // chunk=3 forces repeated short vectored writes, exercising the advance_slices loop and an
         // empty-body frame.
-        let mut w = ChunkWriter { out: Vec::new(), chunk: 3 };
+        let mut w = ChunkWriter {
+            out: Vec::new(),
+            chunk: 3,
+        };
         write_all_vectored(&mut w, &bodies).await.unwrap();
         // Each body framed `[len4][body]`, concatenated in order — identical to the coalescing path.
         let mut expected = Vec::new();
@@ -679,7 +708,10 @@ mod tests {
     /// burst carry the large burst's bytes, which this catches.
     async fn write_loop_burst_reuse(vectored: bool) {
         let out = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (_read, w) = split(Recorder { out: out.clone(), vectored });
+        let (_read, w) = split(Recorder {
+            out: out.clone(),
+            vectored,
+        });
         let writer = Arc::new(Mutex::new(w));
         let (tx, rx) = unbounded_channel::<Vec<u8>>();
 
@@ -700,7 +732,11 @@ mod tests {
             spun += 1;
             assert!(spun < 100_000, "burst 1 never flushed");
         }
-        assert_eq!(out.lock().unwrap().len(), big_len, "burst 1 should be exactly its framed length");
+        assert_eq!(
+            out.lock().unwrap().len(),
+            big_len,
+            "burst 1 should be exactly its framed length"
+        );
 
         // Burst 2: a single 3-byte payload. A stale tail of burst 1 would surface here.
         let small = vec![0xABu8; 3];

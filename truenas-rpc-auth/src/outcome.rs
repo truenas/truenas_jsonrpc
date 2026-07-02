@@ -58,7 +58,12 @@ impl Outcome {
     /// Authenticated as `identity`, authorized as `principal` (the uid/account the stack resolves
     /// roles from), with no client-facing info or mechanism extras.
     pub fn authenticated(identity: Identity, principal: Principal) -> Outcome {
-        Outcome::Authenticated { identity, principal, user_info: None, extra: None }
+        Outcome::Authenticated {
+            identity,
+            principal,
+            user_info: None,
+            extra: None,
+        }
     }
 }
 
@@ -102,6 +107,9 @@ pub struct AuthProgress {
 impl AuthProgress {
     /// Carry `state` for the mechanism identified by `tag`.
     pub fn new(tag: &'static str, state: impl Any + Send + Sync) -> Self {
-        Self { tag, state: Box::new(state) }
+        Self {
+            tag,
+            state: Box::new(state),
+        }
     }
 }

@@ -37,10 +37,16 @@ fn serve(tag: &str) -> std::path::PathBuf {
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let serve_path = path.clone();
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(async move {
-            let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&serve_path)).unwrap();
-            let srv = TruenasRpcServer::<()>::builder("demo-server").protocol("demo", proto()).build();
+            let listener =
+                TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&serve_path)).unwrap();
+            let srv = TruenasRpcServer::<()>::builder("demo-server")
+                .protocol("demo", proto())
+                .build();
             ready_tx.send(()).unwrap();
             let _ = srv.serve_unix_listener(listener, JsonRpc).await;
         });
@@ -62,7 +68,11 @@ fn connect_blocking_then_raw_call() {
         let params = serde_json::to_vec(&AddArgs { a: 20, b: 22 }).unwrap();
         let reply = py
             .allow_threads(|| {
-                runtime().block_on(CallEngine::call(&client, MethodKey::Name("math.add"), &params))
+                runtime().block_on(CallEngine::call(
+                    &client,
+                    MethodKey::Name("math.add"),
+                    &params,
+                ))
             })
             .unwrap();
         assert_eq!(serde_json::from_slice::<AddResult>(&reply).unwrap().sum, 42);
@@ -87,7 +97,9 @@ fn connect_failure_raises_rpc_error() {
     pyo3::prepare_freethreaded_python();
     Python::with_gil(|py| {
         let endpoint = PyEndpoint::unix("/nonexistent/truenas-rpc-cpyo3.sock".to_string());
-        let err = connect_blocking(py, endpoint.inner(), "demo", None).err().unwrap();
+        let err = connect_blocking(py, endpoint.inner(), "demo", None)
+            .err()
+            .unwrap();
         assert!(err.is_instance_of::<RpcError>(py));
     });
 }

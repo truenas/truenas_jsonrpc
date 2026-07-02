@@ -14,12 +14,18 @@ use super::context::{BrokerContext, BrokerVerdict};
 const HEADER: usize = 4;
 
 fn frame_len(body: &[u8]) -> io::Result<[u8; HEADER]> {
-    u32::try_from(body.len()).map(u32::to_be_bytes).map_err(|_| io::Error::other("broker frame too large"))
+    u32::try_from(body.len())
+        .map(u32::to_be_bytes)
+        .map_err(|_| io::Error::other("broker frame too large"))
 }
 
 /// Forwarder (server) side: send the auth request — the client connection's `client_fd`
 /// (`SCM_RIGHTS`) plus the serialized `ctx` — then read back the broker's verdict. Blocking.
-pub(crate) fn request(broker: &UnixStream, client_fd: RawFd, ctx: &BrokerContext) -> io::Result<BrokerVerdict> {
+pub(crate) fn request(
+    broker: &UnixStream,
+    client_fd: RawFd,
+    ctx: &BrokerContext,
+) -> io::Result<BrokerVerdict> {
     let body = serde_json::to_vec(ctx)?;
     // The fd rides the 4-byte length prefix (one recvmsg captures both); the body then streams.
     scm::send_with_fd(broker, &frame_len(&body)?, client_fd)?;

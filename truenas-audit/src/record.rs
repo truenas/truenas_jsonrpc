@@ -69,20 +69,36 @@ pub(crate) fn build_record(
     encode_nv(&mut buf, "sess", sess);
     encode_nv(&mut buf, "svc", service);
     encode_nv(&mut buf, "aid", aid);
-    encode_nv(&mut buf, "event", if is_control { "CONTROL_MESSAGE" } else { "METHOD_CALL" });
+    encode_nv(
+        &mut buf,
+        "event",
+        if is_control {
+            "CONTROL_MESSAGE"
+        } else {
+            "METHOD_CALL"
+        },
+    );
 
     // Flattened svc_data (service/credential context).
     encode_nv(&mut buf, "svc_protocol", "JSONRPC");
     push_opt(&mut buf, "svc_origin", principal.origin.as_deref());
     push_opt(&mut buf, "svc_cred", principal.cred_type.as_deref());
     push_opt(&mut buf, "svc_cred_username", principal.user.as_deref());
-    push_opt(&mut buf, "svc_cred_api_key_id", principal.api_key_id.as_deref());
+    push_opt(
+        &mut buf,
+        "svc_cred_api_key_id",
+        principal.api_key_id.as_deref(),
+    );
 
     // Flattened event_data: the description, then one field per (already-redacted) param.
     push_opt(&mut buf, "event_desc", audit_message);
     if let Value::Object(map) = &request.params {
         for (k, v) in map {
-            encode_nv(&mut buf, &format!("event_data_{}", sanitize_key(k)), &value_to_field(v));
+            encode_nv(
+                &mut buf,
+                &format!("event_data_{}", sanitize_key(k)),
+                &value_to_field(v),
+            );
         }
     }
     // The error, flattened into native fields (code + message + optional data) — not a JSON blob.
@@ -100,7 +116,10 @@ pub(crate) fn build_record(
 /// A synthetic record reporting `n` records dropped because the audit queue overflowed (the kernel
 /// audit subsystem has the same "lost" concept).
 pub(crate) fn lost_record(service: &str, n: u64) -> (u16, String) {
-    (AUDIT_TRUSTED_APP, format!("op={service}:audit_lost res=failed lost=\"{n}\""))
+    (
+        AUDIT_TRUSTED_APP,
+        format!("op={service}:audit_lost res=failed lost=\"{n}\""),
+    )
 }
 
 /// Map an event to its `(AUDIT_* type, op-verb, is_control)`, mirroring linux-PAM's switch.
@@ -140,8 +159,16 @@ fn encode_nv(buf: &mut String, key: &str, value: &str) {
     buf.push('=');
     if needs_encoding(value) {
         for b in value.bytes() {
-            buf.push(char::from_digit((b >> 4) as u32, 16).unwrap().to_ascii_uppercase());
-            buf.push(char::from_digit((b & 0x0f) as u32, 16).unwrap().to_ascii_uppercase());
+            buf.push(
+                char::from_digit((b >> 4) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
+            buf.push(
+                char::from_digit((b & 0x0f) as u32, 16)
+                    .unwrap()
+                    .to_ascii_uppercase(),
+            );
         }
     } else {
         buf.push('"');
@@ -159,7 +186,15 @@ fn needs_encoding(value: &str) -> bool {
 /// Keep a param name usable as an audit field name (no spaces/`=`): map anything outside
 /// `[A-Za-z0-9_]` to `_`.
 fn sanitize_key(key: &str) -> String {
-    key.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '_' }).collect()
+    key.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -169,7 +204,12 @@ mod tests {
     use truenas_rpc::JsonRpcError;
 
     fn req(method: &str, params: Value) -> RequestInfo {
-        RequestInfo { method: method.into(), id: Some("rid-1".into()), params, roles: vec![] }
+        RequestInfo {
+            method: method.into(),
+            id: Some("rid-1".into()),
+            params,
+            roles: vec![],
+        }
     }
 
     #[test]
@@ -203,10 +243,14 @@ mod tests {
             Some("query pools"),
         );
         assert_eq!(ty, AUDIT_TRUSTED_APP);
-        assert!(msg.starts_with("op=truenas-api:method acct=\"admin\" addr=\"10.0.0.5:5234\" res=success"));
+        assert!(msg.starts_with(
+            "op=truenas-api:method acct=\"admin\" addr=\"10.0.0.5:5234\" res=success"
+        ));
         assert!(msg.contains(" method=\"pool.query\""));
         assert!(msg.contains(" event=\"METHOD_CALL\""));
-        assert!(msg.contains(" svc_cred=\"API_KEY\" svc_cred_username=\"admin\" svc_cred_api_key_id=\"2\""));
+        assert!(msg.contains(
+            " svc_cred=\"API_KEY\" svc_cred_username=\"admin\" svc_cred_api_key_id=\"2\""
+        ));
         // "query pools" has a space, so it hex-encodes (libaudit behavior) rather than quoting.
         assert!(msg.contains(" event_desc=") && !msg.contains("event_desc=\""));
         assert!(msg.contains(" event_data_pool=\"tank\""));

@@ -20,22 +20,35 @@ fn sample(username: &str) -> ScramRecord {
 /// A fresh, isolated sub-keyring for a test (under the per-test thread keyring), or `None` to skip
 /// if the keyring syscalls are unavailable here.
 fn scratch() -> Option<KeyRing> {
-    KeyRing::special(SpecialKeyring::Thread).add_keyring("tnk_scratch").ok()
+    KeyRing::special(SpecialKeyring::Thread)
+        .add_keyring("tnk_scratch")
+        .ok()
 }
 
 // --- config schema validation (no keyring needed) -----------------------------------------------
 
 #[test]
 fn persistent_requires_an_identifier() {
-    assert!(KeyringConfig::from_json(r#"{ "keyring_type": "persistent", "keyring_identifier": 0 }"#).is_ok());
+    assert!(KeyringConfig::from_json(
+        r#"{ "keyring_type": "persistent", "keyring_identifier": 0 }"#
+    )
+    .is_ok());
     let err = KeyringConfig::from_json(r#"{ "keyring_type": "persistent" }"#).unwrap_err();
-    assert!(err.to_string().contains("requires keyring_identifier"), "{err}");
+    assert!(
+        err.to_string().contains("requires keyring_identifier"),
+        "{err}"
+    );
 }
 
 #[test]
 fn identifier_is_rejected_for_non_persistent() {
-    let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "keyring_identifier": 0 }"#).unwrap_err();
-    assert!(err.to_string().contains("only valid with keyring_type \"persistent\""), "{err}");
+    let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "keyring_identifier": 0 }"#)
+        .unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("only valid with keyring_type \"persistent\""),
+        "{err}"
+    );
 }
 
 #[test]
@@ -47,21 +60,36 @@ fn unknown_type_and_unknown_field_are_schema_errors() {
 
 #[test]
 fn subkeyring_names_are_validated() {
-    assert!(KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["extra"] }"#).is_ok());
-    let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["server_keys"] }"#).unwrap_err();
+    assert!(
+        KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["extra"] }"#)
+            .is_ok()
+    );
+    let err = KeyringConfig::from_json(
+        r#"{ "keyring_type": "session", "subkeyrings": ["server_keys"] }"#,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("built-in"), "{err}");
-    let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["server_roles"] }"#).unwrap_err();
+    let err = KeyringConfig::from_json(
+        r#"{ "keyring_type": "session", "subkeyrings": ["server_roles"] }"#,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("built-in"), "{err}");
-    let err = KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["a", "a"] }"#).unwrap_err();
+    let err =
+        KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": ["a", "a"] }"#)
+            .unwrap_err();
     assert!(err.to_string().contains("duplicate"), "{err}");
-    assert!(KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": [""] }"#).is_err());
+    assert!(
+        KeyringConfig::from_json(r#"{ "keyring_type": "session", "subkeyrings": [""] }"#).is_err()
+    );
 }
 
 // --- high-level store: record round-trip (best-effort) ------------------------------------------
 
 #[test]
 fn store_record_roundtrip() {
-    let config = KeyringConfig::from_json(r#"{ "keyring_type": "thread", "subkeyrings": ["extra"] }"#).unwrap();
+    let config =
+        KeyringConfig::from_json(r#"{ "keyring_type": "thread", "subkeyrings": ["extra"] }"#)
+            .unwrap();
     let store = match KeyringStore::open(&config) {
         Ok(s) => s,
         Err(e) => return eprintln!("keyring unavailable ({e}); skipping"),
@@ -79,7 +107,10 @@ fn store_record_roundtrip() {
 
     // server_roles: uid → roles, keyed by the uid's decimal string.
     let sr = store.server_roles();
-    let rec = RoleRecord { uid: 1000, roles: vec!["READONLY".into(), "SHARING_WRITE".into()] };
+    let rec = RoleRecord {
+        uid: 1000,
+        roles: vec!["READONLY".into(), "SHARING_WRITE".into()],
+    };
     if sr.put_record("1000", &rec, None).is_ok() {
         let got: RoleRecord = sr.get_record("1000").unwrap().expect("uid 1000 present");
         assert_eq!(got.uid, 1000);
@@ -98,7 +129,9 @@ fn store_record_roundtrip() {
 
 #[test]
 fn describe_and_read_a_user_key() {
-    let Some(ring) = scratch() else { return eprintln!("keyring unavailable; skipping") };
+    let Some(ring) = scratch() else {
+        return eprintln!("keyring unavailable; skipping");
+    };
     let key = match ring.add_key(KeyType::User, "k1", b"payload-bytes") {
         Ok(k) => k,
         Err(e) => return eprintln!("add_key unavailable ({e}); skipping"),
@@ -112,13 +145,18 @@ fn describe_and_read_a_user_key() {
 
 #[test]
 fn search_dispatches_key_vs_keyring() {
-    let Some(ring) = scratch() else { return eprintln!("keyring unavailable; skipping") };
+    let Some(ring) = scratch() else {
+        return eprintln!("keyring unavailable; skipping");
+    };
     if ring.add_key(KeyType::User, "akey", b"x").is_err() {
         return eprintln!("keyring unavailable; skipping");
     }
     let sub = ring.add_keyring("akeyring").unwrap();
 
-    assert!(matches!(ring.search(KeyType::User, "akey").unwrap(), Some(Found::Key(_))));
+    assert!(matches!(
+        ring.search(KeyType::User, "akey").unwrap(),
+        Some(Found::Key(_))
+    ));
     match ring.search(KeyType::Keyring, "akeyring").unwrap() {
         Some(Found::Keyring(r)) => assert_eq!(r.serial(), sub.serial()),
         other => panic!("expected a keyring, got {other:?}"),
@@ -128,7 +166,9 @@ fn search_dispatches_key_vs_keyring() {
 
 #[test]
 fn list_contents_and_invalidate() {
-    let Some(ring) = scratch() else { return eprintln!("keyring unavailable; skipping") };
+    let Some(ring) = scratch() else {
+        return eprintln!("keyring unavailable; skipping");
+    };
     if ring.add_key(KeyType::User, "a", b"1").is_err() {
         return eprintln!("keyring unavailable; skipping");
     }

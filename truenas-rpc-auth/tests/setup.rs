@@ -19,7 +19,11 @@ fn proto_with(stack: Arc<AuthStack>) -> JsonRpcProtocol<AuthSession> {
 }
 
 fn unix_peer(uid: u32) -> Peer {
-    Peer::unix(Some(Ucred { pid: 1, uid, gid: uid }))
+    Peer::unix(Some(Ucred {
+        pid: 1,
+        uid,
+        gid: uid,
+    }))
 }
 
 fn tcp_peer() -> Peer {
@@ -30,7 +34,10 @@ fn tcp_peer() -> Peer {
 fn tls_peer(cert: Option<Vec<u8>>) -> Peer {
     // A secure in-app TLS connection is kTLS posture (the only direct-TLS posture that can authenticate).
     Peer {
-        tls: Some(TlsPeer { peer_cert: cert, channel_binding: None }),
+        tls: Some(TlsPeer {
+            peer_cert: cert,
+            channel_binding: None,
+        }),
         posture: Some(TransportPosture::KernelTls),
         ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
     }
@@ -65,14 +72,20 @@ async fn call(
 }
 
 fn response_type(reply: &Value) -> &str {
-    reply["result"]["response"]["response_type"].as_str().unwrap()
+    reply["result"]["response"]["response_type"]
+        .as_str()
+        .unwrap()
 }
 
 #[tokio::test]
 async fn peercred_unix_root_establishes() {
     // AF_UNIX with no declared mechanism → peer-cred default; root → authenticated.
     let stack = AuthStack::builder()
-        .peercred(|ch| ch.ucred.filter(|c| c.uid == 0).map(|c| json!({ "uid": c.uid })))
+        .peercred(|ch| {
+            ch.ucred
+                .filter(|c| c.uid == 0)
+                .map(|c| json!({ "uid": c.uid }))
+        })
         .build();
     let proto = proto_with(stack);
     let s = session(&proto, &unix_peer(0));
@@ -81,7 +94,10 @@ async fn peercred_unix_root_establishes() {
     assert_eq!(response_type(&reply), "SUCCESS");
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
     // the success reply hands the client its session's UUID
-    assert_eq!(reply["result"]["response"]["session_id"].as_str().unwrap(), s.id().to_string());
+    assert_eq!(
+        reply["result"]["response"]["session_id"].as_str().unwrap(),
+        s.id().to_string()
+    );
     let id = s.with_internal(|a| a.unwrap().identity().cloned());
     assert_eq!(id, Some(json!({ "uid": 0 })));
     // The peer-cred default commits a `UNIX_SOCKET` credential carrying the peer's uid.
@@ -92,7 +108,11 @@ async fn peercred_unix_root_establishes() {
 async fn peercred_non_root_falls_through_to_auth_err() {
     // The verifier returns None for a non-root uid → the connection must use a mechanism.
     let stack = AuthStack::builder()
-        .peercred(|ch| ch.ucred.filter(|c| c.uid == 0).map(|c| json!({ "uid": c.uid })))
+        .peercred(|ch| {
+            ch.ucred
+                .filter(|c| c.uid == 0)
+                .map(|c| json!({ "uid": c.uid }))
+        })
         .build();
     let proto = proto_with(stack);
     let s = session(&proto, &unix_peer(1000));
@@ -130,7 +150,10 @@ async fn uid_roles_from_the_role_source_become_the_session_mask() {
         (7, registry.get("readonly").unwrap()),
     ] {
         let s = session(&proto, &unix_peer(uid));
-        assert_eq!(response_type(&call(&proto, &s, "$/sessionSetup", json!({})).await), "SUCCESS");
+        assert_eq!(
+            response_type(&call(&proto, &s, "$/sessionSetup", json!({})).await),
+            "SUCCESS"
+        );
         assert_eq!(s.granted_roles(), expected, "uid {uid}");
     }
 }
@@ -138,7 +161,9 @@ async fn uid_roles_from_the_role_source_become_the_session_mask() {
 #[tokio::test]
 async fn tcp_with_no_mechanism_is_denied() {
     // A network client may not use the peer-cred default — it must declare a mechanism.
-    let stack = AuthStack::builder().peercred(|_| Some(json!({ "any": true }))).build();
+    let stack = AuthStack::builder()
+        .peercred(|_| Some(json!({ "any": true })))
+        .build();
     let proto = proto_with(stack);
     let s = session(&proto, &tcp_peer());
 
@@ -174,20 +199,37 @@ async fn mtls_maps_verified_client_cert_to_identity() {
     let proto = proto_with(stack);
     let s = session(&proto, &tls_peer(Some(b"good-cert".to_vec())));
 
-    let reply = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "CLIENT_CERTIFICATE" } })).await;
+    let reply = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "CLIENT_CERTIFICATE" } }),
+    )
+    .await;
     assert_eq!(response_type(&reply), "SUCCESS");
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
-    assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "cn": "alice" })));
+    assert_eq!(
+        s.with_internal(|a| a.unwrap().identity().cloned()),
+        Some(json!({ "cn": "alice" }))
+    );
 }
 
 #[tokio::test]
 async fn mtls_without_a_client_cert_is_denied() {
     // No client cert on the channel → the CLIENT_CERT capability gate refuses before the policy runs.
-    let stack = AuthStack::builder().mtls(|_| Some((json!({ "any": true }), Principal::None))).build();
+    let stack = AuthStack::builder()
+        .mtls(|_| Some((json!({ "any": true }), Principal::None)))
+        .build();
     let proto = proto_with(stack);
     let s = session(&proto, &tls_peer(None)); // TLS but no client cert
 
-    let reply = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "CLIENT_CERTIFICATE" } })).await;
+    let reply = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "CLIENT_CERTIFICATE" } }),
+    )
+    .await;
     assert_eq!(response_type(&reply), "DENIED");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }
@@ -199,7 +241,13 @@ async fn mtls_policy_rejection_is_auth_err() {
     let proto = proto_with(stack);
     let s = session(&proto, &tls_peer(Some(b"unknown".to_vec())));
 
-    let reply = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "CLIENT_CERTIFICATE" } })).await;
+    let reply = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "CLIENT_CERTIFICATE" } }),
+    )
+    .await;
     assert_eq!(response_type(&reply), "AUTH_ERR");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }
@@ -207,7 +255,12 @@ async fn mtls_policy_rejection_is_auth_err() {
 /// A two-round test mechanism: challenge first, authenticated on continue.
 struct TwoRound;
 impl Mechanism for TwoRound {
-    fn step(&self, _payload: &Value, _channel: &Channel, progress: Option<AuthProgress>) -> Outcome {
+    fn step(
+        &self,
+        _payload: &Value,
+        _channel: &Channel,
+        progress: Option<AuthProgress>,
+    ) -> Outcome {
         match progress {
             None => Outcome::Challenge {
                 reply: AuthResponse::Challenge {
@@ -233,18 +286,39 @@ async fn multi_round_mechanism_challenges_then_establishes() {
     let s = session(&proto, &tls_peer(None));
 
     // Round 1: setup → CHALLENGE, lifecycle Init.
-    let r1 = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "TEST" } })).await;
+    let r1 = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "TEST" } }),
+    )
+    .await;
     assert_eq!(response_type(&r1), "CHALLENGE");
     assert_eq!(r1["result"]["response"]["nonce"], "abc"); // flattened mechanism data
     assert_eq!(s.lifecycle(), SessionLifecycle::Init);
 
     // Round 2: continue → SUCCESS, lifecycle Established, identity stored.
-    let r2 = call(&proto, &s, "$/sessionSetupContinue", json!({ "mechanism": { "mechanism": "TEST" } })).await;
+    let r2 = call(
+        &proto,
+        &s,
+        "$/sessionSetupContinue",
+        json!({ "mechanism": { "mechanism": "TEST" } }),
+    )
+    .await;
     assert_eq!(response_type(&r2), "SUCCESS");
-    assert_eq!(r2["result"]["response"]["session_id"].as_str().unwrap(), s.id().to_string());
-    assert_eq!(r2["result"]["response"]["user_info"], json!({ "hello": true }));
+    assert_eq!(
+        r2["result"]["response"]["session_id"].as_str().unwrap(),
+        s.id().to_string()
+    );
+    assert_eq!(
+        r2["result"]["response"]["user_info"],
+        json!({ "hello": true })
+    );
     assert_eq!(s.lifecycle(), SessionLifecycle::Established);
-    assert_eq!(s.with_internal(|a| a.unwrap().identity().cloned()), Some(json!({ "user": "t" })));
+    assert_eq!(
+        s.with_internal(|a| a.unwrap().identity().cloned()),
+        Some(json!({ "user": "t" }))
+    );
     // Committed on the continue round; `Principal::None` → just the mechanism label, no uid.
     assert_eq!(credential(&s), ("TEST".to_string(), None));
 }
@@ -256,8 +330,20 @@ async fn continue_cannot_switch_mechanism() {
     let s = session(&proto, &tls_peer(None));
 
     // Begin TEST (→ Init), then try to continue as a different mechanism.
-    call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "TEST" } })).await;
-    let r = call(&proto, &s, "$/sessionSetupContinue", json!({ "mechanism": { "mechanism": "OTHER" } })).await;
+    call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "TEST" } }),
+    )
+    .await;
+    let r = call(
+        &proto,
+        &s,
+        "$/sessionSetupContinue",
+        json!({ "mechanism": { "mechanism": "OTHER" } }),
+    )
+    .await;
     assert_eq!(response_type(&r), "AUTH_ERR");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }
@@ -266,7 +352,12 @@ async fn continue_cannot_switch_mechanism() {
 /// [`Principal::User`] path (the stack must resolve the name → uid → roles).
 struct UserMech(&'static str);
 impl Mechanism for UserMech {
-    fn step(&self, _payload: &Value, _channel: &Channel, _progress: Option<AuthProgress>) -> Outcome {
+    fn step(
+        &self,
+        _payload: &Value,
+        _channel: &Channel,
+        _progress: Option<AuthProgress>,
+    ) -> Outcome {
         Outcome::authenticated(json!({ "user": self.0 }), Principal::User(self.0.into()))
     }
 }
@@ -287,7 +378,13 @@ async fn user_principal_resolves_via_user_resolver_then_role_source() {
     let proto = proto_with(stack);
     let s = session(&proto, &tls_peer(None));
 
-    let r = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "USER" } })).await;
+    let r = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "USER" } }),
+    )
+    .await;
     assert_eq!(response_type(&r), "SUCCESS");
     assert_eq!(s.granted_roles(), registry.get("ops").unwrap());
     // The credential names the mechanism + account and carries the resolved uid (no second lookup).
@@ -297,11 +394,19 @@ async fn user_principal_resolves_via_user_resolver_then_role_source() {
 #[tokio::test]
 async fn user_principal_with_no_resolver_grants_no_roles() {
     // Without a user_resolver the account name can't become a uid → no roles (but still authenticated).
-    let stack = AuthStack::builder().mechanism("USER", UserMech("alice")).build();
+    let stack = AuthStack::builder()
+        .mechanism("USER", UserMech("alice"))
+        .build();
     let proto = proto_with(stack);
     let s = session(&proto, &tls_peer(None));
 
-    let r = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "USER" } })).await;
+    let r = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "USER" } }),
+    )
+    .await;
     assert_eq!(response_type(&r), "SUCCESS");
     assert_eq!(s.granted_roles(), truenas_rpc::RoleMask::NONE);
 }
@@ -327,7 +432,10 @@ async fn the_same_uid_gets_different_roles_per_mechanism() {
 
     // Local peer-cred (UNIX_SOCKET): uid 1000 → ops.
     let local = session(&proto, &unix_peer(1000));
-    assert_eq!(response_type(&call(&proto, &local, "$/sessionSetup", json!({})).await), "SUCCESS");
+    assert_eq!(
+        response_type(&call(&proto, &local, "$/sessionSetup", json!({})).await),
+        "SUCCESS"
+    );
     assert_eq!(local.granted_roles(), registry.get("ops").unwrap());
 
     // mTLS (CLIENT_CERTIFICATE): the same uid 1000 → readonly instead.
@@ -355,10 +463,16 @@ async fn peercred_is_refused_over_a_proxied_unix_socket() {
 
     // Genuinely local (default posture): peer-cred establishes.
     let local = session(&proto, &unix_peer(0));
-    assert_eq!(response_type(&call(&proto, &local, "$/sessionSetup", json!({})).await), "SUCCESS");
+    assert_eq!(
+        response_type(&call(&proto, &local, "$/sessionSetup", json!({})).await),
+        "SUCCESS"
+    );
 
     // Proxied: the identical peer-cred is refused.
-    let proxied = session(&proto, &unix_peer(0).with_posture(TransportPosture::ProxiedUnix));
+    let proxied = session(
+        &proto,
+        &unix_peer(0).with_posture(TransportPosture::ProxiedUnix),
+    );
     let r = call(&proto, &proxied, "$/sessionSetup", json!({})).await;
     assert_eq!(response_type(&r), "DENIED");
     assert_eq!(proxied.lifecycle(), SessionLifecycle::None);
@@ -368,10 +482,18 @@ async fn peercred_is_refused_over_a_proxied_unix_socket() {
 async fn a_postureless_connection_cannot_authenticate() {
     // Plain TCP (no declared posture, like userspace-TLS) is refused before any mechanism runs —
     // even a mechanism whose own requirements the channel would otherwise satisfy.
-    let stack = AuthStack::builder().mechanism("USER", UserMech("alice")).build();
+    let stack = AuthStack::builder()
+        .mechanism("USER", UserMech("alice"))
+        .build();
     let proto = proto_with(stack);
     let s = session(&proto, &tcp_peer()); // plain TCP → posture None
-    let r = call(&proto, &s, "$/sessionSetup", json!({ "mechanism": { "mechanism": "USER" } })).await;
+    let r = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        json!({ "mechanism": { "mechanism": "USER" } }),
+    )
+    .await;
     assert_eq!(response_type(&r), "DENIED");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }

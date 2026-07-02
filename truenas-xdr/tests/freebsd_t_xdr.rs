@@ -66,7 +66,16 @@ fn freebsd_t_xdr_vector_round_trips() {
 fn signed_enum_discriminants_match_freebsd() {
     // A negative enum is two's-complement signed i32, and a large one is plain.
     assert_eq!(to_bytes(&MedEnum::MeNeg).unwrap(), [0xff, 0xff, 0xfb, 0x2e]);
-    assert_eq!(from_bytes::<MedEnum>(&[0xff, 0xff, 0xfb, 0x2e]).unwrap(), MedEnum::MeNeg);
-    assert_eq!(to_bytes(&BigEnum::BeLots).unwrap(), [0x00, 0x12, 0xd6, 0x87]);
-    assert_eq!(from_bytes::<MedEnum>(&[0x00, 0x00, 0x04, 0xd2]).unwrap(), MedEnum::MeMany); // 1234
+    assert_eq!(
+        from_bytes::<MedEnum>(&[0xff, 0xff, 0xfb, 0x2e]).unwrap(),
+        MedEnum::MeNeg
+    );
+    assert_eq!(
+        to_bytes(&BigEnum::BeLots).unwrap(),
+        [0x00, 0x12, 0xd6, 0x87]
+    );
+    assert_eq!(
+        from_bytes::<MedEnum>(&[0x00, 0x00, 0x04, 0xd2]).unwrap(),
+        MedEnum::MeMany
+    ); // 1234
 }

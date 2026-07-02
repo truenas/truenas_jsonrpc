@@ -37,8 +37,9 @@ pub(crate) async fn connect_ws(
     tcp_keepalive: Option<std::time::Duration>,
 ) -> io::Result<(BoxRead, BoxWrite)> {
     let tcp = connect_tcp(addr, tcp_keepalive).await?;
-    let (ws, _resp) =
-        tokio_tungstenite::client_async(format!("ws://{addr}{path}"), tcp).await.map_err(ws_io)?;
+    let (ws, _resp) = tokio_tungstenite::client_async(format!("ws://{addr}{path}"), tcp)
+        .await
+        .map_err(ws_io)?;
     Ok(split_ws(ws))
 }
 
@@ -46,8 +47,9 @@ pub(crate) async fn connect_ws(
 /// unix socket has no host, so the handshake uses a nominal `ws://localhost/` request line.
 pub(crate) async fn connect_ws_unix(path: &std::path::Path) -> io::Result<(BoxRead, BoxWrite)> {
     let unix = tokio::net::UnixStream::connect(path).await?;
-    let (ws, _resp) =
-        tokio_tungstenite::client_async("ws://localhost/", unix).await.map_err(ws_io)?;
+    let (ws, _resp) = tokio_tungstenite::client_async("ws://localhost/", unix)
+        .await
+        .map_err(ws_io)?;
     Ok(split_ws(ws))
 }
 
@@ -64,9 +66,10 @@ pub(crate) async fn connect_wss(
 ) -> io::Result<(BoxRead, BoxWrite, Option<Vec<u8>>)> {
     let tcp = connect_tcp(addr, tcp_keepalive).await?;
     let (tls_stream, binding) = crate::tls::userspace_connect(tls, server_name, tcp).await?;
-    let (ws, _resp) = tokio_tungstenite::client_async(format!("wss://{server_name}{path}"), tls_stream)
-        .await
-        .map_err(ws_io)?;
+    let (ws, _resp) =
+        tokio_tungstenite::client_async(format!("wss://{server_name}{path}"), tls_stream)
+            .await
+            .map_err(ws_io)?;
     let (r, w) = split_ws(ws);
     Ok((r, w, binding))
 }
@@ -77,8 +80,16 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let (sink, stream) = ws.split();
-    let read = WsRead { stream: Box::pin(stream), pending: Vec::new(), pos: 0 };
-    let write = WsWrite { sink: Box::pin(sink), inbuf: Vec::new(), staged: None };
+    let read = WsRead {
+        stream: Box::pin(stream),
+        pending: Vec::new(),
+        pos: 0,
+    };
+    let write = WsWrite {
+        sink: Box::pin(sink),
+        inbuf: Vec::new(),
+        staged: None,
+    };
     (Box::new(read), Box::new(write))
 }
 
@@ -115,7 +126,8 @@ impl AsyncRead for WsRead {
                     me.pos = 0;
                 }
                 // Close / stream end / error → EOF (Ready with the buffer unfilled = 0 bytes read).
-                Poll::Ready(Some(Ok(Message::Close(_)))) | Poll::Ready(Some(Err(_)))
+                Poll::Ready(Some(Ok(Message::Close(_))))
+                | Poll::Ready(Some(Err(_)))
                 | Poll::Ready(None) => return Poll::Ready(Ok(())),
                 // Ping / Pong / raw frame — not application data; poll again.
                 Poll::Ready(Some(Ok(_))) => {}
@@ -144,8 +156,12 @@ impl WsWrite {
                 if self.inbuf.len() < HEADER {
                     return Poll::Ready(Ok(()));
                 }
-                let len = u32::from_be_bytes([self.inbuf[0], self.inbuf[1], self.inbuf[2], self.inbuf[3]])
-                    as usize;
+                let len = u32::from_be_bytes([
+                    self.inbuf[0],
+                    self.inbuf[1],
+                    self.inbuf[2],
+                    self.inbuf[3],
+                ]) as usize;
                 if self.inbuf.len() < HEADER + len {
                     return Poll::Ready(Ok(()));
                 }

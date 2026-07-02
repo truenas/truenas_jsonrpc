@@ -2,7 +2,7 @@
 //! the [`Outbound`] back-channel sink and the injectable [`IdGen`] / [`Clock`] seams (default
 //! UUIDv4 / system time) that make dispatch deterministic for unit tests and the A/B harness.
 
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -271,27 +271,43 @@ impl<S> Session<S> {
     /// Read the server-internal state (identity/permissions/connection handle). The
     /// closure runs under a brief read lock; do not `.await` inside it.
     pub fn with_internal<R>(&self, f: impl FnOnce(Option<&S>) -> R) -> R {
-        f(self.internal.read().unwrap_or_else(PoisonError::into_inner).as_ref())
+        f(self
+            .internal
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref())
     }
 
     /// Replace the server-internal state (a setup handler sets the identity here).
     pub fn set_internal(&self, state: S) {
-        *self.internal.write().unwrap_or_else(PoisonError::into_inner) = Some(state);
+        *self
+            .internal
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(state);
     }
 
     /// Mutate the server-internal state in place (e.g. enrich an identity across setup
     /// rounds).
     pub fn with_internal_mut<R>(&self, f: impl FnOnce(&mut Option<S>) -> R) -> R {
-        f(&mut self.internal.write().unwrap_or_else(PoisonError::into_inner))
+        f(&mut self
+            .internal
+            .write()
+            .unwrap_or_else(PoisonError::into_inner))
     }
 
     /// The client-facing setup result (`server_state_external`), if any.
     pub fn external(&self) -> Option<serde_json::Value> {
-        self.external.read().unwrap_or_else(PoisonError::into_inner).clone()
+        self.external
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
     }
 
     pub(crate) fn set_external(&self, value: serde_json::Value) {
-        *self.external.write().unwrap_or_else(PoisonError::into_inner) = Some(value);
+        *self
+            .external
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(value);
     }
 
     /// Set the session's granted roles. A `$/sessionSetup` handler calls this once it has
@@ -321,13 +337,20 @@ impl<S> Session<S> {
     /// Set the authenticated [`Credential`] summary. The auth stack calls this at `$/sessionSetup`
     /// (re-settable across multi-round auth).
     pub fn set_credential(&self, credential: Credential) {
-        *self.credential.write().unwrap_or_else(PoisonError::into_inner) = Some(credential);
+        *self
+            .credential
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = Some(credential);
     }
 
     /// Read the [`Credential`] summary (set by the auth stack); the closure runs under a brief read
     /// lock — do not `.await` inside it.
     pub fn with_credential<R>(&self, f: impl FnOnce(Option<&Credential>) -> R) -> R {
-        f(self.credential.read().unwrap_or_else(PoisonError::into_inner).as_ref())
+        f(self
+            .credential
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref())
     }
 
     /// Begin tracking a long-lived [operation](OperationKind) (a raw-fd transfer or a passthrough
@@ -337,18 +360,37 @@ impl<S> Session<S> {
     ///
     /// This is **not** called on the request/reply fast path — only for the rare mode-switch
     /// hand-offs — so the per-session lock it takes never touches normal dispatch.
-    pub fn track_operation(self: &Arc<Self>, kind: OperationKind, label: Arc<str>) -> OperationGuard<S> {
-        let mut reg = self.op_registry.lock().unwrap_or_else(PoisonError::into_inner);
+    pub fn track_operation(
+        self: &Arc<Self>,
+        kind: OperationKind,
+        label: Arc<str>,
+    ) -> OperationGuard<S> {
+        let mut reg = self
+            .op_registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let id = reg.next_id;
         reg.next_id += 1;
-        reg.live.push(OperationRecord { id, kind, label, started: Instant::now() });
+        reg.live.push(OperationRecord {
+            id,
+            kind,
+            label,
+            started: Instant::now(),
+        });
         drop(reg);
-        OperationGuard { session: self.clone(), id }
+        OperationGuard {
+            session: self.clone(),
+            id,
+        }
     }
 
     /// Remove an operation by id — called by [`OperationGuard`]'s drop.
     fn end_operation(&self, id: u64) {
-        self.op_registry.lock().unwrap_or_else(PoisonError::into_inner).live.retain(|o| o.id != id);
+        self.op_registry
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .live
+            .retain(|o| o.id != id);
     }
 
     /// Snapshot the live operations on this session (oldest first) for the `$/sessions` listing and
@@ -360,7 +402,12 @@ impl<S> Session<S> {
             .unwrap_or_else(PoisonError::into_inner)
             .live
             .iter()
-            .map(|o| OperationInfo { id: o.id, kind: o.kind, label: o.label.clone(), age: o.started.elapsed() })
+            .map(|o| OperationInfo {
+                id: o.id,
+                kind: o.kind,
+                label: o.label.clone(),
+                age: o.started.elapsed(),
+            })
             .collect()
     }
 
@@ -408,8 +455,12 @@ mod tests {
 
     #[test]
     fn track_operation_registers_and_guard_unregisters_on_drop() {
-        let s: Arc<Session<()>> =
-            Arc::new(Session::new(SessionId::nil(), "t".into(), Some(()), Arc::new(NullOutbound)));
+        let s: Arc<Session<()>> = Arc::new(Session::new(
+            SessionId::nil(),
+            "t".into(),
+            Some(()),
+            Arc::new(NullOutbound),
+        ));
         assert!(s.operations().is_empty());
 
         let g0 = s.track_operation(OperationKind::Transfer, Arc::from("snapshot.receive"));

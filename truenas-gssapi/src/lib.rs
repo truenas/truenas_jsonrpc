@@ -23,7 +23,11 @@ pub struct Error {
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "GSSAPI error (major=0x{:08x}, minor={})", self.major, self.minor)
+        write!(
+            f,
+            "GSSAPI error (major=0x{:08x}, minor={})",
+            self.major, self.minor
+        )
     }
 }
 
@@ -56,7 +60,10 @@ impl ServerCtx {
     /// A fresh acceptor using the default credential (`GSS_C_NO_CREDENTIAL` → the host keytab, e.g.
     /// `KRB5_KTNAME`).
     pub fn new() -> Self {
-        Self { ctx: ptr::null_mut(), state: State::InProgress }
+        Self {
+            ctx: ptr::null_mut(),
+            state: State::InProgress,
+        }
     }
 
     /// Process the client's `token` (with an optional TLS `channel_binding`) and return the server's
@@ -66,7 +73,10 @@ impl ServerCtx {
     pub fn step(&mut self, token: &[u8], channel_binding: Option<&[u8]>) -> Result<Vec<u8>, Error> {
         let out = sys::accept_step(&mut self.ctx, token, channel_binding);
         if sys::gss_error(out.major) != 0 {
-            return Err(Error { major: out.major, minor: out.minor });
+            return Err(Error {
+                major: out.major,
+                minor: out.minor,
+            });
         }
         self.state = if out.major & sys::GSS_S_CONTINUE_NEEDED != 0 {
             State::InProgress

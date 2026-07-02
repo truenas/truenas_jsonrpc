@@ -255,7 +255,10 @@ fn sort_by_spec<E>(
     };
 
     // Sort non_nulls by (key, signed-index), mirroring the C build/sort/reverse dance.
-    let keys: Vec<Value> = non_nulls.iter().map(|it| order_get(&it.0, &spec.keys)).collect();
+    let keys: Vec<Value> = non_nulls
+        .iter()
+        .map(|it| order_get(&it.0, &spec.keys))
+        .collect();
     let mut order: Vec<usize> = (0..non_nulls.len()).collect();
     let mut err: Option<FilterError> = None;
     order.sort_by(|&a, &b| {
@@ -284,8 +287,10 @@ fn sort_by_spec<E>(
     // Permute `non_nulls` by `order` without cloning the typed item: each permutation index
     // is used exactly once, so `take` always yields `Some`.
     let mut slots: Vec<Option<(Value, E)>> = non_nulls.into_iter().map(Some).collect();
-    let sorted_non: Vec<(Value, E)> =
-        order.into_iter().map(|i| slots[i].take().expect("permutation index used once")).collect();
+    let sorted_non: Vec<(Value, E)> = order
+        .into_iter()
+        .map(|i| slots[i].take().expect("permutation index used once"))
+        .collect();
 
     Ok(match spec.nulls_mode {
         1 => nulls.into_iter().chain(sorted_non).collect(),
@@ -333,20 +338,45 @@ mod tests {
     fn apply_pipeline_edges() {
         // single-element sort (n<=1 fast path) + stable ties + offset+limit slice
         let one = vec![json!({"x": 1})];
-        assert_eq!(co(json!({"order_by": ["x"]})).unwrap().apply(pairs(one.clone())).unwrap(), one);
+        assert_eq!(
+            co(json!({"order_by": ["x"]}))
+                .unwrap()
+                .apply(pairs(one.clone()))
+                .unwrap(),
+            one
+        );
         let ties = vec![json!({"x": 1, "i": "a"}), json!({"x": 1, "i": "b"})];
-        assert_eq!(co(json!({"order_by": ["x"]})).unwrap().apply(pairs(ties.clone())).unwrap(), ties);
+        assert_eq!(
+            co(json!({"order_by": ["x"]}))
+                .unwrap()
+                .apply(pairs(ties.clone()))
+                .unwrap(),
+            ties
+        );
         let rows = vec![json!(0), json!(1), json!(2), json!(3)];
-        assert_eq!(co(json!({"offset": 1, "limit": 2})).unwrap().apply(pairs(rows)).unwrap(), vec![json!(1), json!(2)]);
+        assert_eq!(
+            co(json!({"offset": 1, "limit": 2}))
+                .unwrap()
+                .apply(pairs(rows))
+                .unwrap(),
+            vec![json!(1), json!(2)]
+        );
         // offset beyond the end → empty
-        assert!(co(json!({"offset": 9})).unwrap().apply(pairs(vec![json!(0)])).unwrap().is_empty());
+        assert!(co(json!({"offset": 9}))
+            .unwrap()
+            .apply(pairs(vec![json!(0)]))
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
     fn order_nulls_non_dict_row() {
         // a non-dict row in a nulls-ordered list lands in the nulls bucket
         let rows = vec![json!({"v": 2}), json!("scalar"), json!({"v": 1})];
-        let out = co(json!({"order_by": ["nulls_first:v"]})).unwrap().apply(pairs(rows)).unwrap();
+        let out = co(json!({"order_by": ["nulls_first:v"]}))
+            .unwrap()
+            .apply(pairs(rows))
+            .unwrap();
         assert_eq!(out, vec![json!("scalar"), json!({"v": 1}), json!({"v": 2})]);
     }
 }

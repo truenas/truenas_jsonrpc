@@ -42,7 +42,9 @@ pub fn connect_blocking(
     // to the Python exception once the GIL is re-held.
     let connected = py.allow_threads(move || {
         runtime()
-            .block_on(JsonRpcClient::connect_negotiate(&endpoint, &protocol, config))
+            .block_on(JsonRpcClient::connect_negotiate(
+                &endpoint, &protocol, config,
+            ))
             .map_err(|e| e.to_string())
     });
     let (client, _negotiated, _notifications) = connected.map_err(rpc_error)?;

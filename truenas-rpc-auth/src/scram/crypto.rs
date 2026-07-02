@@ -12,8 +12,14 @@ pub const KEY_LEN: usize = 64;
 /// `Hi(key, salt, i)` = PBKDF2-HMAC-SHA512 → the 64-byte SaltedPassword.
 pub fn salted_password(key: &[u8], salt: &[u8], iterations: u32) -> [u8; KEY_LEN] {
     let mut out = [0u8; KEY_LEN];
-    pbkdf2_hmac(key, salt, iterations as usize, MessageDigest::sha512(), &mut out)
-        .expect("PBKDF2-HMAC-SHA512");
+    pbkdf2_hmac(
+        key,
+        salt,
+        iterations as usize,
+        MessageDigest::sha512(),
+        &mut out,
+    )
+    .expect("PBKDF2-HMAC-SHA512");
     out
 }
 
@@ -22,7 +28,11 @@ pub fn hmac_sha512(key: &[u8], data: &[u8]) -> [u8; KEY_LEN] {
     let pkey = PKey::hmac(key).expect("HMAC key");
     let mut signer = Signer::new(MessageDigest::sha512(), &pkey).expect("HMAC signer");
     signer.update(data).expect("HMAC update");
-    signer.sign_to_vec().expect("HMAC sign").try_into().expect("64-byte HMAC")
+    signer
+        .sign_to_vec()
+        .expect("HMAC sign")
+        .try_into()
+        .expect("64-byte HMAC")
 }
 
 /// `H(data)` = SHA-512 → 64 bytes.
@@ -80,7 +90,10 @@ mod tests {
         let expected =
             decode_block("sljMczeiN9kEqyOIrjoQ1QiBhnrmL++DtRdeyv+DHmQkkzoypbkzHIVA1iM/NVviC50dVpDKKlD3L2pv9KDdfw==")
                 .unwrap();
-        assert_eq!(salted_password(key, salt, 500_000).as_slice(), expected.as_slice());
+        assert_eq!(
+            salted_password(key, salt, 500_000).as_slice(),
+            expected.as_slice()
+        );
     }
 
     #[test]

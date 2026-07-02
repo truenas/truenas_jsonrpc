@@ -29,7 +29,10 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             ("result", m.result.as_ref()),
             ("entry", m.entry.as_ref()),
             ("notifies", m.notifies.as_ref()),
-            ("transfer.ready", m.transfer.as_ref().and_then(|t| t.ready.as_ref())),
+            (
+                "transfer.ready",
+                m.transfer.as_ref().and_then(|t| t.ready.as_ref()),
+            ),
         ];
         for (slot, node) in slots {
             if let Some(node) = node {
@@ -48,7 +51,9 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
         // filterable ⇒ entry required & result forbidden.
         if m.filterable {
             if m.entry.is_none() {
-                return Err(err(format!("method {wire:?}: filterable requires an 'entry' type")));
+                return Err(err(format!(
+                    "method {wire:?}: filterable requires an 'entry' type"
+                )));
             }
             if m.result.is_some() {
                 return Err(err(format!(
@@ -84,7 +89,11 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             if m.result.is_none() {
                 return Err(err(format!("method {wire:?}: python requires 'result'")));
             }
-            if m.filterable || m.entry.is_some() || m.xdr || m.direction() == Direction::ServerClient {
+            if m.filterable
+                || m.entry.is_some()
+                || m.xdr
+                || m.direction() == Direction::ServerClient
+            {
                 return Err(err(format!(
                     "method {wire:?}: python cannot combine with filterable/entry/xdr/server_client"
                 )));
@@ -136,7 +145,9 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
 
     // The declared wire protocols: non-empty, each supported, no duplicates.
     if spec.protocols.is_empty() {
-        return Err(err("protocols must list at least one wire protocol".to_string()));
+        return Err(err(
+            "protocols must list at least one wire protocol".to_string()
+        ));
     }
     let mut seen_protocols: HashMap<&str, ()> = HashMap::new();
     let mut has_onc = false;
@@ -145,7 +156,9 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             ProtocolKind::JsonRpc => {}
             ProtocolKind::OncRpc => has_onc = true,
             ProtocolKind::Unsupported => {
-                return Err(err(format!("unsupported protocol {p:?} (supported: json-rpc, onc-rpc)")))
+                return Err(err(format!(
+                    "unsupported protocol {p:?} (supported: json-rpc, onc-rpc)"
+                )))
             }
         }
         if seen_protocols.insert(p.as_str(), ()).is_some() {

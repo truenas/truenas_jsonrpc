@@ -31,7 +31,11 @@ pub fn ref_name(reference: &str) -> Result<String> {
         .strip_prefix("#/$defs/")
         .filter(|n| crate::naming::is_ident(n))
         .map(str::to_string)
-        .ok_or_else(|| CodegenError::new(format!("unsupported $ref (only #/$defs/<Name> is allowed): {reference:?}")))
+        .ok_or_else(|| {
+            CodegenError::new(format!(
+                "unsupported $ref (only #/$defs/<Name> is allowed): {reference:?}"
+            ))
+        })
 }
 
 /// The Rust type for a schema node. `name_hint` names a generated enum (`<Struct><Field>`).
@@ -54,7 +58,10 @@ pub fn rust_type(node: &SchemaNode, name_hint: &str, ctx: &mut TypeCtx) -> Resul
                     .items
                     .as_deref()
                     .ok_or_else(|| CodegenError::new("array schema must have an object 'items'"))?;
-                format!("Vec<{}>", rust_type(items, &format!("{name_hint}Item"), ctx)?)
+                format!(
+                    "Vec<{}>",
+                    rust_type(items, &format!("{name_hint}Item"), ctx)?
+                )
             }
             Some("object") => {
                 return Err(CodegenError::new(
@@ -68,7 +75,11 @@ pub fn rust_type(node: &SchemaNode, name_hint: &str, ctx: &mut TypeCtx) -> Resul
             }
         }
     };
-    Ok(if node.secret { format!("truenas_rpc::Secret<{base}>") } else { base })
+    Ok(if node.secret {
+        format!("truenas_rpc::Secret<{base}>")
+    } else {
+        base
+    })
 }
 
 /// A Rust string literal for `s` (JSON string escaping is valid Rust string escaping for
@@ -79,13 +90,15 @@ pub fn str_lit(s: &str) -> String {
 
 fn emit_enum(name: &str, values: &[Value]) -> Result<String> {
     if values.is_empty() {
-        return Err(CodegenError::new(format!("enum {name:?} must have at least one value")));
+        return Err(CodegenError::new(format!(
+            "enum {name:?} must have at least one value"
+        )));
     }
     let mut variants = String::new();
     for v in values {
-        let s = v
-            .as_str()
-            .ok_or_else(|| CodegenError::new(format!("enum {name:?} values must all be strings")))?;
+        let s = v.as_str().ok_or_else(|| {
+            CodegenError::new(format!("enum {name:?} values must all be strings"))
+        })?;
         let ident = pascal_case(s);
         if ident.is_empty() {
             return Err(CodegenError::new(format!(
@@ -94,7 +107,10 @@ fn emit_enum(name: &str, values: &[Value]) -> Result<String> {
         }
         // A plain serde string-enum: JSON encodes the renamed string; the XDR codec encodes
         // the declaration-order variant index (so reordering variants is XDR-wire-breaking).
-        variants.push_str(&format!("    #[serde(rename = {})]\n    {ident},\n", str_lit(s)));
+        variants.push_str(&format!(
+            "    #[serde(rename = {})]\n    {ident},\n",
+            str_lit(s)
+        ));
     }
     Ok(format!(
         "#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]\npub enum {name} {{\n{variants}}}"

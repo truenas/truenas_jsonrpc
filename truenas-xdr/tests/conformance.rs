@@ -15,7 +15,10 @@ const TEST_ID: [u8; 16] = [
 const ECHO_PROC: u32 = 1002;
 
 fn unhex(s: &str) -> Vec<u8> {
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap())
+        .collect()
 }
 
 /// `xdr.echo`'s params/result type: a list, an optional string, and a bool.
@@ -56,7 +59,11 @@ fn xdr_echo() {
 #[test]
 fn xdr_echo_empty() {
     check_echo(
-        Echo { nums: vec![], note: None, flag: false },
+        Echo {
+            nums: vec![],
+            note: None,
+            flag: false,
+        },
         "5458445200000001000003ea00000001123e4567e89b12d3a456426614174000000000000000000000000000",
         "545844520000000100000001123e4567e89b12d3a45642661417400000000000000000000000000000000000",
     );

@@ -147,7 +147,10 @@ async fn read_record<R: AsyncRead + Unpin>(
 }
 
 /// Record-mark `payload` and write it (with a flush).
-async fn write_record<W: AsyncWrite + Unpin>(stream: &mut W, payload: &[u8]) -> std::io::Result<()> {
+async fn write_record<W: AsyncWrite + Unpin>(
+    stream: &mut W,
+    payload: &[u8],
+) -> std::io::Result<()> {
     stream.write_all(&rm_frame(payload)).await?;
     stream.flush().await
 }
@@ -191,7 +194,14 @@ fn parse_call(wire: &[u8]) -> Option<Call<'_>> {
 /// Build an `accepted_reply` with the `AUTH_NONE` verifier: `xid · REPLY · MSG_ACCEPTED ·
 /// verf(AUTH_NONE, empty) · accept_stat · results`.
 fn reply_accepted(xid: u32, accept_stat: u32, results: &[u8]) -> Vec<u8> {
-    let env = (xid, MSG_REPLY, MSG_ACCEPTED, AUTH_NONE, VarOpaque(Vec::new()), accept_stat);
+    let env = (
+        xid,
+        MSG_REPLY,
+        MSG_ACCEPTED,
+        AUTH_NONE,
+        VarOpaque(Vec::new()),
+        accept_stat,
+    );
     let mut out = to_bytes(&env).expect("accepted-reply envelope encodes");
     out.extend_from_slice(results);
     out
@@ -199,8 +209,16 @@ fn reply_accepted(xid: u32, accept_stat: u32, results: &[u8]) -> Vec<u8> {
 
 /// Build a `PROG_MISMATCH` accepted reply, carrying the supported `[low, high]` version range.
 fn reply_prog_mismatch(xid: u32, low: u32, high: u32) -> Vec<u8> {
-    let env =
-        (xid, MSG_REPLY, MSG_ACCEPTED, AUTH_NONE, VarOpaque(Vec::new()), ACCEPT_PROG_MISMATCH, low, high);
+    let env = (
+        xid,
+        MSG_REPLY,
+        MSG_ACCEPTED,
+        AUTH_NONE,
+        VarOpaque(Vec::new()),
+        ACCEPT_PROG_MISMATCH,
+        low,
+        high,
+    );
     to_bytes(&env).expect("prog-mismatch reply encodes")
 }
 
@@ -226,14 +244,20 @@ enum Action<'a> {
     /// A complete reply (an error, or the `NULL` probe) — write it as-is.
     Reply(Vec<u8>),
     /// Route `procedure` (a registered method's XDR proc-id) with `args` to the bound protocol.
-    Dispatch { xid: u32, procedure: u32, args: &'a [u8] },
+    Dispatch {
+        xid: u32,
+        procedure: u32,
+        args: &'a [u8],
+    },
 }
 
 /// Validate an inbound record and decide what to do with it. Mirrors FreeBSD's order
 /// (`svc_getreq_common`): parse → reject a non-CALL → check `rpcvers` → authenticate → match
 /// program/version → the `NULL` probe; any other procedure becomes a [`Action::Dispatch`].
 fn precheck(wire: &[u8], program: u32, version: u32) -> Action<'_> {
-    let Some(call) = parse_call(wire) else { return Action::Close };
+    let Some(call) = parse_call(wire) else {
+        return Action::Close;
+    };
     if call.mtype != MSG_CALL {
         return Action::Close;
     }
@@ -253,7 +277,11 @@ fn precheck(wire: &[u8], program: u32, version: u32) -> Action<'_> {
     if call.procedure == PROC_NULL {
         return Action::Reply(reply_accepted(call.xid, ACCEPT_SUCCESS, &[]));
     }
-    Action::Dispatch { xid: call.xid, procedure: call.procedure, args: call.args }
+    Action::Dispatch {
+        xid: call.xid,
+        procedure: call.procedure,
+        args: call.args,
+    }
 }
 
 /// Map a dispatch error onto the closest ONC RPC `accept_stat`. The accepted-reply status set is
@@ -282,7 +310,11 @@ pub(crate) struct OncRpcProtocol<S> {
 impl<S: Send + Sync + 'static> OncRpcProtocol<S> {
     /// Project a [`Service`] op-table onto the ONC RPC `program` / `version` this view answers to.
     pub(crate) fn new(service: Arc<Service<S>>, program: u32, version: u32) -> Self {
-        OncRpcProtocol { service, program, version }
+        OncRpcProtocol {
+            service,
+            program,
+            version,
+        }
     }
 
     /// The per-connection loop: read a record, answer it, write the reply, repeat until the peer
@@ -303,12 +335,14 @@ impl<S: Send + Sync + 'static> OncRpcProtocol<S> {
                 Action::Reply(bytes) => bytes,
                 // The ONC RPC procedure number IS the registered method's XDR proc-id; on success
                 // the result bytes are the method's XDR-encoded result, wrapped in the accepted reply.
-                Action::Dispatch { xid, procedure, args } => {
-                    match self.service.run_proc(procedure, None, args, &session).await {
-                        Ok(result) => reply_accepted(xid, ACCEPT_SUCCESS, &result),
-                        Err(e) => reply_accepted(xid, accept_stat_for(&e), &[]),
-                    }
-                }
+                Action::Dispatch {
+                    xid,
+                    procedure,
+                    args,
+                } => match self.service.run_proc(procedure, None, args, &session).await {
+                    Ok(result) => reply_accepted(xid, ACCEPT_SUCCESS, &result),
+                    Err(e) => reply_accepted(xid, accept_stat_for(&e), &[]),
+                },
             };
             if write_record(&mut stream, &reply).await.is_err() {
                 break;
@@ -343,13 +377,21 @@ impl OncRpc {
 
     /// Serve the registered protocol `name`, at the default program/version.
     pub fn protocol(name: impl Into<String>) -> Self {
-        OncRpc { protocol: Some(name.into()), program: DEFAULT_PROGRAM, version: DEFAULT_VERSION }
+        OncRpc {
+            protocol: Some(name.into()),
+            program: DEFAULT_PROGRAM,
+            version: DEFAULT_VERSION,
+        }
     }
 
     /// Serve the **sole** registered protocol at an explicit program/version. Errors at serve time if
     /// zero or more than one protocol is registered — use [`protocol`](Self::protocol) to name one.
     pub fn program(program: u32, version: u32) -> Self {
-        OncRpc { protocol: None, program, version }
+        OncRpc {
+            protocol: None,
+            program,
+            version,
+        }
     }
 
     /// Name the registered protocol to serve (defaults to the sole one).
@@ -384,7 +426,11 @@ impl<S: Send + Sync + 'static> Wire<S> for OncRpc {
                 )
             })?,
         };
-        Ok(Arc::new(OncRpcProtocol::new(service, self.program, self.version)))
+        Ok(Arc::new(OncRpcProtocol::new(
+            service,
+            self.program,
+            self.version,
+        )))
     }
     // No `NetworkWire` impl → ONC-over-network (TCP/TLS) is a compile error.
 }
@@ -393,7 +439,7 @@ impl<S: Send + Sync + 'static> Wire<S> for OncRpc {
 mod tests {
     use super::*;
     use serde::{Deserialize, Serialize};
-    use truenas_rpc::{RpcMethod, JsonRpcProtocol, MethodDef, RequestCtx};
+    use truenas_rpc::{JsonRpcProtocol, MethodDef, RequestCtx, RpcMethod};
     use truenas_xdr::from_bytes;
 
     #[derive(Deserialize, Serialize)]
@@ -412,7 +458,9 @@ mod tests {
             JsonRpcProtocol::<()>::builder("demo", "1")
                 .method(RpcMethod::new(
                     MethodDef::new("math.add").xdr(1001),
-                    |a: AddArgs, _cx: &RequestCtx<()>| Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b }),
+                    |a: AddArgs, _cx: &RequestCtx<()>| {
+                        Ok::<_, JsonRpcError>(AddResult { sum: a.a + a.b })
+                    },
                 ))
                 .unwrap()
                 .build(),
@@ -420,9 +468,25 @@ mod tests {
     }
 
     /// Build an `rpc_msg` CALL (no record marking) with the given fields.
-    fn msg(xid: u32, rpcvers: u32, prog: u32, vers: u32, procedure: u32, cred: u32, args: &[u8]) -> Vec<u8> {
+    fn msg(
+        xid: u32,
+        rpcvers: u32,
+        prog: u32,
+        vers: u32,
+        procedure: u32,
+        cred: u32,
+        args: &[u8],
+    ) -> Vec<u8> {
         let prefix: CallPrefix = (
-            xid, MSG_CALL, rpcvers, prog, vers, procedure, cred, VarOpaque(Vec::new()), AUTH_NONE,
+            xid,
+            MSG_CALL,
+            rpcvers,
+            prog,
+            vers,
+            procedure,
+            cred,
+            VarOpaque(Vec::new()),
+            AUTH_NONE,
             VarOpaque(Vec::new()),
         );
         let mut m = to_bytes(&prefix).unwrap();
@@ -510,7 +574,15 @@ mod tests {
 
     #[test]
     fn null_probe_succeeds() {
-        let (rs, stat, body) = parse_reply(&reply_of(pre(&msg(7, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_NONE, &[]))));
+        let (rs, stat, body) = parse_reply(&reply_of(pre(&msg(
+            7,
+            RPC_VERSION,
+            PROG,
+            VERS,
+            PROC_NULL,
+            AUTH_NONE,
+            &[],
+        ))));
         assert_eq!((rs, stat), (MSG_ACCEPTED, ACCEPT_SUCCESS));
         assert!(body.is_empty());
     }
@@ -518,10 +590,26 @@ mod tests {
     #[test]
     fn wrong_program_and_version_are_reported() {
         // Unknown program → PROG_UNAVAIL.
-        let (_, stat, _) = parse_reply(&reply_of(pre(&msg(1, RPC_VERSION, 0xDEAD, VERS, PROC_NULL, AUTH_NONE, &[]))));
+        let (_, stat, _) = parse_reply(&reply_of(pre(&msg(
+            1,
+            RPC_VERSION,
+            0xDEAD,
+            VERS,
+            PROC_NULL,
+            AUTH_NONE,
+            &[],
+        ))));
         assert_eq!(stat, ACCEPT_PROG_UNAVAIL);
         // Wrong version → PROG_MISMATCH with the supported range.
-        let (_, stat, body) = parse_reply(&reply_of(pre(&msg(1, RPC_VERSION, PROG, 99, PROC_NULL, AUTH_NONE, &[]))));
+        let (_, stat, body) = parse_reply(&reply_of(pre(&msg(
+            1,
+            RPC_VERSION,
+            PROG,
+            99,
+            PROC_NULL,
+            AUTH_NONE,
+            &[],
+        ))));
         assert_eq!(stat, ACCEPT_PROG_MISMATCH);
         assert_eq!(from_bytes::<(u32, u32)>(&body).unwrap(), (VERS, VERS));
     }
@@ -538,22 +626,48 @@ mod tests {
         )));
         assert_eq!(stat, ACCEPT_PROG_UNAVAIL);
         assert!(matches!(
-            precheck(&msg(1, RPC_VERSION, prog, vers, 1001, AUTH_NONE, &[1, 2]), prog, vers),
-            Action::Dispatch { procedure: 1001, .. }
+            precheck(
+                &msg(1, RPC_VERSION, prog, vers, 1001, AUTH_NONE, &[1, 2]),
+                prog,
+                vers
+            ),
+            Action::Dispatch {
+                procedure: 1001,
+                ..
+            }
         ));
     }
 
     #[test]
     fn wrong_rpc_version_is_denied() {
-        let (rs, reject, body) = parse_reply(&reply_of(pre(&msg(5, 1, PROG, VERS, PROC_NULL, AUTH_NONE, &[]))));
+        let (rs, reject, body) = parse_reply(&reply_of(pre(&msg(
+            5,
+            1,
+            PROG,
+            VERS,
+            PROC_NULL,
+            AUTH_NONE,
+            &[],
+        ))));
         assert_eq!((rs, reject), (MSG_DENIED, REJECT_RPC_MISMATCH));
-        assert_eq!(from_bytes::<(u32, u32)>(&body).unwrap(), (RPC_VERSION, RPC_VERSION));
+        assert_eq!(
+            from_bytes::<(u32, u32)>(&body).unwrap(),
+            (RPC_VERSION, RPC_VERSION)
+        );
     }
 
     #[test]
     fn unsupported_auth_flavor_is_denied() {
         // AUTH_DH (3) credentials → MSG_DENIED / AUTH_ERROR / AUTH_REJECTEDCRED.
-        let (rs, reject, body) = parse_reply(&reply_of(pre(&msg(1, RPC_VERSION, PROG, VERS, PROC_NULL, 3, &[]))));
+        let (rs, reject, body) = parse_reply(&reply_of(pre(&msg(
+            1,
+            RPC_VERSION,
+            PROG,
+            VERS,
+            PROC_NULL,
+            3,
+            &[],
+        ))));
         assert_eq!((rs, reject), (MSG_DENIED, REJECT_AUTH_ERROR));
         assert_eq!(from_bytes::<u32>(&body).unwrap(), AUTH_REJECTEDCRED);
     }
@@ -561,7 +675,15 @@ mod tests {
     #[test]
     fn auth_sys_credentials_are_accepted() {
         // AUTH_SYS (1) is accepted — the NULL probe still succeeds.
-        let (_, stat, _) = parse_reply(&reply_of(pre(&msg(1, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_SYS, &[]))));
+        let (_, stat, _) = parse_reply(&reply_of(pre(&msg(
+            1,
+            RPC_VERSION,
+            PROG,
+            VERS,
+            PROC_NULL,
+            AUTH_SYS,
+            &[],
+        ))));
         assert_eq!(stat, ACCEPT_SUCCESS);
     }
 
@@ -569,8 +691,16 @@ mod tests {
     fn non_call_and_truncated_close_the_connection() {
         // A REPLY message: a server must not answer it.
         let prefix: CallPrefix = (
-            1, MSG_REPLY, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_NONE, VarOpaque(Vec::new()),
-            AUTH_NONE, VarOpaque(Vec::new()),
+            1,
+            MSG_REPLY,
+            RPC_VERSION,
+            PROG,
+            VERS,
+            PROC_NULL,
+            AUTH_NONE,
+            VarOpaque(Vec::new()),
+            AUTH_NONE,
+            VarOpaque(Vec::new()),
         );
         assert!(matches!(pre(&to_bytes(&prefix).unwrap()), Action::Close));
         // A truncated prefix has no xid to reply to → also closes.
@@ -580,8 +710,20 @@ mod tests {
     #[test]
     fn registered_procedure_becomes_a_dispatch() {
         // A non-NULL procedure resolves to a dispatch carrying the proc-id + raw args.
-        match pre(&msg(1, RPC_VERSION, PROG, VERS, 1001, AUTH_NONE, &[1, 2, 3, 4])) {
-            Action::Dispatch { xid, procedure, args } => {
+        match pre(&msg(
+            1,
+            RPC_VERSION,
+            PROG,
+            VERS,
+            1001,
+            AUTH_NONE,
+            &[1, 2, 3, 4],
+        )) {
+            Action::Dispatch {
+                xid,
+                procedure,
+                args,
+            } => {
                 assert_eq!((xid, procedure), (1, 1001));
                 assert_eq!(args, &[1, 2, 3, 4]);
             }
@@ -591,32 +733,81 @@ mod tests {
 
     #[test]
     fn error_codes_map_to_accept_stats() {
-        assert_eq!(accept_stat_for(&JsonRpcError::method_not_found("x")), ACCEPT_PROC_UNAVAIL);
-        assert_eq!(accept_stat_for(&JsonRpcError::new(ErrorCode::InvalidParams, "x")), ACCEPT_GARBAGE_ARGS);
-        assert_eq!(accept_stat_for(&JsonRpcError::request_failed("x")), ACCEPT_SYSTEM_ERR);
+        assert_eq!(
+            accept_stat_for(&JsonRpcError::method_not_found("x")),
+            ACCEPT_PROC_UNAVAIL
+        );
+        assert_eq!(
+            accept_stat_for(&JsonRpcError::new(ErrorCode::InvalidParams, "x")),
+            ACCEPT_GARBAGE_ARGS
+        );
+        assert_eq!(
+            accept_stat_for(&JsonRpcError::request_failed("x")),
+            ACCEPT_SYSTEM_ERR
+        );
     }
 
     #[tokio::test]
     async fn serve_loop_dispatches_a_registered_method() {
         let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let proto = Arc::new(OncRpcProtocol::new(add_proto().service().clone(), PROG, VERS));
-        let task = tokio::spawn(async move { proto.serve_connection(server, 4 * 1024 * 1024).await });
+        let proto = Arc::new(OncRpcProtocol::new(
+            add_proto().service().clone(),
+            PROG,
+            VERS,
+        ));
+        let task =
+            tokio::spawn(async move { proto.serve_connection(server, 4 * 1024 * 1024).await });
         let mut acc = BytesMut::new();
 
         // NULL probe (self-contained) → SUCCESS, empty.
-        client.write_all(&rm_frame(&msg(1, RPC_VERSION, PROG, VERS, PROC_NULL, AUTH_NONE, &[]))).await.unwrap();
-        let (_, stat, body) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
+        client
+            .write_all(&rm_frame(&msg(
+                1,
+                RPC_VERSION,
+                PROG,
+                VERS,
+                PROC_NULL,
+                AUTH_NONE,
+                &[],
+            )))
+            .await
+            .unwrap();
+        let (_, stat, body) =
+            parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
         assert_eq!((stat, body.len()), (ACCEPT_SUCCESS, 0));
 
         // procedure 1001 → the registered math.add(20, 22) → 42.
         let args = to_bytes(&AddArgs { a: 20, b: 22 }).unwrap();
-        client.write_all(&rm_frame(&msg(2, RPC_VERSION, PROG, VERS, 1001, AUTH_NONE, &args))).await.unwrap();
-        let (_, stat, body) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
+        client
+            .write_all(&rm_frame(&msg(
+                2,
+                RPC_VERSION,
+                PROG,
+                VERS,
+                1001,
+                AUTH_NONE,
+                &args,
+            )))
+            .await
+            .unwrap();
+        let (_, stat, body) =
+            parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
         assert_eq!(stat, ACCEPT_SUCCESS);
         assert_eq!(from_bytes::<AddResult>(&body).unwrap().sum, 42);
 
         // An unregistered procedure → PROC_UNAVAIL (the method-not-found maps through).
-        client.write_all(&rm_frame(&msg(3, RPC_VERSION, PROG, VERS, 9999, AUTH_NONE, &[]))).await.unwrap();
+        client
+            .write_all(&rm_frame(&msg(
+                3,
+                RPC_VERSION,
+                PROG,
+                VERS,
+                9999,
+                AUTH_NONE,
+                &[],
+            )))
+            .await
+            .unwrap();
         let (_, stat, _) = parse_reply(&read_record(&mut client, &mut acc, 1 << 20).await.unwrap());
         assert_eq!(stat, ACCEPT_PROC_UNAVAIL);
 

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AuditOutcome, Credential, Dispatched, JsonRpcProtocol, RequestInfo, NullOutbound, RoleMask,
+    AuditOutcome, Credential, Dispatched, JsonRpcProtocol, NullOutbound, RequestInfo, RoleMask,
     Session, SessionOrigin,
 };
 
@@ -35,9 +35,11 @@ async fn sessions_gate_listing_and_audit() {
     let audited: Arc<Mutex<Vec<(String, bool)>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = audited.clone();
     let proto = JsonRpcProtocol::<()>::builder("test", "1.0.0")
-        .audit_sink(move |r: &RequestInfo, o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
-            sink.lock().unwrap().push((r.method.clone(), o.succeeded()));
-        })
+        .audit_sink(
+            move |r: &RequestInfo, o: AuditOutcome<'_>, _s: &Session<()>, _m: Option<&str>| {
+                sink.lock().unwrap().push((r.method.clone(), o.succeeded()));
+            },
+        )
         .build();
     let s = proto.new_session(Some(()), Arc::new(NullOutbound));
 
@@ -66,8 +68,14 @@ async fn sessions_gate_listing_and_audit() {
 
     // Both the denial and the authorized call were audited.
     let log = audited.lock().unwrap();
-    assert!(log.iter().any(|(m, ok)| m == "$/sessions" && !*ok), "denial audited");
-    assert!(log.iter().any(|(m, ok)| m == "$/sessions" && *ok), "success audited");
+    assert!(
+        log.iter().any(|(m, ok)| m == "$/sessions" && !*ok),
+        "denial audited"
+    );
+    assert!(
+        log.iter().any(|(m, ok)| m == "$/sessions" && *ok),
+        "success audited"
+    );
     drop(log);
 
     // `render_sessions` snapshots the registry — the live session, default core fields, no identity.
@@ -95,8 +103,16 @@ async fn default_entry_surfaces_origin_credential_and_current() {
 
     // A privileged local (AF_UNIX root) session with a credential set by the auth stack.
     let root = proto.new_session(Some(()), Arc::new(NullOutbound));
-    root.set_origin(SessionOrigin { transport: "unix", remote: None, uid: Some(0), secure: true });
-    root.set_credential(Credential { description: "UNIX_SOCKET uid=0".into(), uid: Some(0) });
+    root.set_origin(SessionOrigin {
+        transport: "unix",
+        remote: None,
+        uid: Some(0),
+        secure: true,
+    });
+    root.set_credential(Credential {
+        description: "UNIX_SOCKET uid=0".into(),
+        uid: Some(0),
+    });
 
     // A second, unprivileged session over TCP with no credential committed yet.
     let tcp = proto.new_session(Some(()), Arc::new(NullOutbound));
@@ -109,11 +125,22 @@ async fn default_entry_surfaces_origin_credential_and_current() {
 
     // A local session whose peer-cred uid is unknown → origin is the bare transport name.
     let anon = proto.new_session(Some(()), Arc::new(NullOutbound));
-    anon.set_origin(SessionOrigin { transport: "unix", remote: None, uid: None, secure: true });
+    anon.set_origin(SessionOrigin {
+        transport: "unix",
+        remote: None,
+        uid: None,
+        secure: true,
+    });
 
     // Render from `root`'s perspective: it is `current`, the others are not.
     let entries = proto.render_sessions(root.id());
-    let pick = |id: String| entries.iter().find(|e| e["session_id"] == id).unwrap().clone();
+    let pick = |id: String| {
+        entries
+            .iter()
+            .find(|e| e["session_id"] == id)
+            .unwrap()
+            .clone()
+    };
 
     let r = pick(root.id().to_string());
     assert_eq!(r["origin"], "unix:uid=0");
@@ -129,7 +156,10 @@ async fn default_entry_surfaces_origin_credential_and_current() {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs_f64();
-    assert!((created_at - (now - age)).abs() < 1.0, "created_at ≈ now − age");
+    assert!(
+        (created_at - (now - age)).abs() < 1.0,
+        "created_at ≈ now − age"
+    );
 
     let t = pick(tcp.id().to_string());
     assert_eq!(t["origin"], "10.0.0.5:54321"); // TCP remote, not a uid
