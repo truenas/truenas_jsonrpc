@@ -5,7 +5,7 @@
 //!   [`KeyType`], [`SpecialKeyring`], polymorphic [`Found`] search/listing, `describe`, `read_data`,
 //!   `add_key`/`add_keyring`, `set_timeout`, `revoke`/`invalidate`, `list_contents`, `unlink`, etc.
 //!   The kernel syscalls (`add_key(2)` / `request_key(2)` / `keyctl(2)`) are issued directly via
-//!   `libc` in [`sys`] — the crate's only `unsafe` (audited per call) — so a key written by this
+//!   `libc` in `sys` — the crate's only `unsafe` (audited per call) — so a key written by this
 //!   crate or by the `truenas_keyring` extension is readable by the other.
 //! - **A config-driven store** ([`KeyringStore`]): open a root keyring from a JSON [`KeyringConfig`]
 //!   with the always-present [`SERVER_KEYS`] (inbound SCRAM verifiers) / [`CLIENT_KEYS`] (outbound

@@ -1,7 +1,7 @@
 //! A minimal safe wrapper over the system GSSAPI (MIT krb5) **acceptor**, for the
 //! `truenas-rpc-auth` native Kerberos mechanism.
 //!
-//! Binds ~6 functions of the frozen RFC 2744 C ABI directly (see [`sys`]) instead of depending on
+//! Binds ~6 functions of the frozen RFC 2744 C ABI directly (in the private `sys` module) instead of depending on
 //! `libgssapi` (which pulls `bindgen` → `clang-sys` + a libclang build requirement). The only API
 //! is [`ServerCtx`]: create it, drive the handshake with [`step`](ServerCtx::step) until
 //! [`is_complete`](ServerCtx::is_complete), then read the authenticated principal with

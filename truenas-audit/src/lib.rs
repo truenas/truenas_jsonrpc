@@ -16,7 +16,7 @@
 //! `CAP_AUDIT_WRITE` or a disabled kernel audit is a benign no-op, not an error.
 //!
 //! Own the `NETLINK_AUDIT` syscall surface directly (audited `unsafe` over `libc`, confined to
-//! [`netlink`]) rather than depend on the stale, ~zero-adoption rust-netlink `audit` crate —
+//! `netlink`) rather than depend on the stale, ~zero-adoption rust-netlink `audit` crate —
 //! matching the `truenas-keyring` policy.
 //!
 //! ```no_run

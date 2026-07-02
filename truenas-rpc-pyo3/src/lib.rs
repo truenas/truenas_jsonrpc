@@ -8,7 +8,7 @@
 //! It speaks the raw CPython C-API directly through [`pyo3_ffi`] (no pyo3 framework, no
 //! proc-macros). The Rust spine still does
 //! routing / the session gate / authorization / audit — only the body crosses the FFI. The body
-//! runs on the core's blocking pool (the GIL is held only inside a [`Gil`] guard, never across
+//! runs on the core's blocking pool (the GIL is held only inside a `Gil` guard, never across
 //! an `.await`), so GIL contention can't stall the async runtime. This crate is **opt-in**: the
 //! default workspace build links no libpython.
 
