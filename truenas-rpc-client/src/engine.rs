@@ -484,6 +484,27 @@ impl<P: GracefulClose> Client<P> {
     }
 }
 
+/// A protocol that can **cancel** a request or subscription by its server-assigned id
+/// (`$/cancelRequest`). Distinct from [`ProtocolRuntime::encode_cancel`] (cancel-on-drop, keyed by the
+/// call's correlation key): this cancels by the **id the server handed back** (a subscription id).
+pub trait Cancels: ProtocolRuntime {
+    /// Encode a fire-and-forget cancellation targeting `target_id` (e.g. a subscription id).
+    fn encode_cancel_id(&self, target_id: &str) -> Vec<u8>;
+}
+
+impl<P: Cancels> Client<P> {
+    /// Cancel a subscription by its server-assigned id (the ack from a `subscribe_*` call) — a
+    /// fire-and-forget `$/cancelRequest`; the server drops the subscription and sends nothing back.
+    /// (Also cancels any other cancellable in-flight request addressed by that id.) Returns
+    /// [`ClientError::Closed`] if the connection is already gone.
+    pub fn unsubscribe(&self, sub_id: &str) -> Result<(), ClientError> {
+        if self.shared.closed.load(Ordering::SeqCst) {
+            return Err(ClientError::Closed);
+        }
+        self.shared.out_tx.send(self.runtime.encode_cancel_id(sub_id)).map_err(|_| ClientError::Closed)
+    }
+}
+
 /// A protocol that can host a **raw-fd transfer** — the `$/transferReady` → (`$/transferGo`)
 /// handshake that lends a handler the connection's socket fd for a self-delimiting bulk stream.
 pub trait Transfers: ProtocolRuntime {

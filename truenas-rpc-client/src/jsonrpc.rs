@@ -15,8 +15,8 @@ use crate::config::{ClientConfig, Endpoint};
 use truenas_rpc::TransferDirection;
 
 use crate::engine::{
-    Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
-    NotificationStream, ProtocolRuntime, TransferHandle, Transfers,
+    Authenticates, CallEngine, Cancels, Client, Framing, GracefulClose, Inbound, MethodKey,
+    Negotiates, NotificationStream, ProtocolRuntime, TransferHandle, Transfers,
 };
 use crate::error::ClientError;
 
@@ -309,6 +309,15 @@ impl Authenticates for JsonRpcRuntime {
 impl GracefulClose for JsonRpcRuntime {
     fn encode_close(&self, key: &Uuid) -> Vec<u8> {
         encode_json_request("$/sessionClose", key, &[])
+    }
+}
+
+impl Cancels for JsonRpcRuntime {
+    fn encode_cancel_id(&self, target_id: &str) -> Vec<u8> {
+        // A no-id `$/cancelRequest` notification; `target_id` is the server-assigned id to cancel
+        // (JSON-escaped, since a subscription id is an opaque string).
+        let target = serde_json::to_string(target_id).unwrap_or_else(|_| "\"\"".to_string());
+        encode_json_notification("$/cancelRequest", format!(r#"{{"target_id":{target}}}"#).as_bytes())
     }
 }
 

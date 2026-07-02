@@ -115,6 +115,14 @@ async fn subscribe_then_receive_a_published_notification() {
     assert!(srv.send_notification("sub", "nope", &Event { seq: 0, msg: String::new() }).is_err());
     assert!(srv.send_notification("nope", "events", &Event { seq: 0, msg: String::new() }).is_err());
 
+    // Unsubscribe (fire-and-forget `$/cancelRequest`); once the server has processed it, a further
+    // publish to the topic is no longer delivered to this client.
+    client.unsubscribe(&sub_id).unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    srv.send_notification("sub", "events", &Event { seq: 8, msg: "after".into() }).unwrap();
+    let after = tokio::time::timeout(Duration::from_millis(200), notifs.recv()).await;
+    assert!(after.is_err(), "no notification should arrive after unsubscribe, got {after:?}");
+
     let _ = std::fs::remove_file(&path);
 }
 

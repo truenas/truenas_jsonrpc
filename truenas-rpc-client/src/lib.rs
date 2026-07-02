@@ -32,8 +32,8 @@ pub use config::{ClientConfig, Endpoint};
 #[cfg(feature = "tls")]
 pub use tls::{ClientTls, ClientTlsBuilder};
 pub use engine::{
-    Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
-    NotificationStream, ProtocolRuntime, QueryResult, SubId, TransferHandle, Transfers,
+    Authenticates, CallEngine, Cancels, Client, Framing, GracefulClose, Inbound, MethodKey,
+    Negotiates, NotificationStream, ProtocolRuntime, QueryResult, SubId, TransferHandle, Transfers,
 };
 /// Stream direction for a raw-fd transfer, re-exported from the core.
 pub use truenas_rpc::TransferDirection;
