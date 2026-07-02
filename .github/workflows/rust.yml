@@ -15,52 +15,127 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Build + lint + test gate. clippy runs with `-D warnings`, so the workspace lint
-  # policy (Cargo.toml: `unsafe_code = "forbid"`, `missing_docs = "warn"`) is
-  # enforced — a missing doc or any clippy lint fails the build.
-  clippy-and-test:
-    name: Rust core — build, clippy, A/B conformance
+  # Fast core gate (no system dependencies): the workspace default-members — the dispatch core,
+  # filter, XDR, and codegen — held to the 100% coverage gate below. clippy runs with `-D warnings`,
+  # so the workspace lint policy (`unsafe_code = "forbid"`, `missing_docs = "warn"`) is enforced;
+  # the tests include `tests/conformance.rs`, the frozen-golden A/B (no external dependency).
+  core:
+    name: Core — fmt, clippy, test
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-features --all-targets --locked -- -D warnings
+      - run: cargo test --all-features --locked
 
-      # ubuntu-latest ships rustup + a current stable toolchain; just add clippy.
-      - name: Ensure clippy
-        run: rustup component add clippy
-
-      - name: Clippy (all targets, deny warnings)
-        run: cargo clippy --all-targets --all-features --locked -- -D warnings
-
-      # Runs the unit/integration tests, including tests/conformance.rs — the differential
-      # check that replays the committed frozen golden corpus
-      # (truenas-rpc/tests/conformance/golden.json) through the Rust dispatch core and
-      # asserts byte-stable responses + audit records. No external dependency.
-      - name: Test
-        run: cargo test --all-features --locked
-
-  # Coverage gate: native source-based coverage (`rustc -C instrument-coverage` + the
-  # toolchain's bundled `llvm-profdata`/`llvm-cov`), driven by rust/coverage.sh, with a
-  # hard 100%-of-lines floor. No third-party tools. Runs on stable: rather than
-  # *excluding* defensive code, the tests exercise it directly (e.g. `#[should_panic]`
-  # over the "can't happen" arms), so the floor is a real 100%.
+  # Coverage: the core's native 100% line floor (coverage.sh) + the client engine's behavioral floor
+  # (coverage-client.sh). Native source-based coverage (`rustc -C instrument-coverage` + the
+  # toolchain's bundled llvm-cov); libssl-dev is needed because the client's TLS tests link OpenSSL.
   coverage:
-    name: Rust core — 100% line coverage
+    name: Coverage — core 100%, client floor
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      # The runner's stable toolchain only lacks the LLVM coverage tools; add them.
-      - name: Add llvm-tools
-        run: rustup component add llvm-tools-preview
-
-      - name: Coverage (100% line floor)
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Core 100% line coverage
         run: bash coverage.sh 100
-
-      - name: Upload lcov report
-        if: always()
+      - name: Client behavioral floor
+        run: bash coverage-client.sh 85
+      - if: always()
         uses: actions/upload-artifact@v4
         with:
           name: lcov
           path: target/coverage/cov.lcov
+
+  # The whole workspace on stable + beta: clippy lints EVERY crate (the opt-in transport / auth /
+  # PyO3 / FFI crates the core job skips), with `--all-features` — safe because clippy only *checks*,
+  # never links, so demo-py's `extension-module` is fine. Then the non-default crates' tests, run
+  # per-crate: `cargo test --workspace --all-features` cannot be used, as it would enable
+  # `extension-module` and stop linking libpython, breaking the PyO3 test binaries. `beta` is
+  # informational (`continue-on-error`) — it catches upcoming-toolchain breakage without blocking.
+  workspace:
+    name: Workspace — clippy + tests (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - name: System libraries (libpython / krb5 / openssl)
+        run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
+      - run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Test the non-default crates
+        run: |
+          cargo test -p truenas-rpc-pyclient --locked
+          cargo test -p demo-py --locked                # PyO3 client: compile + in-process import (no extension-module)
+          cargo test -p truenas-rpc-pyo3 --locked
+          # FFI crates: their tests self-skip without kernel caps (audit / keyring) or a KDC (gssapi).
+          cargo test -p truenas-keyring -p truenas-audit -p truenas-gssapi --locked
+
+  # Feature-combination matrix on the socket crates: each feature individually, plus default and
+  # all-on, so a mis-gated `#[cfg(feature)]` cannot hide behind `--all-features`.
+  features:
+    name: Features — ${{ matrix.crate }} [${{ matrix.features }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { crate: truenas-rpc-client, features: "" }
+          - { crate: truenas-rpc-client, features: "tls" }
+          - { crate: truenas-rpc-client, features: "websocket" }
+          - { crate: truenas-rpc-client, features: "scram" }
+          - { crate: truenas-rpc-client, features: "fd-passing" }
+          - { crate: truenas-rpc-client, features: "tls websocket scram fd-passing" }
+          - { crate: truenas-rpc-server, features: "" }
+          - { crate: truenas-rpc-server, features: "tls" }
+          - { crate: truenas-rpc-server, features: "websocket" }
+          - { crate: truenas-rpc-server, features: "passthrough" }
+          - { crate: truenas-rpc-server, features: "tls websocket passthrough" }
+          - { crate: truenas-rpc-auth, features: "scram" }
+          - { crate: truenas-rpc-auth, features: "oauth" }
+          - { crate: truenas-rpc-auth, features: "scram keyring nss oauth gssapi passthrough" }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev libssl-dev pkg-config
+      - run: cargo test -p ${{ matrix.crate }} --no-default-features --features "${{ matrix.features }}" --locked
+
+  # Rustdoc across the whole workspace; a broken intra-doc link fails (RUSTDOCFLAGS: -D warnings).
+  docs:
+    name: Docs — cargo doc (deny warnings)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
+      - run: cargo doc --workspace --all-features --no-deps --locked
+
+  # MSRV: the workspace's declared `rust-version` (1.75) should compile. Build-only (`cargo check`) —
+  # `--all-features` is safe here too, since `check` never links. Informational (`continue-on-error`):
+  # it surfaces MSRV drift (a locked dep that bumped its own MSRV) without blocking; make it required
+  # once green if you want to enforce the floor.
+  msrv:
+    name: MSRV — cargo check (1.75)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.75.0
+      - run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
+      - run: cargo check --workspace --all-features --locked
