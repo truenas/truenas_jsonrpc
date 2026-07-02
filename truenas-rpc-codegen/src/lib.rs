@@ -208,12 +208,12 @@ impl Build {
 
 // --- CLI (used by the `codegen` example) -------------------------------------
 
-/// Run the codegen CLI: `<server|client|openrpc> <json-idl-dir> [--out FILE]`. Output goes
+/// Run the codegen CLI: `<types|server|client|openrpc> <json-idl-dir> [--out FILE]`. Output goes
 /// to `FILE` (if `--out` given) or is written to `stdout`.
 pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
     let sub = args.first().map(String::as_str);
     let dir = args.get(1).ok_or_else(|| {
-        CodegenError::new("usage: <server|client|openrpc> <json-idl-dir> [--out FILE]")
+        CodegenError::new("usage: <types|server|client|openrpc> <json-idl-dir> [--out FILE]")
     })?;
     let out_file = match args.get(2).map(String::as_str) {
         Some("--out") => Some(
@@ -226,12 +226,13 @@ pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
     };
     let spec = Spec::load_dir(dir)?;
     let text = match sub {
+        Some("types") => generate_types(&spec)?,
         Some("server") => generate_server(&spec)?,
         Some("client") => generate_client(&spec)?,
         Some("openrpc") => generate_openrpc(&spec)?,
         other => {
             return Err(CodegenError::new(format!(
-                "unknown subcommand {other:?} (expected server|client|openrpc)"
+                "unknown subcommand {other:?} (expected types|server|client|openrpc)"
             )))
         }
     };

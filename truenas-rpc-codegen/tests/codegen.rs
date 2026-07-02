@@ -370,7 +370,7 @@ fn build_resolves_env() {
 
 #[test]
 fn cli_subcommands_out_and_errors() {
-    for sub in ["server", "client", "openrpc"] {
+    for sub in ["types", "server", "client", "openrpc"] {
         let mut buf = Vec::new();
         run_cli(&[sub.to_string(), "tests/fixtures/sample".to_string()], &mut buf).unwrap();
         assert!(!buf.is_empty(), "{sub} produced output");
