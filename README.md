@@ -133,6 +133,28 @@ test -p demo-consumer` — extended with a redacted-secret method, a dual-wire (
 filterable query, and raw-fd transfers. The full IDL dialect (every method flag, the type mapping,
 the CLI) is documented in the [`truenas-rpc-codegen` README](truenas-rpc-codegen/README.md).
 
+### Consume it from Python
+
+The same spec also generates an optional **Python client** — a PyO3 extension module. Add
+`.emit_pyclient()` to `build.rs`, build the crate as a `cdylib` (e.g. with maturin), and call it —
+typed request in, typed response out:
+
+```python
+import catalog                                          # module name = the spec `name`
+client = catalog.CatalogClient.connect(catalog.Endpoint.unix("/run/catalog.sock"))
+
+thing = client.getthething(catalog.GetThingArgs(id=42))   # a class per $defs type; method = handler
+print(thing.name, thing.tags)                             # typed attribute getters
+client.close()
+```
+
+The request/response classes have keyword constructors and attribute getters, and a failure raises
+`RpcError`. The call is **synchronous** — it's a thin wrapper over the *Rust* typed client (which does
+the wire (de)serialization), driven on a background runtime via
+[`truenas-rpc-pyclient`](truenas-rpc-pyclient). [`examples/demo-py`](examples/demo-py) is a runnable
+build. This is the **basic** client (connect / call / close); subscriptions, filterable queries, and
+raw-fd transfers are follow-ons, and nested `$ref` fields currently surface as `dict`s.
+
 ### Best practices
 
 - **Spec-first, trait-as-contract.** The generated `Handlers` trait is the contract; evolve the IDL,
@@ -401,16 +423,48 @@ oracle: the remaining filter operators (`=` `!=` `>` `>=` `<` `<=` `in` `nin` `r
 multi-key, stable), `get`, `count`, `offset`, `limit`, and the middleware comparison semantics
 (numeric tower; `==`/`!=` total; `<`/`>`/… raise on incomparable operands).
 
-## Build & test
+## Development
+
+The workspace is **layered** for testing: a pure-core group held to a **100% line-coverage gate**, and
+the socket / FFI / PyO3 crates (excluded from that gate *and* from `default-members`) covered
+behaviorally and tested per-crate. Reproduce CI locally as follows.
+
+**Core gate** — the default members (dispatch core, filter, XDR, codegen); no system dependencies:
 
 ```sh
-cargo test --all-features --locked          # spine + pub/sub + filterable + both A/B goldens
-cargo clippy --all-targets --all-features -- -D warnings
-./coverage.sh 100                            # native source-based coverage, gated at 100%
+cargo fmt --all --check
+cargo clippy --all-features --all-targets -- -D warnings   # unsafe is forbidden; missing docs warn
+cargo test --all-features                                  # spine + pub/sub + filterable + both A/B goldens
+./coverage.sh 100                                          # native source-based coverage, gated at 100%
 ```
 
-The golden corpora are committed, frozen fixtures — the conformance tests replay them with no
-external dependency.
+**Client floor** — the async client engine (socket I/O; behavioral, so a floor not the 100% gate):
+
+```sh
+./coverage-client.sh 85
+```
+
+**Full workspace** — the opt-in transport / auth / PyO3 / FFI crates. They link system libraries, so
+install the headers first (`python3-dev` for the pyo3 crates, `libkrb5-dev` for GSSAPI, `libssl-dev`
+for TLS/SCRAM):
+
+```sh
+cargo clippy --workspace --all-features --all-targets -- -D warnings   # lints every crate (check-only)
+cargo test -p truenas-rpc-server --all-features                        # tls + websocket + passthrough
+cargo test -p truenas-rpc-client --all-features                        # tls + websocket + scram + fd-passing
+cargo test -p truenas-rpc-auth   --all-features                        # scram / oauth / gssapi / …
+cargo test -p truenas-rpc-pyclient
+cargo test -p demo-py                                                  # PyO3 client: compile + import proof
+```
+
+> **Don't** run `cargo test --workspace --all-features`: `examples/demo-py`'s `extension-module`
+> feature stops linking libpython (correct for a distributable `.so`) and so breaks test-linking. Test
+> the feature-gated and PyO3 crates **per-crate** (above); `cargo clippy --workspace --all-features` is
+> fine because it only *checks*, never links.
+
+The golden corpora are committed, frozen fixtures — the conformance tests replay them with no external
+dependency. CI ([`.github/workflows/rust.yml`](.github/workflows/rust.yml)) runs all of the above, plus
+a feature-combination matrix, a `beta` toolchain, an MSRV (1.75) build, and `cargo doc`.
 
 ## Code generation (`truenas-rpc-codegen`)
 
