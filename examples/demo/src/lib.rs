@@ -26,6 +26,9 @@ mod tests {
         tnfilter, CompiledFilters, CompiledOptions, Dispatched, Filtered, JsonRpcError,
         JsonRpcProtocol, NullOutbound, RequestCtx, Session,
     };
+    // The buffered stream helpers (`write_all`/`read_exact`) for the transfer handlers live on the
+    // server-side ext trait; the demo drives raw-fd transfers only from its test harness.
+    use truenas_rpc_server::FileTransferExt;
 
     const RID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
 
@@ -60,6 +63,43 @@ mod tests {
             ];
             Ok(tnfilter(items, f, o)?)
         }
+        fn download_ready(
+            &self,
+            req: &TransferArgs,
+            _cx: &RequestCtx<()>,
+        ) -> Result<DownloadReady, JsonRpcError> {
+            // The typed `$/transferReady` interim: how many bytes the client should expect.
+            Ok(DownloadReady { size: req.n })
+        }
+        fn download(
+            &self,
+            req: TransferArgs,
+            ft: &dyn truenas_rpc::FileTransfer,
+        ) -> Result<DownloadDone, JsonRpcError> {
+            // Server produces the stream: write `n` pattern bytes onto the lent connection fd.
+            let buf: Vec<u8> = (0..req.n as usize).map(|i| (i % 251) as u8).collect();
+            ft.write_all(&buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+            Ok(DownloadDone { sent: req.n })
+        }
+        fn upload_ready(
+            &self,
+            _req: &TransferArgs,
+            _cx: &RequestCtx<()>,
+        ) -> Result<Value, JsonRpcError> {
+            // No typed interim declared in the IDL → a free-form `serde_json::Value`.
+            Ok(json!({}))
+        }
+        fn upload(
+            &self,
+            req: TransferArgs,
+            ft: &dyn truenas_rpc::FileTransfer,
+        ) -> Result<UploadDone, JsonRpcError> {
+            // Client produces the stream: read `n` bytes off the lent connection fd.
+            let mut buf = vec![0u8; req.n as usize];
+            let got =
+                ft.read_exact(&mut buf).map_err(|e| JsonRpcError::request_failed(e.to_string()))?;
+            Ok(UploadDone { received: got as i64 })
+        }
     }
 
     fn proto() -> JsonRpcProtocol<()> {
@@ -79,7 +119,9 @@ mod tests {
             Dispatched::Reply(b) => serde_json::from_slice(&b).unwrap(),
             Dispatched::Nothing => panic!("expected a reply"),
             Dispatched::Transfer(_) | Dispatched::Passthrough(_) | Dispatched::Sessions { .. } => {
-                unreachable!("the demo has no transfer / passthrough methods")
+                // `json_call` is only used for plain/secret/filterable methods; the transfer
+                // methods are driven over a real socket in `generated_client_transfers_*`.
+                unreachable!("json_call is not used for transfer / passthrough / sessions methods")
             }
         }
     }
@@ -140,6 +182,57 @@ mod tests {
             QueryResult::Rows(rows) => assert_eq!(rows.len(), 3),
             other => panic!("expected rows, got {other:?}"),
         }
+
+        task.abort();
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn generated_client_transfers_over_a_live_server() {
+        // The generated `DemoClient::download` / `::upload` drive raw-fd transfers end-to-end against
+        // the generated `register()` (which wires `fd_transfer_method`) over a live AF_UNIX socket —
+        // the callback is handed a blocking `TransferHandle` for the self-delimiting bulk stream.
+        use truenas_rpc_client::{ClientConfig, Endpoint, JsonRpcClient};
+        use truenas_rpc_server::{JsonRpc, TruenasRpcServer, UnixConfig};
+
+        // Larger than a socket buffer so the stream's partial read/write loops are exercised.
+        const N: usize = 256 * 1024;
+
+        let path = std::env::temp_dir().join(format!("demo-xfer-{}.sock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let server = TruenasRpcServer::<()>::builder("demo").protocol("demo", proto()).build();
+        let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+        let task = tokio::spawn(async move { server.serve_unix_listener(listener, JsonRpc).await });
+
+        let (jc, _neg, _notifs) =
+            JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "demo", ClientConfig::default())
+                .await
+                .unwrap();
+        let client = DemoClient::new(jc);
+
+        // Download: the server streams N pattern bytes; the callback reads and verifies them.
+        let done = client
+            .download(TransferArgs { n: N as i64 }, move |ht| {
+                let mut buf = vec![0u8; N];
+                ht.read_exact(&mut buf)?;
+                if buf.iter().enumerate().any(|(i, &b)| b != (i % 251) as u8) {
+                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "corrupt download"));
+                }
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert_eq!(done.sent, N as i64, "the server's final reply follows the stream");
+
+        // Upload: the callback streams N pattern bytes; the server reports how many it read.
+        let done = client
+            .upload(TransferArgs { n: N as i64 }, move |ht| {
+                let buf: Vec<u8> = (0..N).map(|i| (i % 251) as u8).collect();
+                ht.write_all(&buf)
+            })
+            .await
+            .unwrap();
+        assert_eq!(done.received, N as i64);
 
         task.abort();
         let _ = std::fs::remove_file(&path);

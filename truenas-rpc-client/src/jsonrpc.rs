@@ -16,7 +16,7 @@ use truenas_rpc::TransferDirection;
 
 use crate::engine::{
     Authenticates, CallEngine, Client, Framing, GracefulClose, Inbound, MethodKey, Negotiates,
-    NotificationStream, ProtocolRuntime, Transfers,
+    NotificationStream, ProtocolRuntime, TransferHandle, Transfers,
 };
 use crate::error::ClientError;
 
@@ -387,6 +387,21 @@ impl CallEngine for JsonRpcClient {
         })
         .await
         .map_err(ClientError::into_jsonrpc)
+    }
+
+    async fn transfer(
+        &self,
+        method: MethodKey<'_>,
+        params: &[u8],
+        callback: Box<dyn FnOnce(TransferHandle) -> std::io::Result<()> + Send>,
+    ) -> Result<Vec<u8>, JsonRpcError> {
+        // A transfer rides the JSON wire (its request is a normal call). `Client::transfer` takes an
+        // owned method key; a transfer is rare and long-lived, so the one name clone is immaterial.
+        let jm = match method {
+            MethodKey::Name(n) => JsonRpcMethod::Name(n.to_string()),
+            MethodKey::Proc(p) => JsonRpcMethod::Proc(p),
+        };
+        Client::transfer(self, &jm, params, callback).await.map_err(ClientError::into_jsonrpc)
     }
 }
 

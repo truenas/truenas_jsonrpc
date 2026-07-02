@@ -828,4 +828,14 @@ pub trait CallEngine: Send + Sync {
     /// Encode-free call: `params` are the already-serialized request bytes; returns the serialized
     /// result bytes (or the flattened [`JsonRpcError`]).
     async fn call(&self, method: MethodKey<'_>, params: &[u8]) -> Result<Vec<u8>, JsonRpcError>;
+
+    /// Run a raw-fd transfer (a mode switch that streams on the connection fd — e.g. a dataset
+    /// send/receive). `callback` is **boxed** (so the seam stays object-safe) and receives the
+    /// blocking fd via a [`TransferHandle`] for the bulk stream; returns the server's final result.
+    async fn transfer(
+        &self,
+        method: MethodKey<'_>,
+        params: &[u8],
+        callback: Box<dyn FnOnce(TransferHandle) -> std::io::Result<()> + Send>,
+    ) -> Result<Vec<u8>, JsonRpcError>;
 }

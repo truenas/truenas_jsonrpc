@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "name": "demo",
   "version": "1.0.0",
-  "$comment": "End-to-end demo spec: a plain method, a secret-bearing method, an XDR method (both wires), and a filterable query.",
+  "$comment": "End-to-end demo spec: a plain method, a secret-bearing method, an XDR method (both wires), a filterable query, and raw-fd transfers (download + upload).",
   "$defs": {
     "GreetArgs": {
       "type": "object",
@@ -52,6 +52,32 @@
       "properties": { "id": { "type": "integer" }, "name": { "type": "string" } },
       "required": ["id", "name"],
       "additionalProperties": false
+    },
+    "TransferArgs": {
+      "$comment": "Params for the raw-fd transfer methods (blob.download / blob.upload): the byte count.",
+      "type": "object",
+      "properties": { "n": { "type": "integer" } },
+      "required": ["n"],
+      "additionalProperties": false
+    },
+    "DownloadReady": {
+      "$comment": "Typed $/transferReady interim for blob.download — the byte count the server will stream.",
+      "type": "object",
+      "properties": { "size": { "type": "integer" } },
+      "required": ["size"],
+      "additionalProperties": false
+    },
+    "DownloadDone": {
+      "type": "object",
+      "properties": { "sent": { "type": "integer" } },
+      "required": ["sent"],
+      "additionalProperties": false
+    },
+    "UploadDone": {
+      "type": "object",
+      "properties": { "received": { "type": "integer" } },
+      "required": ["received"],
+      "additionalProperties": false
     }
   },
   "methods": {
@@ -84,6 +110,20 @@
       "params": { "$ref": "#/$defs/QueryArgs" },
       "filterable": true,
       "entry": { "$ref": "#/$defs/Item" }
+    },
+    "blob.download": {
+      "summary": "Raw-fd download: the server streams `n` bytes after a typed `$/transferReady` interim.",
+      "handler": "download",
+      "params": { "$ref": "#/$defs/TransferArgs" },
+      "result": { "$ref": "#/$defs/DownloadDone" },
+      "transfer": { "direction": "download", "ready": { "$ref": "#/$defs/DownloadReady" } }
+    },
+    "blob.upload": {
+      "summary": "Raw-fd upload: the client streams `n` bytes; the server reports how many it read.",
+      "handler": "upload",
+      "params": { "$ref": "#/$defs/TransferArgs" },
+      "result": { "$ref": "#/$defs/UploadDone" },
+      "transfer": { "direction": "upload" }
     }
   }
 }
