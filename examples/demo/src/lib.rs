@@ -9,12 +9,22 @@
 // code, then re-exported at the crate root.
 #[allow(clippy::all, clippy::pedantic, missing_docs)]
 mod generated {
-    // The server (structs + `Handlers` + `register`) and the typed client (`DemoClient`) are
-    // generated from the same `$defs`, so including both here shares one set of structs.
+    // The shared `$defs` structs, then the server (`Handlers` + `register`) and the typed client
+    // (`DemoClient`) — both reference the one set of types.
+    include!(concat!(env!("OUT_DIR"), "/types_gen.rs"));
     include!(concat!(env!("OUT_DIR"), "/server_gen.rs"));
     include!(concat!(env!("OUT_DIR"), "/client_gen.rs"));
 }
 pub use generated::*;
+
+// Proof that a **standalone** client compiles from just the shared types + client bindings (no server
+// module): the `DemoClient` methods resolve the `$defs` structs from `types_gen.rs` alone. If the
+// client re-emitted no types, this would fail to compile.
+#[allow(clippy::all, clippy::pedantic, missing_docs, dead_code)]
+mod standalone_client {
+    include!(concat!(env!("OUT_DIR"), "/types_gen.rs"));
+    include!(concat!(env!("OUT_DIR"), "/client_gen.rs"));
+}
 
 #[cfg(test)]
 mod tests {

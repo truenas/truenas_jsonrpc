@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use truenas_rpc_codegen::{
-    generate_client, generate_openrpc, generate_server, run_cli, Build, Spec,
+    generate_client, generate_openrpc, generate_server, generate_types, run_cli, Build, Spec,
 };
 
 fn sample() -> Spec {
@@ -16,6 +16,7 @@ fn sample() -> Spec {
 #[ignore = "regenerates golden fixtures; run explicitly"]
 fn regen_fixtures() {
     let s = sample();
+    std::fs::write("tests/fixtures/expected_types.rs", generate_types(&s).unwrap()).unwrap();
     std::fs::write("tests/fixtures/expected_server.rs", generate_server(&s).unwrap()).unwrap();
     std::fs::write("tests/fixtures/expected_client.rs", generate_client(&s).unwrap()).unwrap();
     std::fs::write("tests/fixtures/openrpc.json", generate_openrpc(&s).unwrap()).unwrap();
@@ -28,6 +29,11 @@ fn tmp(name: &str) -> PathBuf {
 }
 
 // --- golden output -----------------------------------------------------------
+
+#[test]
+fn types_matches_golden() {
+    assert_eq!(generate_types(&sample()).unwrap(), include_str!("fixtures/expected_types.rs"));
+}
 
 #[test]
 fn server_matches_golden() {
@@ -50,6 +56,7 @@ fn openrpc_matches_cross_language_golden() {
 
 #[test]
 fn generation_is_deterministic() {
+    assert_eq!(generate_types(&sample()).unwrap(), generate_types(&sample()).unwrap());
     assert_eq!(generate_server(&sample()).unwrap(), generate_server(&sample()).unwrap());
     assert_eq!(generate_client(&sample()).unwrap(), generate_client(&sample()).unwrap());
     assert_eq!(generate_openrpc(&sample()).unwrap(), generate_openrpc(&sample()).unwrap());
@@ -61,6 +68,7 @@ fn generation_is_deterministic() {
 fn full_fixture_exercises_remaining_branches() {
     let spec = Spec::load_dir("tests/fixtures/full").unwrap();
     let s = generate_server(&spec).unwrap();
+    let t = generate_types(&spec).unwrap();
 
     // Subscription: a register line, but NO Handlers trait method.
     assert!(s.contains("SubscriptionDef::<Sub, Event>::new"));
@@ -70,18 +78,18 @@ fn full_fixture_exercises_remaining_branches() {
     assert!(s.contains(".cancellable()"));
     assert!(s.contains(r#".roles(["admin", "ops"])"#));
     assert!(s.contains(".audit()"));
-    // xdr-reachable optional: `note` is Option with `#[serde(default)]` and NO skip.
-    assert!(s.contains("#[serde(default)]\n    pub note: Option<String>"));
-    assert!(!s.contains("skip_serializing_if"));
-    // Every default kind.
-    assert!(s.contains(r#"#[serde(default = "default_optargs_name")]"#));
-    assert!(s.contains(r#"fn default_optargs_name() -> String { "anon".to_string() }"#));
-    assert!(s.contains("fn default_optargs_count() -> i64 { 7i64 }"));
-    assert!(s.contains("fn default_optargs_active() -> bool { true }"));
-    assert!(s.contains("fn default_optargs_ratio() -> f64 { 2.5f64 }"));
-    assert!(s.contains("fn default_optargs_mode() -> OptArgsMode { OptArgsMode::Fast }"));
+    // xdr-reachable optional: `note` is Option with `#[serde(default)]` and NO skip. (In the types.)
+    assert!(t.contains("#[serde(default)]\n    pub note: Option<String>"));
+    assert!(!t.contains("skip_serializing_if"));
+    // Every default kind (in the types module).
+    assert!(t.contains(r#"#[serde(default = "default_optargs_name")]"#));
+    assert!(t.contains(r#"fn default_optargs_name() -> String { "anon".to_string() }"#));
+    assert!(t.contains("fn default_optargs_count() -> i64 { 7i64 }"));
+    assert!(t.contains("fn default_optargs_active() -> bool { true }"));
+    assert!(t.contains("fn default_optargs_ratio() -> f64 { 2.5f64 }"));
+    assert!(t.contains("fn default_optargs_mode() -> OptArgsMode { OptArgsMode::Fast }"));
     // Type-default fields (level 0) use bare `#[serde(default)]`.
-    assert!(s.contains("#[serde(default)]\n    pub level: i64"));
+    assert!(t.contains("#[serde(default)]\n    pub level: i64"));
     // The xdr method binds `.xdr(2001u32)`.
     assert!(s.contains(".xdr(2001u32)"));
     // Audit is on by default (no `audit` block) — service defaults to the spec name.
@@ -98,7 +106,7 @@ fn python_methods_table_and_no_handler() {
     let s = generate_server(&spec).unwrap();
     assert!(s.contains(r#"PYTHON_METHODS: &[&str] = &["py.greet", "py.add", "py.boom"]"#));
     assert!(s.contains(".python_method("));
-    assert!(s.contains("pub struct GreetArgs")); // structs still emitted
+    assert!(generate_types(&spec).unwrap().contains("pub struct GreetArgs")); // structs in the types module
     assert!(!s.contains("fn greet(")); // python methods are NOT in the Handlers trait
     assert!(s.contains(r#".audit_message("greeting")"#)); // flags preserved
 }
@@ -167,7 +175,8 @@ fn multi_file_merges_and_rejects_duplicates() {
     std::fs::write(dir.join("b.json"), r##"{"name":"ignored","version":"9","$defs":{"B":{"type":"object","properties":{},"required":[]}},"methods":{"m2":{"handler":"m2","params":{"$ref":"#/$defs/B"},"result":{"$ref":"#/$defs/A"}}}}"##).unwrap();
     let spec = Spec::load_dir(&dir).unwrap(); // b.m2 result $ref A resolves across files
     let s = generate_server(&spec).unwrap();
-    assert!(s.contains("pub struct A") && s.contains("pub struct B"));
+    let t = generate_types(&spec).unwrap();
+    assert!(t.contains("pub struct A") && t.contains("pub struct B")); // merged $defs in the types module
     assert!(s.contains("fn m1(") && s.contains("fn m2("));
 
     let dup = tmp("multi-dup");
@@ -188,7 +197,8 @@ fn parse_err(json: &str) -> String {
 }
 fn gen_err(defs: &str) -> String {
     let json = format!(r#"{{"name":"t","version":"1","$defs":{defs},"methods":{{}}}}"#);
-    generate_server(&Spec::parse(&json, "spec").unwrap()).unwrap_err().to_string()
+    // Type/default emission (and its errors) live in the shared types module now.
+    generate_types(&Spec::parse(&json, "spec").unwrap()).unwrap_err().to_string()
 }
 
 #[test]
@@ -288,7 +298,7 @@ fn io_and_non_object_errors() {
 #[test]
 fn keyword_field_and_digit_enum() {
     let spec = r##"{"name":"t","version":"1","$defs":{"A":{"type":"object","properties":{"type":{"type":"string"},"kind":{"type":"string","enum":["1st","2nd"]}},"required":["type","kind"]}},"methods":{}}"##;
-    let s = generate_server(&Spec::parse(spec, "spec").unwrap()).unwrap();
+    let s = generate_types(&Spec::parse(spec, "spec").unwrap()).unwrap();
     assert!(s.contains("pub r#type: String")); // keyword field → raw identifier
     assert!(s.contains("_1st")); // digit-leading enum variant is `_`-prefixed
 }

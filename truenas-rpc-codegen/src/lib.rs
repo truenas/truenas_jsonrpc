@@ -9,6 +9,7 @@
 mod emit_client;
 mod emit_openrpc;
 mod emit_server;
+mod emit_types;
 mod error;
 mod model;
 mod naming;
@@ -89,7 +90,14 @@ fn merge(acc: &mut model::Spec, other: model::Spec, origin: &str) -> Result<()> 
     Ok(())
 }
 
-/// Emit the server module (typed structs + `Handlers` trait + `register()`).
+/// Emit the shared types module (the `$defs` structs + generated enums + serde default fns),
+/// referenced by both the server and client modules. A standalone client needs `types_gen.rs` +
+/// `client_gen.rs`; a server needs `types_gen.rs` + `server_gen.rs`.
+pub fn generate_types(spec: &Spec) -> Result<String> {
+    emit_types::generate(&spec.raw, &spec.origin)
+}
+
+/// Emit the server module (a `Handlers` trait + `register()`), over the [`generate_types`] structs.
 pub fn generate_server(spec: &Spec) -> Result<String> {
     emit_server::generate(&spec.raw, &spec.origin)
 }
@@ -140,6 +148,11 @@ impl Build {
     pub fn out_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.out_dir = Some(dir.into());
         self
+    }
+
+    /// Emit `types_gen.rs` (the shared `$defs` structs); returns its path (for `include!`).
+    pub fn emit_types(self) -> Result<PathBuf> {
+        self.emit("types_gen.rs", generate_types)
     }
 
     /// Emit `server_gen.rs`; returns its path (for `include!`).
