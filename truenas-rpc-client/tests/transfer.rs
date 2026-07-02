@@ -150,3 +150,56 @@ async fn upload_sendfiles_a_file_into_the_stream() {
     let _ = std::fs::remove_file(&src);
     let _ = std::fs::remove_file(&path);
 }
+
+#[tokio::test]
+async fn upload_writes_a_buffer_into_the_stream() {
+    let path = serve("ulb").await;
+    let (client, _neg, _notifs) =
+        JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "xfer", ClientConfig::default())
+            .await
+            .unwrap();
+
+    // The **buffered** upload path (`write_all`, not zero-copy `sendfile`): the payload passes through
+    // the process. The server reads it back and reports the count + checksum.
+    let params = serde_json::to_vec(&Args { n: N }).unwrap();
+    let reply = client
+        .transfer(&JsonRpcMethod::Name("x.upload".to_string()), &params, move |ht| {
+            let buf: Vec<u8> = (0..N).map(pattern).collect();
+            ht.write_all(&buf)
+        })
+        .await
+        .unwrap();
+
+    let done: Value = serde_json::from_slice(&reply).unwrap();
+    assert_eq!(done["received"], N);
+    let expected: u64 = (0..N).map(|i| u64::from(pattern(i))).sum();
+    assert_eq!(done["sum"].as_u64().unwrap(), expected);
+
+    let _ = std::fs::remove_file(&path);
+}
+
+#[tokio::test]
+async fn a_failing_transfer_callback_tears_the_connection_down() {
+    let path = serve("err").await;
+    let (client, _neg, _notifs) =
+        JsonRpcClient::connect_negotiate(&Endpoint::unix(&path), "xfer", ClientConfig::default())
+            .await
+            .unwrap();
+
+    // The callback returns an error mid-transfer: the transfer surfaces it and the connection's wire
+    // state is now indeterminate, so it is torn down (this exercises the abort path).
+    let params = serde_json::to_vec(&Args { n: N }).unwrap();
+    let result = client
+        .transfer(&JsonRpcMethod::Name("x.download".to_string()), &params, |_ht| {
+            Err(std::io::Error::other("callback refused the stream"))
+        })
+        .await;
+    assert!(result.is_err(), "a callback error must surface as an error");
+
+    // The connection is down: a subsequent call resolves as closed rather than hanging.
+    let after =
+        client.call(&JsonRpcMethod::Name("x.download".to_string()), &params).await;
+    assert!(after.is_err(), "the connection is torn down after a failed transfer");
+
+    let _ = std::fs::remove_file(&path);
+}

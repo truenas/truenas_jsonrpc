@@ -119,7 +119,9 @@ impl Mechanism for ScramClient {
             .as_deref()
             .ok_or_else(|| ClientError::Auth("no server signature was expected".into()))?;
         // Constant-time compare the `v=…` strings (mutual auth: the server knows the credential).
-        if openssl::memcmp::eq(got.as_bytes(), expected.as_bytes()) {
+        // Guard the length first — `openssl::memcmp::eq` panics on a length mismatch, so a server
+        // returning a wrong-length `v=` must be rejected here, not allowed to abort the process.
+        if got.len() == expected.len() && openssl::memcmp::eq(got.as_bytes(), expected.as_bytes()) {
             Ok(())
         } else {
             Err(ClientError::Auth("server signature mismatch (mutual auth failed)".into()))
@@ -204,5 +206,33 @@ mod tests {
     #[test]
     fn username_escaping() {
         assert_eq!(escape("a,b=c"), "a=2Cb=3Dc");
+    }
+
+    /// A well-formed server-first for a fresh `ScramClient` (echoes its nonce, a valid salt + iters).
+    fn drive(client: &mut ScramClient) {
+        let _first = client.first().unwrap();
+        let server_first =
+            format!("r={}srv,s={},i=4096", client.nonce_b64, encode_block(b"some-salt-bytes"));
+        client.respond(&json!({ "message": server_first })).unwrap();
+    }
+
+    #[test]
+    fn verify_rejects_a_wrong_or_missing_server_final() {
+        let mut c = ScramClient::new("alice", b"key", b"binding");
+        drive(&mut c);
+        // A wrong server signature is a mutual-auth failure (the client refuses).
+        assert!(c.verify(Some(&json!({ "scram": "v=not-the-right-signature" }))).is_err());
+        // A success with no server-final at all is also refused.
+        assert!(c.verify(None).is_err());
+    }
+
+    #[test]
+    fn respond_rejects_a_malformed_server_first() {
+        let mut c = ScramClient::new("alice", b"key", b"binding");
+        let _ = c.first().unwrap();
+        // Missing the iteration count → not a usable server-first.
+        assert!(c.respond(&json!({ "message": "r=abc,s=c2FsdA==" })).is_err());
+        // Missing the `message` field entirely.
+        assert!(c.respond(&json!({})).is_err());
     }
 }

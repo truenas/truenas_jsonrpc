@@ -171,6 +171,34 @@ async fn mtls_untrusted_client_cert_is_rejected() {
     task.abort();
 }
 
+#[tokio::test]
+async fn tls_verifies_the_server_against_custom_roots() {
+    // A CA-signed server cert (SAN=localhost); the client trusts only that CA and verifies the
+    // hostname — the real-world path, exercising `ClientTls::builder().roots_pem(..)`.
+    let (ca, ca_key) = make_ca();
+    let (scert, skey) = make_server(&ca, &ca_key, "localhost");
+    let tls = TlsConfig::from_pem(&scert, &skey, TlsMode::Kernel).unwrap();
+    let srv = server();
+    let (listener, addr) = TruenasRpcServer::<()>::bind_tcp("127.0.0.1:0").await.unwrap();
+    let task = tokio::spawn(async move { srv.serve_tls_listener(listener, tls, JsonRpc).await });
+
+    let client_tls = ClientTls::builder().roots_pem(&ca.to_pem().unwrap()).build().unwrap();
+    let (client, neg, _notifs) = JsonRpcClient::connect_negotiate(
+        &Endpoint::tls(addr.to_string(), "localhost", client_tls),
+        "main",
+        ClientConfig::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(neg.protocol, "main");
+    let bytes = client
+        .call(&JsonRpcMethod::Name("math.add".into()), &serde_json::to_vec(&AddArgs { a: 19, b: 23 }).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(serde_json::from_slice::<AddResult>(&bytes).unwrap().sum, 42);
+    task.abort();
+}
+
 // --- test certificate generation (mirrors the server's tls test) --------------------------------
 
 use openssl::pkey::{PKey, Private};
@@ -246,6 +274,30 @@ fn make_client(ca: &X509, ca_key: &PKey<Private>, name: &str) -> (Vec<u8>, Vec<u
     b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
     b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
     b.append_extension(ExtendedKeyUsage::new().client_auth().build().unwrap()).unwrap();
+    b.sign(ca_key, MessageDigest::sha256()).unwrap();
+    (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
+}
+
+/// A leaf **server** cert (`CN=<name>`, `serverAuth`, `SAN=DNS:<name>`) signed by `ca`.
+fn make_server(ca: &X509, ca_key: &PKey<Private>, name: &str) -> (Vec<u8>, Vec<u8>) {
+    use openssl::asn1::Asn1Time;
+    use openssl::hash::MessageDigest;
+    use openssl::x509::extension::{ExtendedKeyUsage, SubjectAlternativeName};
+    let key = rsa_key();
+    let mut b = X509::builder().unwrap();
+    b.set_version(2).unwrap();
+    b.set_serial_number(&rand_serial()).unwrap();
+    b.set_subject_name(&cn(name)).unwrap();
+    b.set_issuer_name(ca.subject_name()).unwrap();
+    b.set_pubkey(&key).unwrap();
+    b.set_not_before(&Asn1Time::days_from_now(0).unwrap()).unwrap();
+    b.set_not_after(&Asn1Time::days_from_now(1).unwrap()).unwrap();
+    b.append_extension(ExtendedKeyUsage::new().server_auth().build().unwrap()).unwrap();
+    let san = SubjectAlternativeName::new()
+        .dns(name)
+        .build(&b.x509v3_context(Some(ca), None))
+        .unwrap();
+    b.append_extension(san).unwrap();
     b.sign(ca_key, MessageDigest::sha256()).unwrap();
     (b.build().to_pem().unwrap(), key.private_key_to_pem_pkcs8().unwrap())
 }
