@@ -14,16 +14,20 @@
 //! This crate does socket I/O, so (like `truenas-rpc-server`) it is excluded from the workspace
 //! default members and covered behaviorally.
 
+mod auth;
 mod config;
 mod engine;
 mod error;
 mod jsonrpc;
+#[cfg(feature = "scram")]
+mod scram;
 #[cfg(feature = "tls")]
 mod tls;
 mod transport;
 #[cfg(feature = "websocket")]
 mod ws;
 
+pub use auth::{AuthOutcome, Mechanism};
 pub use config::{ClientConfig, Endpoint};
 #[cfg(feature = "tls")]
 pub use tls::{ClientTls, ClientTlsBuilder};

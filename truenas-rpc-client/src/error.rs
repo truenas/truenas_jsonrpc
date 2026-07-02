@@ -24,6 +24,11 @@ pub enum ClientError {
     /// so there is no plaintext fd to lend. Use a plain AF_UNIX/TCP — or a kTLS — connection.
     #[error("transport does not support raw-fd transfer (use a plain AF_UNIX/TCP or kTLS connection)")]
     NoTransfer,
+    /// A client-side authentication-mechanism failure — distinct from a server *refusal* (which is an
+    /// [`AuthOutcome`](crate::AuthOutcome)): e.g. the server's mutual-auth signature didn't verify, a
+    /// challenge was malformed, or SCRAM-PLUS was attempted without a TLS channel binding.
+    #[error("authentication failed: {0}")]
+    Auth(String),
 }
 
 impl ClientError {

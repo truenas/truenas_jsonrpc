@@ -805,6 +805,7 @@ dependencies = [
  "tokio-openssl",
  "tokio-tungstenite",
  "truenas-rpc",
+ "truenas-rpc-auth",
  "truenas-rpc-server",
  "truenas-xdr",
  "uuid",

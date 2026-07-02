@@ -24,6 +24,9 @@ tls = ["dep:openssl", "dep:openssl-sys", "dep:foreign-types"]
 # WebSocket transport (`ws://`, and `wss://` with `tls`). Off by default. One JSON-RPC frame per
 # WebSocket message; `tokio-openssl` backs the userspace TLS pump under `wss`.
 websocket = ["dep:tokio-tungstenite", "dep:futures-util", "dep:tokio-openssl"]
+# SCRAM-SHA-512-PLUS client login. Requires a TLS transport (the exchange binds to
+# `tls-server-end-point`), so it implies `tls` and reuses the OpenSSL that feature already pulls.
+scram = ["tls"]
 
 [dependencies]
 truenas-rpc = { path = "../truenas-rpc" }
@@ -48,6 +51,8 @@ futures-util = { version = "0.3", optional = true }
 tokio-openssl = { version = "0.6", optional = true }
 
 [dev-dependencies]
-# The transport tests stand up a live server over TLS / WebSocket and drive the client against it.
+# The transport tests stand up a live server over TLS / WebSocket and drive the client against it;
+# the SCRAM test adds a live auth stack (server-side SCRAM verifier + credential source).
 truenas-rpc-server = { path = "../truenas-rpc-server", features = ["tls", "websocket"] }
+truenas-rpc-auth = { path = "../truenas-rpc-auth", features = ["scram"] }
 serde = { workspace = true }
