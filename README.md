@@ -4,6 +4,165 @@ A JSON-RPC 2.0 **server/client protocol stack** for TrueNAS — a transport-agno
 core, a few transports, and a matching client — implemented in Rust as a Cargo workspace. The
 language-agnostic wire contract is in [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
+## Quickstart: build an RPC service
+
+A service is **spec-first**: you describe an interface in `json-idl`, code generation turns it into a
+typed `Handlers` trait plus a matching typed client, and you implement the trait. The generated trait
+*is* the contract — a missing or mistyped handler is a compile error, not a runtime surprise.
+
+```text
+my-greeter/
+├── Cargo.toml
+├── build.rs            # runs codegen
+├── json-idl/
+│   └── greeter.json    # the interface — the source of truth
+└── src/
+    └── lib.rs          # impl the generated Handlers
+```
+
+**1. Describe the interface** (`json-idl/greeter.json`) — one method, its argument and result types:
+
+```json
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "greeter",
+  "version": "1.0.0",
+  "$defs": {
+    "GreetArgs":   { "type": "object", "properties": { "name":    { "type": "string" } }, "required": ["name"],    "additionalProperties": false },
+    "GreetResult": { "type": "object", "properties": { "message": { "type": "string" } }, "required": ["message"], "additionalProperties": false }
+  },
+  "methods": {
+    "greet": {
+      "summary": "Greet by name.",
+      "handler": "greet",
+      "params": { "$ref": "#/$defs/GreetArgs" },
+      "result": { "$ref": "#/$defs/GreetResult" }
+    }
+  }
+}
+```
+
+**2. Wire up codegen** (`build.rs`) — emits three modules into `OUT_DIR` at build time; nothing
+generated is committed:
+
+```rust
+// build.rs
+fn main() {
+    let json_idl = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("json-idl");
+    let build = || truenas_rpc_codegen::Build::new().json_idl(json_idl.clone());
+    build().emit_types().expect("types codegen");    // shared $defs structs  -> types_gen.rs
+    build().emit_server().expect("server codegen");  // Handlers + register   -> server_gen.rs
+    build().emit_client().expect("client codegen");  // the typed client      -> client_gen.rs
+}
+```
+
+`Cargo.toml` (these crates aren't published — depend on them by `path` or `git`):
+
+```toml
+[dependencies]
+truenas-rpc        = { path = "…" }   # dispatch core: JsonRpcProtocol, RequestCtx, JsonRpcError
+truenas-rpc-server = { path = "…" }   # serve the protocol over a socket
+truenas-rpc-client = { path = "…" }   # the generated client (drop if callers live in another crate)
+truenas-audit      = { path = "…" }   # audit sink — auditing is on by default
+serde      = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio      = { version = "1", features = ["full"] }
+
+[build-dependencies]
+truenas-rpc-codegen = { path = "…" }
+```
+
+**3. Implement the handlers** (`src/lib.rs`) — `include!` the generated modules (**types first**),
+then fill in the trait:
+
+```rust
+#[allow(clippy::all, clippy::pedantic, missing_docs)]
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/types_gen.rs"));   // the $defs structs
+    include!(concat!(env!("OUT_DIR"), "/server_gen.rs"));  // Handlers trait + register()
+    include!(concat!(env!("OUT_DIR"), "/client_gen.rs"));  // the typed GreeterClient
+}
+pub use generated::*;
+
+use std::sync::Arc;
+use truenas_rpc::{JsonRpcError, JsonRpcProtocol, RequestCtx};
+
+struct GreetHandlers;
+
+impl Handlers<()> for GreetHandlers {
+    fn greet(&self, req: GreetArgs, _cx: &RequestCtx<()>) -> Result<GreetResult, JsonRpcError> {
+        Ok(GreetResult { message: format!("hi {}", req.name) })
+    }
+}
+
+/// The dispatchable protocol — `register` binds every method the IDL declares to a handler.
+pub fn proto() -> JsonRpcProtocol<()> {
+    register(JsonRpcProtocol::<()>::builder("greeter", "1.0.0"), Arc::new(GreetHandlers))
+        .expect("register")
+        .build()
+}
+```
+
+**4. Serve it** — over a trusted-local AF_UNIX socket (runs forever; spawn it, or `tokio::join!`
+several transports):
+
+```rust
+use truenas_rpc_server::{JsonRpc, TruenasRpcServer, UnixConfig};
+
+let server = TruenasRpcServer::<()>::builder("greeter").protocol("greeter", proto()).build();
+server.serve_unix(UnixConfig::new("/run/greeter.sock"), JsonRpc).await?;
+```
+
+**5. Call it** — from a caller (its own crate, or this crate's tests) via the generated client (the
+spec `name` → `GreeterClient`):
+
+```rust
+use truenas_rpc_client::{ClientConfig, Endpoint, JsonRpcClient};
+
+let (engine, _negotiated, _notifications) =
+    JsonRpcClient::connect_negotiate(&Endpoint::unix("/run/greeter.sock"), "greeter", ClientConfig::default())
+        .await?;
+let client = GreeterClient::new(engine);
+
+let reply = client.greet(GreetArgs { name: "world".into() }).await?;
+assert_eq!(reply.message, "hi world");
+```
+
+That's the whole loop. [`examples/demo`](examples/demo) is this exact flow — runnable with `cargo
+test -p demo-consumer` — extended with a redacted-secret method, a dual-wire (JSON + XDR) method, a
+filterable query, and raw-fd transfers. The full IDL dialect (every method flag, the type mapping,
+the CLI) is documented in the [`truenas-rpc-codegen` README](truenas-rpc-codegen/README.md).
+
+### Best practices
+
+- **Spec-first, trait-as-contract.** The generated `Handlers` trait is the contract; evolve the IDL,
+  not the generated code. A missing or mistyped handler won't compile.
+- **Emit one set of types.** Always run `emit_types()` — server and client share the `$defs` structs.
+  A standalone client (no server crate) is just `types_gen.rs` + `client_gen.rs`.
+- **Generate at build time; don't commit the output.** `build.rs` regenerates into `OUT_DIR` every
+  build, so the spec and the bindings can't drift — review the *spec* diff (the contract), not
+  machine output, and never hand-edit `*_gen.rs`. If you must check bindings in (to show them in PR
+  diffs, or to drop the codegen build-dependency for downstream consumers), emit to a tracked dir —
+  `Build::new().json_idl(dir).out_dir("src/generated").emit_*()`, or the CLI `codegen server
+  ./json-idl --out src/generated/server_gen.rs` — **and add a CI step that fails if regeneration
+  produces a `git diff`**.
+- **Fail with `JsonRpcError`, don't panic.** Return `Err(JsonRpcError::request_failed(…))` (or a
+  sibling constructor) from a handler; a panic tears down the connection.
+- **Mark secrets in the IDL.** A `"secret": true` field becomes a `Secret<String>` — redacted in
+  audit logs and `Debug`, read via deref.
+- **Auditing is on by default.** It's declared per method in the IDL (`"audit": true`,
+  `"auditMessage": …`); generated servers wire the sink automatically. Opt out only deliberately.
+- **Authenticate anything network-facing.** A trusted-local AF_UNIX socket needs none; for TCP/TLS,
+  install an auth stack — `AuthStack::builder().scram(source).build()` + `install(builder, stack)` +
+  `.state_from_peer(AuthSession::from_peer)` — for channel-bound SCRAM-SHA-512-PLUS. See
+  [`truenas-rpc-auth`](truenas-rpc-auth).
+- **Transports are opt-in and fail closed.** Client `tls` / `websocket` / `scram` / `fd-passing`
+  features are off by default (AF_UNIX + TCP only); a capability a transport can't host (a raw-fd
+  transfer over WebSocket) is *refused*, never silently dropped.
+- **Test at two levels.** Fast, in-process: build `proto()` and call
+  `JsonRpcProtocol::dispatch(bytes, &session)`. Full path: stand up a `TruenasRpcServer` and drive
+  the generated client over a real socket. `examples/demo` does both.
+
 ## What it implements
 
 A refinement of JSON-RPC 2.0 designed for long-lived, authenticated, multiplexed connections: a
