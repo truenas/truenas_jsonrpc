@@ -8,6 +8,7 @@
 
 mod emit_client;
 mod emit_openrpc;
+mod emit_pyclient;
 mod emit_server;
 mod emit_types;
 mod error;
@@ -113,6 +114,13 @@ pub fn generate_openrpc(spec: &Spec) -> Result<String> {
     emit_openrpc::generate(&spec.raw, &spec.origin)
 }
 
+/// Emit the **optional** Python client (a PyO3 extension module): a `#[pyclass]` per `$defs` type + a
+/// `#[pyclass]` client wrapping the generated Rust typed client ([`generate_client`]), over the
+/// hand-written `truenas-rpc-pyclient` runtime. Non-default — the consumer opts in by calling it.
+pub fn generate_pyclient(spec: &Spec) -> Result<String> {
+    emit_pyclient::generate(&spec.raw, &spec.origin)
+}
+
 // --- build.rs helper ---------------------------------------------------------
 
 /// A `build.rs` helper (prost/tonic-build style): point it at a `json-idl/` dir and emit one
@@ -170,6 +178,11 @@ impl Build {
         self.emit("openrpc.json", generate_openrpc)
     }
 
+    /// Emit `pyclient_gen.rs` (the optional PyO3 Python client); returns its path (for `include!`).
+    pub fn emit_pyclient(self) -> Result<PathBuf> {
+        self.emit("pyclient_gen.rs", generate_pyclient)
+    }
+
     fn resolved_json_idl(&self) -> Result<PathBuf> {
         let p =
             self.json_idl.clone().ok_or_else(|| CodegenError::new("Build::json_idl(..) was not set"))?;
@@ -213,7 +226,7 @@ impl Build {
 pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
     let sub = args.first().map(String::as_str);
     let dir = args.get(1).ok_or_else(|| {
-        CodegenError::new("usage: <types|server|client|openrpc> <json-idl-dir> [--out FILE]")
+        CodegenError::new("usage: <types|server|client|openrpc|pyclient> <json-idl-dir> [--out FILE]")
     })?;
     let out_file = match args.get(2).map(String::as_str) {
         Some("--out") => Some(
@@ -230,9 +243,10 @@ pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
         Some("server") => generate_server(&spec)?,
         Some("client") => generate_client(&spec)?,
         Some("openrpc") => generate_openrpc(&spec)?,
+        Some("pyclient") => generate_pyclient(&spec)?,
         other => {
             return Err(CodegenError::new(format!(
-                "unknown subcommand {other:?} (expected types|server|client|openrpc)"
+                "unknown subcommand {other:?} (expected types|server|client|openrpc|pyclient)"
             )))
         }
     };

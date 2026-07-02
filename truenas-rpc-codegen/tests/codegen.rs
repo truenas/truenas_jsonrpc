@@ -5,7 +5,8 @@
 use std::path::PathBuf;
 
 use truenas_rpc_codegen::{
-    generate_client, generate_openrpc, generate_server, generate_types, run_cli, Build, Spec,
+    generate_client, generate_openrpc, generate_pyclient, generate_server, generate_types, run_cli,
+    Build, Spec,
 };
 
 fn sample() -> Spec {
@@ -19,6 +20,7 @@ fn regen_fixtures() {
     std::fs::write("tests/fixtures/expected_types.rs", generate_types(&s).unwrap()).unwrap();
     std::fs::write("tests/fixtures/expected_server.rs", generate_server(&s).unwrap()).unwrap();
     std::fs::write("tests/fixtures/expected_client.rs", generate_client(&s).unwrap()).unwrap();
+    std::fs::write("tests/fixtures/expected_pyclient.rs", generate_pyclient(&s).unwrap()).unwrap();
     std::fs::write("tests/fixtures/openrpc.json", generate_openrpc(&s).unwrap()).unwrap();
 }
 
@@ -46,6 +48,11 @@ fn client_matches_golden() {
 }
 
 #[test]
+fn pyclient_matches_golden() {
+    assert_eq!(generate_pyclient(&sample()).unwrap(), include_str!("fixtures/expected_pyclient.rs"));
+}
+
+#[test]
 fn openrpc_matches_cross_language_golden() {
     let mut got: serde_json::Value = serde_json::from_str(&generate_openrpc(&sample()).unwrap()).unwrap();
     let mut golden: serde_json::Value = serde_json::from_str(include_str!("fixtures/openrpc.json")).unwrap();
@@ -59,6 +66,7 @@ fn generation_is_deterministic() {
     assert_eq!(generate_types(&sample()).unwrap(), generate_types(&sample()).unwrap());
     assert_eq!(generate_server(&sample()).unwrap(), generate_server(&sample()).unwrap());
     assert_eq!(generate_client(&sample()).unwrap(), generate_client(&sample()).unwrap());
+    assert_eq!(generate_pyclient(&sample()).unwrap(), generate_pyclient(&sample()).unwrap());
     assert_eq!(generate_openrpc(&sample()).unwrap(), generate_openrpc(&sample()).unwrap());
 }
 
@@ -98,6 +106,11 @@ fn full_fixture_exercises_remaining_branches() {
     // The client + OpenRPC also generate cleanly for the full spec.
     assert!(generate_client(&spec).unwrap().contains("subscribe_events"));
     assert!(generate_openrpc(&spec).unwrap().contains("\"x-direction\": \"server_client\""));
+
+    // The Python client skips the subscription (a comment, not a method).
+    let py = generate_pyclient(&spec).unwrap();
+    assert!(py.contains("server->client subscription — not in the basic Python client"));
+    assert!(!py.contains("fn events("));
 }
 
 #[test]
@@ -331,6 +344,27 @@ fn emit_error_paths() {
     assert!(generate_openrpc(&Spec::parse(bad_type, "spec").unwrap()).is_err());
 }
 
+#[test]
+fn pyclient_errors() {
+    let gen_err = |spec: &str| generate_pyclient(&Spec::parse(spec, "spec").unwrap()).unwrap_err().to_string();
+
+    // A spec name that isn't an identifier → no Python module name.
+    assert!(gen_err(r##"{"name":"bad-name","version":"1","$defs":{},"methods":{}}"##)
+        .contains("not a valid Python module identifier"));
+    // A non-object $def, and a non-identifier field, are rejected during class emission.
+    assert!(gen_err(r##"{"name":"t","version":"1","$defs":{"A":{"type":"string"}},"methods":{}}"##)
+        .contains("must be a JSON object schema"));
+    assert!(gen_err(r##"{"name":"t","version":"1","$defs":{"A":{"type":"object","properties":{"bad-name":{"type":"string"}}}},"methods":{}}"##)
+        .contains("not a valid identifier"));
+    // A request method needs a `$ref` params, a `result`, and a `$ref` result.
+    let m = |body: &str| format!(r##"{{"name":"t","version":"1","$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"m":{{"handler":"m",{body}}}}}}}"##);
+    assert!(gen_err(&m(r##""params":{"type":"object","properties":{}},"result":{"$ref":"#/$defs/A"}"##))
+        .contains("params must be a $ref"));
+    assert!(gen_err(&m(r##""params":{"$ref":"#/$defs/A"}"##)).contains("missing 'result'"));
+    assert!(gen_err(&m(r##""params":{"$ref":"#/$defs/A"},"result":{"type":"object","properties":{}}"##))
+        .contains("result must be a $ref"));
+}
+
 // --- Build helper ------------------------------------------------------------
 
 #[test]
@@ -344,6 +378,9 @@ fn build_emits_artifacts_with_explicit_out() {
     assert!(std::fs::read_to_string(&client).unwrap().contains("truenas_rpc_client::CallEngine"));
     let openrpc = Build::new().json_idl(&abs).out_dir(&out).emit_openrpc().unwrap();
     assert!(std::fs::read_to_string(&openrpc).unwrap().contains("\"openrpc\""));
+    let pyclient = Build::new().json_idl(&abs).out_dir(&out).emit_pyclient().unwrap();
+    assert!(pyclient.ends_with("pyclient_gen.rs"));
+    assert!(std::fs::read_to_string(&pyclient).unwrap().contains("pyo3::pymodule"));
     assert!(Build::new().out_dir(&out).emit_server().is_err()); // missing json_idl
 }
 
@@ -370,7 +407,7 @@ fn build_resolves_env() {
 
 #[test]
 fn cli_subcommands_out_and_errors() {
-    for sub in ["types", "server", "client", "openrpc"] {
+    for sub in ["types", "server", "client", "openrpc", "pyclient"] {
         let mut buf = Vec::new();
         run_cli(&[sub.to_string(), "tests/fixtures/sample".to_string()], &mut buf).unwrap();
         assert!(!buf.is_empty(), "{sub} produced output");

@@ -121,6 +121,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-py"
+version = "0.0.0"
+dependencies = [
+ "pyo3",
+ "serde",
+ "serde_json",
+ "tokio",
+ "truenas-rpc",
+ "truenas-rpc-client",
+ "truenas-rpc-codegen",
+ "truenas-rpc-pyclient",
+ "truenas-rpc-server",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -531,6 +546,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pythonize"
+version = "0.23.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "91a6ee7a084f913f98d70cdc3ebec07e852b735ae3059a1500db2661265da9ff"
+dependencies = [
+ "pyo3",
+ "serde",
+]
+
+[[package]]
 name = "quote"
 version = "1.0.45"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -871,24 +896,25 @@ dependencies = [
 ]
 
 [[package]]
-name = "truenas-rpc-client-pyo3"
+name = "truenas-rpc-codegen"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "truenas-rpc-pyclient"
 version = "0.1.0"
 dependencies = [
  "pyo3",
+ "pythonize",
  "serde",
  "serde_json",
  "tokio",
  "truenas-rpc",
  "truenas-rpc-client",
  "truenas-rpc-server",
-]
-
-[[package]]
-name = "truenas-rpc-codegen"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
 ]
 
 [[package]]

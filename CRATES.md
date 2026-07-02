@@ -18,7 +18,7 @@ coverage model. For the *consumer's* view ("what goes in my `Cargo.toml`") see t
 | [`truenas-rpc-client`](#truenas-rpc-client) | Async client engine | opt-in | behavioral (≥85% floor) |
 | [`truenas-rpc-auth`](#truenas-rpc-auth) | Auth mechanisms (peer-cred / mTLS / SCRAM / …) | opt-in | behavioral |
 | [`truenas-rpc-pyo3`](#truenas-rpc-pyo3) | Embedded-CPython bridge for `python:true` bodies | opt-in | behavioral |
-| [`truenas-rpc-client-pyo3`](#truenas-rpc-client-pyo3) | Blocking PyO3 bridge for the generated Python client | opt-in | behavioral |
+| [`truenas-rpc-pyclient`](#truenas-rpc-pyclient) | Runtime for the generated Python client | opt-in | behavioral |
 | [`truenas-keyring`](#truenas-keyring) | Linux kernel-keyring credential store | opt-in | behavioral |
 | [`truenas-audit`](#truenas-audit) | Linux kernel audit (`NETLINK_AUDIT`) sink | opt-in | behavioral |
 | [`truenas-gssapi`](#truenas-gssapi) | Minimal FFI to system GSSAPI (MIT krb5) | opt-in | behavioral |
@@ -72,7 +72,7 @@ on it directly.
 ### truenas-rpc-codegen
 The `json-idl` → **Rust (server + client) + OpenRPC** generator. Emits source *text* (it is not a
 proc-macro), so it carries only `serde` + `serde_json`. Used as a `build-dependency` via `Build`, or
-as a CLI (`cargo run --example codegen`). *This is the crate the new `emit_pyo3` emitter lives in.*
+as a CLI (`cargo run --example codegen`). *This is the crate the new `emit_pyclient` emitter lives in.*
 - **Internal:** none.
 - **External:** `serde`, `serde_json`.
 - **Features:** none.
@@ -121,15 +121,18 @@ framework, no proc-macros**. Excluded from default members, so a default build l
   `serde_json`.
 - **Lint:** `unsafe_code = "deny"` (per-site allow) — raw C-API.
 
-### truenas-rpc-client-pyo3
-The PyO3 support runtime for the **generated Python client** (`truenas-rpc-codegen`'s `emit_pyo3`) —
-the Python analogue of `truenas-rpc-client`. A hand-written **blocking bridge** over the client
-engine's `CallEngine` (a shared multi-thread tokio runtime + GIL-releasing `block_on`), plus the
-reusable `Endpoint` / `ClientConfig` classes and the `RpcError` exception the generated `#[pyclass]`es
-register. Uses the *high-level* pyo3 framework (`#[pyclass]`/`#[pymethods]`), unlike `truenas-rpc-pyo3`.
+### truenas-rpc-pyclient
+The runtime for the **generated Python client** (`truenas-rpc-codegen`'s `emit_pyclient`) — the Python
+analogue of `truenas-rpc-client`. A hand-written **sync bridge** that connects + hands the engine to
+the generated Rust typed client, then drives its typed async methods on a shared multi-thread tokio
+runtime with the GIL released (`block_on`); plus `to_py`/`from_py` (the serde struct↔Python boundary),
+the reusable `Endpoint` / `ClientConfig` classes, and the `RpcError` exception the generated
+`#[pyclass]`es register. Built with the *high-level* pyo3 framework (`#[pyclass]`/`#[pymethods]`),
+unlike `truenas-rpc-pyo3`.
 - **Internal:** `truenas-rpc`, `truenas-rpc-client`.
 - **External:** `pyo3` 0.23 (high-level framework; no `extension-module` — the consumer's cdylib
-  enables it), `tokio` (`rt-multi-thread`, `net`, `time`, …), `serde`, `serde_json`.
+  enables it), `pythonize` 0.23 (the struct↔Python serde boundary), `tokio` (`rt-multi-thread`, `net`,
+  `time`, …), `serde`, `serde_json`.
 - **Lint:** `unsafe_code = "allow"` — the pyo3 macros expand to `unsafe` trampolines that can't be
   per-site annotated.
 
@@ -235,7 +238,8 @@ deliberately small; several "new" deps are already transitive (noted).
 | `http` | 1 | server (`websocket`) | Upgrade-request header parsing |
 | `futures-util` | 0.3 | server, client (`websocket`) | `FuturesUnordered`, stream `split()` |
 | `pyo3-ffi` | 0.23 | pyo3 | Raw CPython C-API + libpython linking |
-| `pyo3` | 0.23 | client-pyo3 | High-level `#[pyclass]`/`#[pymethods]` to expose the generated client to Python |
+| `pyo3` | 0.23 | pyclient | High-level `#[pyclass]`/`#[pymethods]` to expose the generated client to Python |
+| `pythonize` | 0.23 | pyclient | serde struct↔Python object conversion (no JSON-string hop) |
 | `pkg-config` | 0.3 (build) | gssapi | Locate system MIT krb5 |
 
 ## Coverage model
@@ -250,7 +254,7 @@ Two scripts, mirroring the build split:
   gaps are hard-to-inject I/O-error and WebSocket-poll edges); runs serially.
 
 Everything else — `truenas-rpc-server`, `truenas-rpc-auth`, `truenas-rpc-pyo3`,
-`truenas-rpc-client-pyo3`, `truenas-keyring`, `truenas-audit`, `truenas-gssapi` — is **behavioral
+`truenas-rpc-pyclient`, `truenas-keyring`, `truenas-audit`, `truenas-gssapi` — is **behavioral
 only**: excluded from the line gate because it does socket I/O, FFI, or links libpython/krb5 (not
 unit-testable to 100% deterministically), but still built by `cargo clippy --workspace` and exercised
 with `cargo test -p <crate>`.
