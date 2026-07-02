@@ -52,13 +52,14 @@ pub(crate) async fn connect_wss(
     server_name: &str,
     path: &str,
     tcp_keepalive: Option<std::time::Duration>,
-) -> io::Result<(BoxRead, BoxWrite)> {
+) -> io::Result<(BoxRead, BoxWrite, Option<Vec<u8>>)> {
     let tcp = connect_tcp(addr, tcp_keepalive).await?;
-    let tls_stream = crate::tls::userspace_connect(tls, server_name, tcp).await?;
+    let (tls_stream, binding) = crate::tls::userspace_connect(tls, server_name, tcp).await?;
     let (ws, _resp) = tokio_tungstenite::client_async(format!("wss://{server_name}{path}"), tls_stream)
         .await
         .map_err(ws_io)?;
-    Ok(split_ws(ws))
+    let (r, w) = split_ws(ws);
+    Ok((r, w, binding))
 }
 
 /// Split a handshaked WebSocket into the engine's boxed read/write halves.

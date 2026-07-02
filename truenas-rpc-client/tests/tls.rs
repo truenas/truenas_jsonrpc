@@ -86,6 +86,9 @@ async fn ktls_round_trip_and_transfer() {
     .await
     .unwrap();
     assert_eq!(neg.protocol, "main");
+    // The `tls-server-end-point` channel binding is surfaced for SCRAM-PLUS: the SHA-256 (32 bytes) of
+    // the sha256-signed server cert.
+    assert_eq!(client.channel_binding().map(<[u8]>::len), Some(32));
 
     // A plain call over the encrypted link.
     let bytes = client

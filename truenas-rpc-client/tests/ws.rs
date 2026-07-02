@@ -56,6 +56,7 @@ async fn ws_round_trip_and_transfer_refused() {
     .await
     .unwrap();
     assert_eq!(neg.protocol, "main");
+    assert!(client.channel_binding().is_none(), "plain ws has no TLS channel binding");
     assert_eq!(add(&client, 2, 40).await, 42);
 
     // A raw-fd transfer is refused over WebSocket — no plaintext fd to lend. The client bails before
@@ -90,6 +91,8 @@ async fn wss_round_trip() {
     .await
     .unwrap();
     assert_eq!(neg.protocol, "main");
+    // `wss` surfaces the channel binding from its userspace TLS (SHA-256 of the sha256-signed cert).
+    assert_eq!(client.channel_binding().map(<[u8]>::len), Some(32));
     assert_eq!(add(&client, 20, 22).await, 42);
 
     task.abort();

@@ -21,7 +21,7 @@ use truenas_rpc::{JsonRpcError, TransferDirection};
 
 use crate::config::{ClientConfig, Endpoint};
 use crate::error::ClientError;
-use crate::transport::{connect_endpoint, BoxRead, BoxWrite};
+use crate::transport::{connect_endpoint, BoxRead, BoxWrite, ConnFacts};
 
 /// Delimit one message in the byte stream — a per-protocol hook (JSON-RPC = a 4-byte length prefix).
 pub trait Framing: Send + Sync + 'static {
@@ -188,6 +188,9 @@ pub struct Client<P: ProtocolRuntime> {
     // ciphertext; WebSocket's wire is library-owned), so `transfer` is refused — mirroring the
     // reference client's per-channel `transfer_target`.
     transfer_fd: Option<RawFd>,
+    // The TLS `tls-server-end-point` channel binding (`Some` on a TLS transport), for the SCRAM-PLUS
+    // auth mechanism to bind the exchange to this channel. `None` on a plaintext transport.
+    channel_binding: Option<Vec<u8>>,
 }
 
 impl<P: ProtocolRuntime> Drop for Client<P> {
@@ -206,15 +209,15 @@ impl<P: ProtocolRuntime> Client<P> {
         endpoint: &Endpoint,
         config: ClientConfig,
     ) -> Result<(Self, NotificationStream<P::Topic>), ClientError> {
-        let (reader, writer, fd) = connect_endpoint(endpoint, config.tcp_keepalive).await?;
-        Ok(Self::spawn(runtime, reader, writer, fd, config))
+        let (reader, writer, facts) = connect_endpoint(endpoint, config.tcp_keepalive).await?;
+        Ok(Self::spawn(runtime, reader, writer, facts, config))
     }
 
     fn spawn(
         runtime: P,
         reader: BoxRead,
         writer: BoxWrite,
-        transfer_fd: Option<RawFd>,
+        facts: ConnFacts,
         config: ClientConfig,
     ) -> (Self, NotificationStream<P::Topic>) {
         let runtime = Arc::new(runtime);
@@ -229,8 +232,22 @@ impl<P: ProtocolRuntime> Client<P> {
         let writer_task = tokio::spawn(writer_loop(runtime.clone(), writer, out_rx));
         let recv_task =
             tokio::spawn(recv_loop(runtime.clone(), shared.clone(), reader, config.limit, notif_tx));
-        let client = Client { runtime, shared, recv: recv_task, writer: writer_task, transfer_fd };
+        let client = Client {
+            runtime,
+            shared,
+            recv: recv_task,
+            writer: writer_task,
+            transfer_fd: facts.transfer_fd,
+            channel_binding: facts.channel_binding,
+        };
         (client, NotificationStream { rx: notif_rx })
+    }
+
+    /// This connection's TLS `tls-server-end-point` channel binding, if it is a TLS transport
+    /// (`tls://` / `wss://`). `None` on a plaintext transport. The SCRAM-PLUS mechanism binds its
+    /// exchange to this value so the login can't be relayed onto a different TLS channel.
+    pub fn channel_binding(&self) -> Option<&[u8]> {
+        self.channel_binding.as_deref()
     }
 
     /// Send one method call and await its reply. The codegen-facing typed methods build on this.

@@ -17,10 +17,12 @@ use std::os::fd::{AsRawFd, RawFd};
 use std::sync::Arc;
 
 use foreign_types::ForeignType;
+use openssl::hash::MessageDigest;
+use openssl::nid::Nid;
 use openssl::pkey::PKey;
 use openssl::ssl::{SslConnector, SslMethod, SslOptions, SslVerifyMode};
 use openssl::x509::store::X509StoreBuilder;
-use openssl::x509::X509;
+use openssl::x509::{X509Ref, X509};
 
 // Linux kTLS confirmation: getsockopt(SOL_TLS, TLS_TX/TLS_RX) returns the 4-byte
 // `struct tls_crypto_info` header once that direction's crypto is installed, else errors.
@@ -130,14 +132,15 @@ impl ClientTlsBuilder {
 }
 
 /// Blocking kTLS handshake on `tcp` over a socket BIO (so OpenSSL holds the fd and installs kTLS).
-/// Returns the raw kTLS socket on success; refuses the connection (`Err`) on a non-kTLS cipher or if
-/// kTLS didn't engage for both directions. The BIO is `BIO_NOCLOSE`, so freeing the `Ssl` leaves the
-/// kernel kTLS state on `tcp`. Mirror of the server's `ktls_accept`.
+/// Returns the raw kTLS socket **and the `tls-server-end-point` channel binding** on success; refuses
+/// the connection (`Err`) on a non-kTLS cipher or if kTLS didn't engage for both directions. The BIO
+/// is `BIO_NOCLOSE`, so freeing the `Ssl` leaves the kernel kTLS state on `tcp`. Mirror of the
+/// server's `ktls_accept`.
 pub(crate) fn ktls_connect(
     tls: &ClientTls,
     server_name: &str,
     tcp: std::net::TcpStream,
-) -> std::io::Result<std::net::TcpStream> {
+) -> std::io::Result<(std::net::TcpStream, Option<Vec<u8>>)> {
     tcp.set_nonblocking(false)?;
     let fd = tcp.as_raw_fd();
     let mut config = tls.connector.configure().map_err(|e| io_other(e.to_string()))?;
@@ -167,8 +170,30 @@ pub(crate) fn ktls_connect(
         return Err(io_other(format!("kTLS requires an AES-GCM/ChaCha20 cipher; got {cipher:?}")));
     }
     confirm_ktls(fd)?;
+    // The `tls-server-end-point` channel binding, from the server's cert — read before `SSL_free`.
+    let binding = channel_binding(&ssl);
     drop(ssl); // SSL_free frees the BIO (BIO_NOCLOSE → fd not closed); kTLS stays on the socket
-    Ok(tcp)
+    Ok((tcp, binding))
+}
+
+/// The RFC 5929 `tls-server-end-point` channel binding for a handshaked connection: the hash of the
+/// **server's** certificate (the peer cert the client received) under that cert's own signature-
+/// algorithm digest (MD5/SHA-1 upgraded to SHA-256; a signature with no single hash → `None`). The
+/// counterpart of the server's `tls_server_end_point`, so both sides compute a byte-identical value.
+fn channel_binding(ssl: &openssl::ssl::SslRef) -> Option<Vec<u8>> {
+    let cert = ssl.peer_certificate()?;
+    tls_server_end_point(&cert)
+}
+
+fn tls_server_end_point(cert: &X509Ref) -> Option<Vec<u8>> {
+    let sig_nid = cert.signature_algorithm().object().nid();
+    let digest_nid = sig_nid.signature_algorithms()?.digest;
+    let md = match digest_nid {
+        Nid::UNDEF => return None,                       // no single hash → undefined
+        Nid::MD5 | Nid::SHA1 => MessageDigest::sha256(), // RFC 5929: weak hash → SHA-256
+        nid => MessageDigest::from_nid(nid)?,
+    };
+    cert.digest(md).ok().map(|d| d.to_vec())
 }
 
 /// Userspace TLS handshake (a `tokio-openssl` `SslStream`) — the data path stays in userspace
@@ -180,13 +205,14 @@ pub(crate) async fn userspace_connect(
     tls: &ClientTls,
     server_name: &str,
     tcp: tokio::net::TcpStream,
-) -> std::io::Result<tokio_openssl::SslStream<tokio::net::TcpStream>> {
+) -> std::io::Result<(tokio_openssl::SslStream<tokio::net::TcpStream>, Option<Vec<u8>>)> {
     let mut config = tls.connector.configure().map_err(|e| io_other(e.to_string()))?;
     config.set_verify_hostname(tls.verify_hostname);
     let ssl = config.into_ssl(server_name).map_err(|e| io_other(e.to_string()))?;
     let mut stream = tokio_openssl::SslStream::new(ssl, tcp).map_err(|e| io_other(e.to_string()))?;
     std::pin::Pin::new(&mut stream).connect().await.map_err(|e| io_other(e.to_string()))?;
-    Ok(stream)
+    let binding = channel_binding(stream.ssl());
+    Ok((stream, binding))
 }
 
 /// Refuse unless the kernel installed TLS crypto for both directions on `fd`.
