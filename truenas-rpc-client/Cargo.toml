@@ -21,6 +21,9 @@ missing_docs = "warn"
 # no openssl crates. A direct `tls://` connection uses kernel TLS — transfer-capable, and fails closed
 # if kTLS doesn't engage.
 tls = ["dep:openssl", "dep:openssl-sys", "dep:foreign-types"]
+# WebSocket transport (`ws://`, and `wss://` with `tls`). Off by default. One JSON-RPC frame per
+# WebSocket message; `tokio-openssl` backs the userspace TLS pump under `wss`.
+websocket = ["dep:tokio-tungstenite", "dep:futures-util", "dep:tokio-openssl"]
 
 [dependencies]
 truenas-rpc = { path = "../truenas-rpc" }
@@ -39,8 +42,12 @@ tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macro
 openssl = { version = "0.10", optional = true }
 openssl-sys = { version = "0.9", optional = true }
 foreign-types = { version = "0.3", optional = true }
+# WebSocket (the `websocket` feature): tokio-tungstenite + futures-util; tokio-openssl for `wss`.
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", optional = true }
+tokio-openssl = { version = "0.6", optional = true }
 
 [dev-dependencies]
-# The transport tests stand up a live server over TLS and drive the client against it.
-truenas-rpc-server = { path = "../truenas-rpc-server", features = ["tls"] }
+# The transport tests stand up a live server over TLS / WebSocket and drive the client against it.
+truenas-rpc-server = { path = "../truenas-rpc-server", features = ["tls", "websocket"] }
 serde = { workspace = true }

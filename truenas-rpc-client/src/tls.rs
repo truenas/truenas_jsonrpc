@@ -171,6 +171,24 @@ pub(crate) fn ktls_connect(
     Ok(tcp)
 }
 
+/// Userspace TLS handshake (a `tokio-openssl` `SslStream`) — the data path stays in userspace
+/// (ciphertext on the fd). Used **only** to back `wss` (the WebSocket library owns the stream, so
+/// kTLS's detached fd doesn't apply); a raw-fd transfer is refused over it. Mirror of the server's
+/// `userspace_accept`.
+#[cfg(feature = "websocket")]
+pub(crate) async fn userspace_connect(
+    tls: &ClientTls,
+    server_name: &str,
+    tcp: tokio::net::TcpStream,
+) -> std::io::Result<tokio_openssl::SslStream<tokio::net::TcpStream>> {
+    let mut config = tls.connector.configure().map_err(|e| io_other(e.to_string()))?;
+    config.set_verify_hostname(tls.verify_hostname);
+    let ssl = config.into_ssl(server_name).map_err(|e| io_other(e.to_string()))?;
+    let mut stream = tokio_openssl::SslStream::new(ssl, tcp).map_err(|e| io_other(e.to_string()))?;
+    std::pin::Pin::new(&mut stream).connect().await.map_err(|e| io_other(e.to_string()))?;
+    Ok(stream)
+}
+
 /// Refuse unless the kernel installed TLS crypto for both directions on `fd`.
 fn confirm_ktls(fd: RawFd) -> std::io::Result<()> {
     for (dir, label) in [(TLS_TX, "TX"), (TLS_RX, "RX")] {

@@ -21,6 +21,8 @@ mod jsonrpc;
 #[cfg(feature = "tls")]
 mod tls;
 mod transport;
+#[cfg(feature = "websocket")]
+mod ws;
 
 pub use config::{ClientConfig, Endpoint};
 #[cfg(feature = "tls")]

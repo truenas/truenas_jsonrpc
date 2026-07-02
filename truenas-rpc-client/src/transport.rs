@@ -59,6 +59,18 @@ pub async fn connect_endpoint(
             let (r, w) = TcpStream::from_std(std_tcp)?.into_split();
             Ok((Box::new(r), Box::new(w), Some(fd)))
         }
+        // WebSocket: one JSON-RPC frame per message; the library owns the wire → no plaintext fd, so
+        // transfer is refused (`None`).
+        #[cfg(feature = "websocket")]
+        Endpoint::Ws { addr, path } => {
+            let (r, w) = crate::ws::connect_ws(addr, path, tcp_keepalive).await?;
+            Ok((r, w, None))
+        }
+        #[cfg(all(feature = "tls", feature = "websocket"))]
+        Endpoint::Wss { addr, server_name, path, tls } => {
+            let (r, w) = crate::ws::connect_wss(tls, addr, server_name, path, tcp_keepalive).await?;
+            Ok((r, w, None))
+        }
     }
 }
 

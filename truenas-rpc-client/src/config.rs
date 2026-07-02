@@ -22,6 +22,28 @@ pub enum Endpoint {
         /// The TLS material (trust roots, optional mTLS certificate).
         tls: crate::tls::ClientTls,
     },
+    /// A WebSocket endpoint (`ws://`) over TCP (the `websocket` feature). One JSON-RPC frame per
+    /// message; not transfer-capable (the WebSocket library owns the wire).
+    #[cfg(feature = "websocket")]
+    Ws {
+        /// The TCP `host:port` to connect.
+        addr: String,
+        /// The WebSocket request path (e.g. `/`).
+        path: String,
+    },
+    /// A WebSocket-over-TLS endpoint (`wss://`) — a userspace TLS handshake, then WebSocket (the
+    /// `websocket` + `tls` features). Not transfer-capable.
+    #[cfg(all(feature = "tls", feature = "websocket"))]
+    Wss {
+        /// The TCP `host:port` to connect.
+        addr: String,
+        /// The SNI / certificate-verification hostname (also the WebSocket `Host`).
+        server_name: String,
+        /// The WebSocket request path (e.g. `/`).
+        path: String,
+        /// The TLS material (trust roots, optional mTLS certificate).
+        tls: crate::tls::ClientTls,
+    },
 }
 
 impl Endpoint {
@@ -41,6 +63,21 @@ impl Endpoint {
         tls: crate::tls::ClientTls,
     ) -> Self {
         Endpoint::Tls { addr: addr.into(), server_name: server_name.into(), tls }
+    }
+    /// A `ws://` endpoint at `addr` (`host:port`) with request `path` (e.g. `/`).
+    #[cfg(feature = "websocket")]
+    pub fn ws(addr: impl Into<String>, path: impl Into<String>) -> Self {
+        Endpoint::Ws { addr: addr.into(), path: path.into() }
+    }
+    /// A `wss://` endpoint at `addr` (`host:port`), verified/SNI'd as `server_name`, request `path`.
+    #[cfg(all(feature = "tls", feature = "websocket"))]
+    pub fn wss(
+        addr: impl Into<String>,
+        server_name: impl Into<String>,
+        path: impl Into<String>,
+        tls: crate::tls::ClientTls,
+    ) -> Self {
+        Endpoint::Wss { addr: addr.into(), server_name: server_name.into(), path: path.into(), tls }
     }
 }
 
