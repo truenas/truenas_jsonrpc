@@ -27,6 +27,9 @@ websocket = ["dep:tokio-tungstenite", "dep:futures-util", "dep:tokio-openssl"]
 # SCRAM-SHA-512-PLUS client login. Requires a TLS transport (the exchange binds to
 # `tls-server-end-point`), so it implies `tls` and reuses the OpenSSL that feature already pulls.
 scram = ["tls"]
+# SCM_RIGHTS file-descriptor passing (`send_fds` / `recv_fds`, AF_UNIX only), reusing the transfer
+# takeover. `nix` supplies the `sendmsg`/`recvmsg` + `SCM_RIGHTS` cmsg wrappers (same as the server).
+fd-passing = ["dep:nix"]
 
 [dependencies]
 truenas-rpc = { path = "../truenas-rpc" }
@@ -41,6 +44,8 @@ socket2 = "0.5"
 # O_NONBLOCK toggle for the raw-fd transfer (blocking handler, then restore tokio). Already in the lock.
 libc = "0.2"
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt", "rt-multi-thread"] }
+# SCM_RIGHTS fd passing (the `fd-passing` feature): sendmsg/recvmsg + cmsg wrappers.
+nix = { version = "0.29", features = ["socket", "uio"], optional = true }
 # TLS (the `tls` feature): system OpenSSL; kTLS handshake via openssl-sys + foreign-types.
 openssl = { version = "0.10", optional = true }
 openssl-sys = { version = "0.9", optional = true }

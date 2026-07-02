@@ -594,6 +594,52 @@ impl TransferHandle {
     }
 }
 
+/// `SCM_RIGHTS` file-descriptor passing over the lent connection fd (AF_UNIX only), mirroring the
+/// server's `FileTransferExt`. One sentinel byte carries the ancillary data.
+#[cfg(feature = "fd-passing")]
+impl TransferHandle {
+    /// Send `fds` to the peer as `SCM_RIGHTS` ancillary data (an **upload** fd-pass). The peer receives
+    /// dup'd copies; the caller keeps ownership of `fds`.
+    pub fn send_fds(&self, fds: &[RawFd]) -> std::io::Result<()> {
+        use nix::sys::socket::{sendmsg, ControlMessage, MsgFlags, UnixAddr};
+        let iov = [std::io::IoSlice::new(&[0u8])];
+        let cmsgs = [ControlMessage::ScmRights(fds)];
+        sendmsg::<UnixAddr>(self.fd, &iov, &cmsgs, MsgFlags::empty(), None)
+            .map(drop)
+            .map_err(std::io::Error::from)
+    }
+
+    /// Receive up to `max_fds` fds from the peer as `SCM_RIGHTS` (a **download** fd-pass). The caller
+    /// owns the returned fds; errors if the kernel truncated the ancillary data (`MSG_CTRUNC`).
+    pub fn recv_fds(&self, max_fds: usize) -> std::io::Result<Vec<std::os::fd::OwnedFd>> {
+        use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags, UnixAddr};
+        use std::os::fd::FromRawFd;
+        let mut byte = [0u8; 1];
+        let mut iov = [std::io::IoSliceMut::new(&mut byte)];
+        // SAFETY: `CMSG_SPACE` is a pure size computation (no dereference).
+        #[allow(unsafe_code)]
+        let space =
+            unsafe { libc::CMSG_SPACE((max_fds * std::mem::size_of::<RawFd>()) as libc::c_uint) };
+        let mut cmsg_buf = vec![0u8; space as usize];
+        let msg = recvmsg::<UnixAddr>(self.fd, &mut iov, Some(&mut cmsg_buf), MsgFlags::empty())
+            .map_err(std::io::Error::from)?;
+        let mut out = Vec::new();
+        for cmsg in msg.cmsgs().map_err(std::io::Error::from)? {
+            if let ControlMessageOwned::ScmRights(fds) = cmsg {
+                for raw in fds {
+                    // SAFETY: `raw` is a fd the kernel just installed for us; we take sole ownership.
+                    #[allow(unsafe_code)]
+                    out.push(unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) });
+                }
+            }
+        }
+        if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
+            return Err(std::io::Error::other("received file descriptors were truncated"));
+        }
+        Ok(out)
+    }
+}
+
 /// Write all of `buf` to a blocking fd, looping over short writes.
 fn write_all_blocking(fd: RawFd, mut buf: &[u8]) -> std::io::Result<()> {
     while !buf.is_empty() {
@@ -793,6 +839,43 @@ impl<P: Transfers> Client<P> {
                 Err(ClientError::Rpc(JsonRpcError::internal("transfer callback panicked")))
             }
         }
+    }
+}
+
+/// `SCM_RIGHTS` fd passing over an fd-pass method (AF_UNIX only) — reuses the transfer takeover
+/// ([`Client::transfer`]); the callback just does a `sendmsg`/`recvmsg` instead of a byte stream.
+#[cfg(feature = "fd-passing")]
+impl<P: Transfers> Client<P> {
+    /// Pass `fds` to the server over an **upload** fd-pass `method`; returns the server's final result
+    /// bytes. `params` are the already-serialized request bytes. AF_UNIX only (else
+    /// [`ClientError::NoTransfer`]).
+    pub async fn send_fds(
+        &self,
+        method: &P::MethodKey,
+        params: &[u8],
+        fds: &[RawFd],
+    ) -> Result<Vec<u8>, ClientError> {
+        let fds = fds.to_vec();
+        self.transfer(method, params, move |ht| ht.send_fds(&fds)).await
+    }
+
+    /// Receive up to `max_fds` fds from the server over a **download** fd-pass `method`; returns the
+    /// server's final result bytes plus the received, owned fds.
+    pub async fn recv_fds(
+        &self,
+        method: &P::MethodKey,
+        params: &[u8],
+        max_fds: usize,
+    ) -> Result<(Vec<u8>, Vec<std::os::fd::OwnedFd>), ClientError> {
+        // The callback runs on a blocking worker; hand the received fds back over a sync channel.
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        let reply = self
+            .transfer(method, params, move |ht| {
+                let _ = tx.send(ht.recv_fds(max_fds)?);
+                Ok(())
+            })
+            .await?;
+        Ok((reply, rx.recv().unwrap_or_default()))
     }
 }
 
