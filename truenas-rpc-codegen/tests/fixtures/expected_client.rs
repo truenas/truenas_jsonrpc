@@ -41,4 +41,16 @@ impl<E: truenas_rpc_client::CallEngine> SampleClient<E> {
         let bytes = self.engine.call(truenas_rpc_client::MethodKey::Name("x.query"), &params).await?;
         serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))
     }
+    /// Raw-fd transfer `x.download`: `callback` receives a blocking `TransferHandle` for the bulk stream; returns the server's final result.
+    pub async fn download(&self, request: XferArgs, callback: impl FnOnce(truenas_rpc_client::TransferHandle) -> std::io::Result<()> + Send + 'static) -> Result<DownloadDone, truenas_rpc::JsonRpcError> {
+        let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;
+        let bytes = self.engine.transfer(truenas_rpc_client::MethodKey::Name("x.download"), &params, Box::new(callback)).await?;
+        serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))
+    }
+    /// Raw-fd transfer `x.upload`: `callback` receives a blocking `TransferHandle` for the bulk stream; returns the server's final result.
+    pub async fn upload(&self, request: XferArgs, callback: impl FnOnce(truenas_rpc_client::TransferHandle) -> std::io::Result<()> + Send + 'static) -> Result<UploadDone, truenas_rpc::JsonRpcError> {
+        let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;
+        let bytes = self.engine.transfer(truenas_rpc_client::MethodKey::Name("x.upload"), &params, Box::new(callback)).await?;
+        serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))
+    }
 }

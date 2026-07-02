@@ -29,6 +29,7 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             ("result", m.result.as_ref()),
             ("entry", m.entry.as_ref()),
             ("notifies", m.notifies.as_ref()),
+            ("transfer.ready", m.transfer.as_ref().and_then(|t| t.ready.as_ref())),
         ];
         for (slot, node) in slots {
             if let Some(node) = node {
@@ -99,6 +100,27 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             if m.filterable || m.python || m.direction() == Direction::ServerClient {
                 return Err(err(format!(
                     "method {wire:?}: async cannot combine with filterable/python/server_client"
+                )));
+            }
+        }
+
+        // transfer ⇒ a request/result method with a raw-fd hand-off: result required, and not
+        // combinable with any other dispatch kind. Transfers are JSON-wire only (the `Dispatched::
+        // Transfer` directive has no binary-wire path), so `xdr` is out; the fd hand-off is not a
+        // query/subscription/python body, and it is not `$/cancelRequest`-cancellable.
+        if m.transfer.is_some() {
+            if m.result.is_none() {
+                return Err(err(format!("method {wire:?}: transfer requires 'result'")));
+            }
+            if m.xdr
+                || m.filterable
+                || m.python
+                || m.is_async
+                || m.cancellable
+                || m.direction() == Direction::ServerClient
+            {
+                return Err(err(format!(
+                    "method {wire:?}: transfer cannot combine with xdr/filterable/async/python/cancellable/server_client"
                 )));
             }
         }

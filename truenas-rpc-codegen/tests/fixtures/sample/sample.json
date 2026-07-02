@@ -78,6 +78,32 @@
       },
       "required": ["id", "name", "ratio", "active"],
       "additionalProperties": false
+    },
+    "XferArgs": {
+      "type": "object",
+      "$comment": "Params for the raw-fd transfer methods (x.download / x.upload).",
+      "properties": { "n": { "type": "integer" } },
+      "required": ["n"],
+      "additionalProperties": false
+    },
+    "DownloadReady": {
+      "type": "object",
+      "$comment": "Typed $/transferReady interim for x.download — the byte count the server will send.",
+      "properties": { "size": { "type": "integer" } },
+      "required": ["size"],
+      "additionalProperties": false
+    },
+    "DownloadDone": {
+      "type": "object",
+      "properties": { "sent": { "type": "integer" } },
+      "required": ["sent"],
+      "additionalProperties": false
+    },
+    "UploadDone": {
+      "type": "object",
+      "properties": { "received": { "type": "integer" } },
+      "required": ["received"],
+      "additionalProperties": false
     }
   },
   "methods": {
@@ -111,6 +137,20 @@
       "filterable": true,
       "entry": { "$ref": "#/$defs/Entry" },
       "handler": "query"
+    },
+    "x.download": {
+      "summary": "Raw-fd download (server produces the stream) with a typed $/transferReady interim.",
+      "params": { "$ref": "#/$defs/XferArgs" },
+      "result": { "$ref": "#/$defs/DownloadDone" },
+      "handler": "download",
+      "transfer": { "direction": "download", "ready": { "$ref": "#/$defs/DownloadReady" } }
+    },
+    "x.upload": {
+      "summary": "Raw-fd upload (client produces the stream) with a free-form $/transferReady interim.",
+      "params": { "$ref": "#/$defs/XferArgs" },
+      "result": { "$ref": "#/$defs/UploadDone" },
+      "handler": "upload",
+      "transfer": { "direction": "upload" }
     }
   }
 }

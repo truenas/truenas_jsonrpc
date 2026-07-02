@@ -18,7 +18,16 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     for (wire, m) in spec.methods.iter() {
         let params = ref_name_of(&m.params, "params")?;
         let key = format!("truenas_rpc_client::MethodKey::Name({})", str_lit(wire));
-        if m.direction() == Direction::ServerClient {
+        if m.transfer.is_some() {
+            // A raw-fd transfer: send the request, do the `$/transferReady` handshake, hand the
+            // blocking fd to `callback` for the self-delimiting bulk stream, then return the server's
+            // final result. The interim (`$/transferReady` payload) is available on the handle.
+            let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss("result"))?, "result")?;
+            methods.push_str(&format!(
+                "    /// Raw-fd transfer `{wire}`: `callback` receives a blocking `TransferHandle` for the bulk stream; returns the server's final result.\n    pub async fn {}(&self, request: {params}, callback: impl FnOnce(truenas_rpc_client::TransferHandle) -> std::io::Result<()> + Send + 'static) -> Result<{result}, truenas_rpc::JsonRpcError> {{\n        let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;\n        let bytes = self.engine.transfer({key}, &params, Box::new(callback)).await?;\n        serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))\n    }}\n",
+                m.handler
+            ));
+        } else if m.direction() == Direction::ServerClient {
             let notifies =
                 ref_name_of(m.notifies.as_ref().ok_or_else(|| miss("notifies"))?, "notifies")?;
             topics.push((wire.to_string(), notifies));

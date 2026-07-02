@@ -8,7 +8,7 @@ use std::collections::HashSet;
 use serde_json::Value;
 
 use crate::error::{CodegenError, Result};
-use crate::model::{Direction, MethodSpec, SchemaNode, Spec};
+use crate::model::{Direction, MethodSpec, SchemaNode, Spec, TransferKind};
 use crate::naming::{pascal_case, rust_ident};
 use crate::typemap::{ref_name, rust_type, str_lit, TypeCtx};
 
@@ -199,10 +199,13 @@ enum Kind {
     Filterable,
     Subscription,
     Python,
+    Transfer,
 }
 
 fn kind_of(m: &MethodSpec) -> Kind {
-    if m.python {
+    if m.transfer.is_some() {
+        Kind::Transfer // exclusive with every other kind (enforced by validate)
+    } else if m.python {
         Kind::Python
     } else if m.direction() == Direction::ServerClient {
         Kind::Subscription
@@ -212,6 +215,23 @@ fn kind_of(m: &MethodSpec) -> Kind {
         Kind::Async
     } else {
         Kind::Plain
+    }
+}
+
+/// The Rust type of a transfer's interim (`$/transferReady`): the declared `ready` ref's type, or
+/// `serde_json::Value` when the IDL leaves it free-form (matching the reference client).
+fn transfer_ready_ty(m: &MethodSpec) -> Result<String> {
+    match m.transfer.as_ref().and_then(|t| t.ready.as_ref()) {
+        Some(node) => ref_name_of(node, "transfer.ready"),
+        None => Ok("serde_json::Value".to_string()),
+    }
+}
+
+/// The `TransferDirection` variant name for a transfer method.
+fn transfer_direction(m: &MethodSpec) -> &'static str {
+    match m.transfer.as_ref().expect("transfer present (kind is Transfer)").direction {
+        TransferKind::Download => "Download",
+        TransferKind::Upload => "Upload",
     }
 }
 
@@ -245,6 +265,17 @@ fn emit_handlers_trait(spec: &Spec) -> Result<String> {
                 methods.push_str(&format!(
                     "    /// Filterable handler for `{}`.\n    fn {}(&self, request: {params}, cx: &truenas_rpc::RequestCtx<S>, filters: &truenas_rpc::CompiledFilters, options: &truenas_rpc::CompiledOptions) -> Result<truenas_rpc::Filtered<{entry}>, truenas_rpc::JsonRpcError>;\n",
                     wire_doc(spec, m), m.handler
+                ));
+            }
+            Kind::Transfer => {
+                // Two callbacks: `negotiate` (returns the `$/transferReady` interim) and the
+                // `transfer` itself (lent the raw fd → the final result).
+                let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
+                let ready = transfer_ready_ty(m)?;
+                let doc = wire_doc(spec, m);
+                let handler = &m.handler;
+                methods.push_str(&format!(
+                    "    /// Transfer `negotiate` for `{doc}` — validate the request, return the `$/transferReady` interim.\n    fn {handler}_ready(&self, request: &{params}, cx: &truenas_rpc::RequestCtx<S>) -> Result<{ready}, truenas_rpc::JsonRpcError>;\n    /// Transfer handler for `{doc}` — lent the connection's raw fd, produce the final result.\n    fn {handler}(&self, request: {params}, ft: &dyn truenas_rpc::FileTransfer) -> Result<{result}, truenas_rpc::JsonRpcError>;\n",
                 ));
             }
             Kind::Subscription | Kind::Python => {} // no trait method
@@ -300,6 +331,17 @@ fn emit_register(spec: &Spec) -> Result<String> {
             }
             Kind::Python => {
                 body.push_str(&format!("    let builder = builder.python_method({def})?;\n"));
+            }
+            Kind::Transfer => {
+                uses_handlers = true;
+                let params = ref_name_of(&m.params, "params")?;
+                let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss(m, "result"))?, "result")?;
+                let ready = transfer_ready_ty(m)?;
+                let dir = transfer_direction(m);
+                let handler = &m.handler;
+                body.push_str(&format!(
+                    "    let h = handlers.clone();\n    let builder = builder.fd_transfer_method(truenas_rpc::RpcFdTransferMethod::<{params}, {ready}, {result}, _, _>::new({def}, truenas_rpc::TransferDirection::{dir}, {{ let h = h.clone(); move |request: &{params}, cx: &truenas_rpc::RequestCtx<S>| h.{handler}_ready(request, cx) }}, move |request: {params}, ft: &dyn truenas_rpc::FileTransfer| h.{handler}(request, ft)))?;\n"
+                ));
             }
         }
     }

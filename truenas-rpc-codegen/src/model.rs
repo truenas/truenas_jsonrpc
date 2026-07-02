@@ -195,6 +195,10 @@ pub struct MethodSpec {
     /// `async fn` (taking `cx` by value).
     #[serde(rename = "async", default)]
     pub is_async: bool,
+    /// A raw-fd transfer method (the connection's socket fd is lent to a blocking handler for a
+    /// self-delimiting bulk stream — e.g. a dataset send/receive). See [`TransferSpec`].
+    #[serde(default)]
+    pub transfer: Option<TransferSpec>,
 }
 
 impl MethodSpec {
@@ -202,6 +206,29 @@ impl MethodSpec {
     pub fn direction(&self) -> Direction {
         self.direction.unwrap_or(Direction::ClientServer)
     }
+}
+
+/// A raw-fd transfer declaration: the stream direction, plus an **optional** typed interim (the
+/// `$/transferReady` payload the `negotiate` step returns). When `ready` is absent the interim is
+/// free-form (`serde_json::Value`), matching the reference (Python) client.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct TransferSpec {
+    /// Which way the bulk stream flows once the fd is handed over.
+    pub direction: TransferKind,
+    /// The typed interim (`negotiate`) result. Absent → `serde_json::Value`.
+    #[serde(default)]
+    pub ready: Option<SchemaNode>,
+}
+
+/// Which way a transfer's bulk stream flows.
+#[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TransferKind {
+    /// The server produces and the client consumes.
+    Download,
+    /// The client produces and the server consumes.
+    Upload,
 }
 
 /// A method's payload direction.

@@ -1,6 +1,179 @@
 {
-  "x-generated": "Generated from api-specs/sample.json by api-specs/gen.py — do not edit by hand.",
-  "openrpc": "1.3.2",
+  "components": {
+    "errors": {
+      "INTERNAL_ERROR": {
+        "code": -32603,
+        "message": "Internal Error"
+      },
+      "INVALID_JSON": {
+        "code": -32700,
+        "message": "Invalid Json"
+      },
+      "INVALID_PARAMS": {
+        "code": -32602,
+        "message": "Invalid Params"
+      },
+      "INVALID_REQUEST": {
+        "code": -32600,
+        "message": "Invalid Request"
+      },
+      "METHOD_NOT_FOUND": {
+        "code": -32601,
+        "message": "Method Not Found"
+      },
+      "NOT_AUTHORIZED": {
+        "code": -32000,
+        "message": "Not Authorized"
+      },
+      "REQUEST_CANCELLED": {
+        "code": -32800,
+        "message": "Request Cancelled"
+      },
+      "REQUEST_FAILED": {
+        "code": -32803,
+        "message": "Request Failed"
+      },
+      "SESSION_NOT_ESTABLISHED": {
+        "code": -32002,
+        "message": "Session Not Established"
+      }
+    },
+    "schemas": {
+      "CrashArgs": {
+        "properties": {},
+        "required": [],
+        "title": "CrashArgs",
+        "type": "object"
+      },
+      "DownloadDone": {
+        "properties": {
+          "sent": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "sent"
+        ],
+        "title": "DownloadDone",
+        "type": "object"
+      },
+      "Entry": {
+        "properties": {
+          "active": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          },
+          "ratio": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "id",
+          "name",
+          "ratio",
+          "active"
+        ],
+        "title": "Entry",
+        "type": "object"
+      },
+      "LoginArgs": {
+        "properties": {
+          "password": {
+            "type": "string"
+          },
+          "user": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "user",
+          "password"
+        ],
+        "title": "LoginArgs",
+        "type": "object"
+      },
+      "LoginResult": {
+        "properties": {
+          "ok": {
+            "type": "boolean"
+          },
+          "token": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "token",
+          "ok"
+        ],
+        "title": "LoginResult",
+        "type": "object"
+      },
+      "PingArgs": {
+        "properties": {},
+        "required": [],
+        "title": "PingArgs",
+        "type": "object"
+      },
+      "PingResult": {
+        "properties": {
+          "pong": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "pong"
+        ],
+        "title": "PingResult",
+        "type": "object"
+      },
+      "QueryArgs": {
+        "properties": {},
+        "required": [],
+        "title": "QueryArgs",
+        "type": "object"
+      },
+      "UploadDone": {
+        "properties": {
+          "received": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "received"
+        ],
+        "title": "UploadDone",
+        "type": "object"
+      },
+      "XferArgs": {
+        "properties": {
+          "n": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "n"
+        ],
+        "title": "XferArgs",
+        "type": "object"
+      }
+    }
+  },
   "info": {
     "title": "sample",
     "version": "1.0.0"
@@ -8,7 +181,6 @@
   "methods": [
     {
       "name": "crash",
-      "summary": "Always raises (exercises the error-audit path).",
       "paramStructure": "by-name",
       "params": [],
       "result": {
@@ -17,11 +189,11 @@
           "$ref": "#/components/schemas/PingResult"
         }
       },
+      "summary": "Always raises (exercises the error-audit path).",
       "x-direction": "client_server"
     },
     {
       "name": "login",
-      "summary": "Authenticate a user; returns a session token.",
       "paramStructure": "by-name",
       "params": [
         {
@@ -45,11 +217,11 @@
           "$ref": "#/components/schemas/LoginResult"
         }
       },
+      "summary": "Authenticate a user; returns a session token.",
       "x-direction": "client_server"
     },
     {
       "name": "ping",
-      "summary": "Liveness probe.",
       "paramStructure": "by-name",
       "params": [],
       "result": {
@@ -58,210 +230,116 @@
           "$ref": "#/components/schemas/PingResult"
         }
       },
+      "summary": "Liveness probe.",
+      "x-direction": "client_server"
+    },
+    {
+      "name": "x.download",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "n",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "name": "DownloadDone",
+        "schema": {
+          "$ref": "#/components/schemas/DownloadDone"
+        }
+      },
+      "summary": "Raw-fd download (server produces the stream) with a typed $/transferReady interim.",
       "x-direction": "client_server"
     },
     {
       "name": "x.query",
-      "summary": "Filterable query over a collection of entries.",
       "paramStructure": "by-name",
       "params": [
         {
           "name": "query-filters",
           "required": false,
           "schema": {
-            "type": "array",
+            "default": [],
             "items": {
               "type": "array"
             },
-            "default": []
+            "type": "array"
           }
         },
         {
           "name": "query-options",
           "required": false,
           "schema": {
-            "type": "object",
             "properties": {
               "count": {
-                "type": "boolean",
-                "default": false
+                "default": false,
+                "type": "boolean"
+              },
+              "limit": {
+                "default": 0,
+                "type": "integer"
+              },
+              "offset": {
+                "default": 0,
+                "type": "integer"
               },
               "order_by": {
                 "anyOf": [
                   {
-                    "type": "array",
                     "items": {
                       "type": "string"
-                    }
+                    },
+                    "type": "array"
                   },
                   {
                     "type": "null"
                   }
                 ],
                 "default": null
-              },
-              "offset": {
-                "type": "integer",
-                "default": 0
-              },
-              "limit": {
-                "type": "integer",
-                "default": 0
               }
-            }
+            },
+            "type": "object"
           }
         }
       ],
       "result": {
         "name": "Entry",
         "schema": {
-          "type": "array",
           "items": {
             "$ref": "#/components/schemas/Entry"
-          }
+          },
+          "type": "array"
         }
       },
-      "x-query": true,
+      "summary": "Filterable query over a collection of entries.",
+      "x-direction": "client_server",
+      "x-query": true
+    },
+    {
+      "name": "x.upload",
+      "paramStructure": "by-name",
+      "params": [
+        {
+          "name": "n",
+          "required": true,
+          "schema": {
+            "type": "integer"
+          }
+        }
+      ],
+      "result": {
+        "name": "UploadDone",
+        "schema": {
+          "$ref": "#/components/schemas/UploadDone"
+        }
+      },
+      "summary": "Raw-fd upload (client produces the stream) with a free-form $/transferReady interim.",
       "x-direction": "client_server"
     }
   ],
-  "components": {
-    "schemas": {
-      "CrashArgs": {
-        "title": "CrashArgs",
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "PingResult": {
-        "title": "PingResult",
-        "type": "object",
-        "properties": {
-          "pong": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "pong"
-        ]
-      },
-      "LoginArgs": {
-        "title": "LoginArgs",
-        "type": "object",
-        "properties": {
-          "user": {
-            "type": "string"
-          },
-          "password": {
-            "type": "string"
-          }
-        },
-        "required": [
-          "user",
-          "password"
-        ]
-      },
-      "LoginResult": {
-        "title": "LoginResult",
-        "type": "object",
-        "properties": {
-          "token": {
-            "type": "string"
-          },
-          "ok": {
-            "type": "boolean"
-          }
-        },
-        "required": [
-          "token",
-          "ok"
-        ]
-      },
-      "PingArgs": {
-        "title": "PingArgs",
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "QueryArgs": {
-        "title": "QueryArgs",
-        "type": "object",
-        "properties": {},
-        "required": []
-      },
-      "Entry": {
-        "title": "Entry",
-        "type": "object",
-        "properties": {
-          "id": {
-            "type": "integer"
-          },
-          "name": {
-            "type": "string"
-          },
-          "ratio": {
-            "type": "number"
-          },
-          "active": {
-            "type": "boolean"
-          },
-          "note": {
-            "anyOf": [
-              {
-                "type": "string"
-              },
-              {
-                "type": "null"
-              }
-            ],
-            "default": null
-          }
-        },
-        "required": [
-          "id",
-          "name",
-          "ratio",
-          "active"
-        ]
-      }
-    },
-    "errors": {
-      "INVALID_JSON": {
-        "code": -32700,
-        "message": "Invalid Json"
-      },
-      "INVALID_REQUEST": {
-        "code": -32600,
-        "message": "Invalid Request"
-      },
-      "METHOD_NOT_FOUND": {
-        "code": -32601,
-        "message": "Method Not Found"
-      },
-      "INVALID_PARAMS": {
-        "code": -32602,
-        "message": "Invalid Params"
-      },
-      "INTERNAL_ERROR": {
-        "code": -32603,
-        "message": "Internal Error"
-      },
-      "NOT_AUTHORIZED": {
-        "code": -32000,
-        "message": "Not Authorized"
-      },
-      "SESSION_NOT_ESTABLISHED": {
-        "code": -32002,
-        "message": "Session Not Established"
-      },
-      "REQUEST_CANCELLED": {
-        "code": -32800,
-        "message": "Request Cancelled"
-      },
-      "REQUEST_FAILED": {
-        "code": -32803,
-        "message": "Request Failed"
-      }
-    }
-  }
+  "openrpc": "1.3.2",
+  "x-generated": "Generated from tests/fixtures/sample by truenas-rpc-codegen — do not edit by hand."
 }

@@ -60,6 +60,26 @@ pub struct Entry {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct XferArgs {
+    pub n: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DownloadReady {
+    pub size: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DownloadDone {
+    pub sent: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct UploadDone {
+    pub received: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum DemoColor {
     #[serde(rename = "red")]
@@ -82,6 +102,14 @@ pub trait Handlers<S>: Send + Sync {
     fn crash(&self, request: CrashArgs, cx: &truenas_rpc::RequestCtx<S>) -> Result<PingResult, truenas_rpc::JsonRpcError>;
     /// Filterable handler for `query`.
     fn query(&self, request: QueryArgs, cx: &truenas_rpc::RequestCtx<S>, filters: &truenas_rpc::CompiledFilters, options: &truenas_rpc::CompiledOptions) -> Result<truenas_rpc::Filtered<Entry>, truenas_rpc::JsonRpcError>;
+    /// Transfer `negotiate` for `download` — validate the request, return the `$/transferReady` interim.
+    fn download_ready(&self, request: &XferArgs, cx: &truenas_rpc::RequestCtx<S>) -> Result<DownloadReady, truenas_rpc::JsonRpcError>;
+    /// Transfer handler for `download` — lent the connection's raw fd, produce the final result.
+    fn download(&self, request: XferArgs, ft: &dyn truenas_rpc::FileTransfer) -> Result<DownloadDone, truenas_rpc::JsonRpcError>;
+    /// Transfer `negotiate` for `upload` — validate the request, return the `$/transferReady` interim.
+    fn upload_ready(&self, request: &XferArgs, cx: &truenas_rpc::RequestCtx<S>) -> Result<serde_json::Value, truenas_rpc::JsonRpcError>;
+    /// Transfer handler for `upload` — lent the connection's raw fd, produce the final result.
+    fn upload(&self, request: XferArgs, ft: &dyn truenas_rpc::FileTransfer) -> Result<UploadDone, truenas_rpc::JsonRpcError>;
 }
 
 /// Register every spec method onto `builder`, binding each to `handlers.<handler>`.
@@ -101,6 +129,10 @@ where
     let builder = builder.method(truenas_rpc::RpcMethod::new(truenas_rpc::MethodDef::new("crash").doc("Always raises (exercises the error-audit path).").audit_message("crash op").reply_capacity(87), move |request: CrashArgs, cx: &truenas_rpc::RequestCtx<S>| h.crash(request, cx)))?;
     let h = handlers.clone();
     let builder = builder.filterable(truenas_rpc::FilterableRpcMethod::<QueryArgs, Entry, _>::new(truenas_rpc::MethodDef::new("x.query").doc("Filterable query over a collection of entries.").reply_capacity(212), move |request: QueryArgs, cx: &truenas_rpc::RequestCtx<S>, filters: &truenas_rpc::CompiledFilters, options: &truenas_rpc::CompiledOptions| h.query(request, cx, filters, options)))?;
+    let h = handlers.clone();
+    let builder = builder.fd_transfer_method(truenas_rpc::RpcFdTransferMethod::<XferArgs, DownloadReady, DownloadDone, _, _>::new(truenas_rpc::MethodDef::new("x.download").doc("Raw-fd download (server produces the stream) with a typed $/transferReady interim.").reply_capacity(102), truenas_rpc::TransferDirection::Download, { let h = h.clone(); move |request: &XferArgs, cx: &truenas_rpc::RequestCtx<S>| h.download_ready(request, cx) }, move |request: XferArgs, ft: &dyn truenas_rpc::FileTransfer| h.download(request, ft)))?;
+    let h = handlers.clone();
+    let builder = builder.fd_transfer_method(truenas_rpc::RpcFdTransferMethod::<XferArgs, serde_json::Value, UploadDone, _, _>::new(truenas_rpc::MethodDef::new("x.upload").doc("Raw-fd upload (client produces the stream) with a free-form $/transferReady interim.").reply_capacity(106), truenas_rpc::TransferDirection::Upload, { let h = h.clone(); move |request: &XferArgs, cx: &truenas_rpc::RequestCtx<S>| h.upload_ready(request, cx) }, move |request: XferArgs, ft: &dyn truenas_rpc::FileTransfer| h.upload(request, ft)))?;
     let builder = builder.audit_sink(make_audit_sink::<S, _>(|_session: &truenas_rpc::Session<S>| truenas_audit::AuditPrincipal::default()));
     Ok(builder)
 }

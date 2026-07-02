@@ -12,6 +12,15 @@ fn sample() -> Spec {
     Spec::load_dir("tests/fixtures/sample").unwrap()
 }
 
+#[test]
+#[ignore = "regenerates golden fixtures; run explicitly"]
+fn regen_fixtures() {
+    let s = sample();
+    std::fs::write("tests/fixtures/expected_server.rs", generate_server(&s).unwrap()).unwrap();
+    std::fs::write("tests/fixtures/expected_client.rs", generate_client(&s).unwrap()).unwrap();
+    std::fs::write("tests/fixtures/openrpc.json", generate_openrpc(&s).unwrap()).unwrap();
+}
+
 fn tmp(name: &str) -> PathBuf {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/test-tmp").join(name);
     std::fs::create_dir_all(&p).unwrap();
@@ -202,6 +211,9 @@ fn cross_cutting_errors() {
     assert!(parse_err(&m(r##","result":{"$ref":"#/$defs/Missing"}"##)).contains("unknown $defs type"));
     assert!(parse_err(&m(r##","result":{"$ref":"#/components/X"}"##)).contains("unsupported $ref"));
     assert!(parse_err(r##"{"name":"t","version":"1","$defs":{"A":{"type":"object"}},"methods":{"x":{"handler":"x","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"},"xdr":true,"xdr_id":1001},"y":{"handler":"y","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"},"xdr":true,"xdr_id":1001}}}"##).contains("collides"));
+    // transfer: needs a `result`, and can't combine with any other dispatch kind.
+    assert!(parse_err(&m(r##","transfer":{"direction":"download"}"##)).contains("transfer requires 'result'"));
+    assert!(parse_err(&m(r##","result":{"$ref":"#/$defs/A"},"transfer":{"direction":"upload"},"cancellable":true"##)).contains("transfer cannot combine"));
 }
 
 #[test]
