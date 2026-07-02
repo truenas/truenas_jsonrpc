@@ -1,0 +1,41 @@
+# `truenas-rpc-client-pyo3` — the PyO3 support runtime for the **generated Python client**
+# (`truenas-rpc-codegen`'s `emit_pyo3`). It is the Python analogue of `truenas-rpc-client`: a small,
+# hand-written **blocking bridge** over the async `JsonRpcClient` (a shared tokio runtime + GIL-
+# releasing `block_on`), plus the reusable `Endpoint` / `ClientConfig` classes and the `RpcError`
+# exception the generated `#[pyclass]`es register. Uses the *high-level* pyo3 framework
+# (`#[pyclass]`/`#[pymethods]`), unlike `truenas-rpc-pyo3` (raw `pyo3-ffi`, embedding). It links
+# libpython, so — like `truenas-rpc-pyo3` — it is NOT in the workspace `default-members`.
+[package]
+name = "truenas-rpc-client-pyo3"
+version = "0.1.0"
+description = "PyO3 support runtime for the generated Python client: a blocking bridge over truenas-rpc-client"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-rpc = { path = "../truenas-rpc" }
+truenas-rpc-client = { path = "../truenas-rpc-client" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# A shared multi-thread runtime hosts every client's background connection tasks; the blocking bridge
+# `block_on`s calls on it (`enable_all` needs the net + time drivers).
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
+# The high-level pyo3 framework: `#[pyclass]` / `#[pymethods]` to expose the client + generated types
+# to Python. NO `extension-module` here — this is the leaf lib (the consumer's cdylib enables it), so
+# this crate's own tests still link libpython and can start an interpreter.
+pyo3 = { version = "0.23" }
+
+[dev-dependencies]
+# The round-trip test stands up a live `TruenasRpcServer` over AF_UNIX and drives the blocking bridge.
+truenas-rpc-server = { path = "../truenas-rpc-server" }
+
+# The high-level pyo3 macros (`#[pyclass]`/`#[pymethods]`/`#[pymodule]`) expand to `unsafe`
+# trampolines that can't be per-site annotated (unlike the hand-written FFI in `truenas-rpc-pyo3`,
+# which uses `deny` + `#[allow(unsafe_code)]`), so this crate must allow unsafe wholesale. It is
+# opt-in and excluded from `default-members`, so the strict, `forbid`-unsafe core is unaffected.
+[lints.rust]
+unsafe_code = "allow"
+missing_docs = "warn"
