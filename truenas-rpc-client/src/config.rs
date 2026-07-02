@@ -31,6 +31,14 @@ pub enum Endpoint {
         /// The WebSocket request path (e.g. `/`).
         path: String,
     },
+    /// A WebSocket endpoint over an **AF_UNIX** socket (the `websocket` feature) — the standard
+    /// `nginx → ws-over-unix → app` forwarding path. One JSON-RPC frame per message; not
+    /// transfer-capable (the WebSocket library owns the wire).
+    #[cfg(feature = "websocket")]
+    WsUnix {
+        /// The AF_UNIX socket path.
+        path: PathBuf,
+    },
     /// A WebSocket-over-TLS endpoint (`wss://`) — a userspace TLS handshake, then WebSocket (the
     /// `websocket` + `tls` features). Not transfer-capable.
     #[cfg(all(feature = "tls", feature = "websocket"))]
@@ -68,6 +76,11 @@ impl Endpoint {
     #[cfg(feature = "websocket")]
     pub fn ws(addr: impl Into<String>, path: impl Into<String>) -> Self {
         Endpoint::Ws { addr: addr.into(), path: path.into() }
+    }
+    /// A WebSocket endpoint over the AF_UNIX socket at `path` (WebSocket-over-unix).
+    #[cfg(feature = "websocket")]
+    pub fn ws_unix(path: impl Into<PathBuf>) -> Self {
+        Endpoint::WsUnix { path: path.into() }
     }
     /// A `wss://` endpoint at `addr` (`host:port`), verified/SNI'd as `server_name`, request `path`.
     #[cfg(all(feature = "tls", feature = "websocket"))]

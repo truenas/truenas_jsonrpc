@@ -81,6 +81,11 @@ pub(crate) async fn connect_endpoint(
             let (r, w) = crate::ws::connect_ws(addr, path, tcp_keepalive).await?;
             Ok((r, w, ConnFacts { transfer_fd: None, channel_binding: None }))
         }
+        #[cfg(feature = "websocket")]
+        Endpoint::WsUnix { path } => {
+            let (r, w) = crate::ws::connect_ws_unix(path).await?;
+            Ok((r, w, ConnFacts { transfer_fd: None, channel_binding: None }))
+        }
         #[cfg(all(feature = "tls", feature = "websocket"))]
         Endpoint::Wss { addr, server_name, path, tls } => {
             let (r, w, channel_binding) =

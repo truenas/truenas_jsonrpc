@@ -70,6 +70,29 @@ async fn ws_round_trip_and_transfer_refused() {
     task.abort();
 }
 
+#[tokio::test]
+async fn ws_over_unix_round_trip() {
+    use truenas_rpc_server::{UnixConfig, UnixTrust};
+
+    let path = std::env::temp_dir().join(format!("tnrpc-wsunix-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let srv = server();
+    let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
+    // The `nginx -> ws-over-unix` path: a trusted-local AF_UNIX WebSocket listener.
+    let task = tokio::spawn(async move { srv.serve_websocket_unix_listener(listener, UnixTrust::Local).await });
+
+    let (client, neg, _notifs) =
+        JsonRpcClient::connect_negotiate(&Endpoint::ws_unix(path.clone()), "main", ClientConfig::default())
+            .await
+            .unwrap();
+    assert_eq!(neg.protocol, "main");
+    assert!(client.channel_binding().is_none(), "ws-over-unix has no TLS channel binding");
+    assert_eq!(add(&client, 20, 22).await, 42);
+
+    task.abort();
+    let _ = std::fs::remove_file(&path);
+}
+
 #[cfg(feature = "tls")]
 #[tokio::test]
 async fn wss_round_trip() {

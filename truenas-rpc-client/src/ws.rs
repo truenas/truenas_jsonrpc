@@ -42,6 +42,15 @@ pub(crate) async fn connect_ws(
     Ok(split_ws(ws))
 }
 
+/// Connect a WebSocket over the AF_UNIX socket at `path` — the `nginx → ws-over-unix → app` path. A
+/// unix socket has no host, so the handshake uses a nominal `ws://localhost/` request line.
+pub(crate) async fn connect_ws_unix(path: &std::path::Path) -> io::Result<(BoxRead, BoxWrite)> {
+    let unix = tokio::net::UnixStream::connect(path).await?;
+    let (ws, _resp) =
+        tokio_tungstenite::client_async("ws://localhost/", unix).await.map_err(ws_io)?;
+    Ok(split_ws(ws))
+}
+
 /// Connect `wss://` — a **userspace** TLS handshake (the WebSocket library owns the stream, so kTLS's
 /// detached fd doesn't apply), then the WebSocket handshake over it. The `Host` header uses
 /// `server_name` (the certificate hostname).
