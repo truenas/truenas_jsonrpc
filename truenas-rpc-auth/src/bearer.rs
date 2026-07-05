@@ -39,7 +39,7 @@ pub enum BearerVerdict {
 }
 
 /// The seam the bearer-token mechanism validates through: look the presented token up and, if
-/// valid, **consume it** so a replay fails. Implemented by [`KeyringBearerTokens`] (the keyring the
+/// valid, **consume it** so a replay fails. Implemented by `KeyringBearerTokens` (the keyring the
 /// external minter writes into) — or by an embedder's own store (in-memory, an RPC to middleware).
 pub trait BearerTokenSource: Send + Sync {
     /// Validate and CONSUME the token (single-use). Implementations MUST remove a valid token

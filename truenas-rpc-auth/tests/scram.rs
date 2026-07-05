@@ -14,7 +14,9 @@ use openssl::pkey::PKey;
 use openssl::sign::Signer;
 use serde_json::{json, Value};
 use truenas_rpc::{JsonRpcProtocol, NullOutbound, Session, SessionLifecycle};
-use truenas_rpc_auth::{install, AuthSession, AuthStack, CredentialSource, ScramCredentials};
+use truenas_rpc_auth::{
+    install, AuthSession, AuthStack, ChannelBindingSource, CredentialSource, ScramCredentials,
+};
 use truenas_rpc_server::{Peer, TlsPeer, TransportPosture};
 
 const ID: &str = "123e4567-e89b-12d3-a456-426614174000";
@@ -289,6 +291,92 @@ async fn scram_without_a_channel_binding_is_denied() {
     )
     .await;
     assert_eq!(rtype(&r), "DENIED");
+}
+
+// --- channel binding supplied out of band on a reverse-proxied transport (the keyring model) -----
+//
+// On a `ProxiedUnix` channel the server terminated no TLS, so `channel_binding` is None; a
+// `ChannelBindingSource` (in production the keyring) supplies the published `tls-server-end-point`.
+// The gate is strict: the source is consulted ONLY on a proxied transport, never on a
+// server-terminated-TLS or trusted-local channel.
+
+/// A `ChannelBindingSource` that always returns a fixed binding (stands in for the keyring).
+struct FixedBinding(Vec<u8>);
+impl ChannelBindingSource for FixedBinding {
+    fn tls_server_end_point(&self) -> Option<Vec<u8>> {
+        Some(self.0.clone())
+    }
+}
+
+fn server_bound<C: CredentialSource + 'static>(
+    source: C,
+    binding: FixedBinding,
+) -> JsonRpcProtocol<AuthSession> {
+    let stack = AuthStack::builder().scram_bound(source, binding).build();
+    install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build()
+}
+
+/// A reverse-proxied AF_UNIX session (nginx terminated TLS upstream): encrypted, no server binding.
+fn proxied_session(proto: &JsonRpcProtocol<AuthSession>) -> Arc<Session<AuthSession>> {
+    let peer = Peer::unix(None).with_posture(TransportPosture::ProxiedUnix);
+    proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))
+}
+
+/// A genuinely-local AF_UNIX session: encrypted, but the binding source must NOT be consulted.
+fn trusted_local_session(proto: &JsonRpcProtocol<AuthSession>) -> Arc<Session<AuthSession>> {
+    let peer = Peer::unix(None).with_posture(TransportPosture::TrustedLocalUnix);
+    proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))
+}
+
+#[tokio::test]
+async fn scram_uses_the_binding_source_on_a_proxied_transport() {
+    let (client, creds) = alice();
+    let proto = server_bound(
+        InMemory(HashMap::from([("alice".to_string(), creds)])),
+        FixedBinding(BINDING.to_vec()),
+    );
+    let s = proxied_session(&proto);
+
+    let r1 = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
+    assert_eq!(rtype(&r1), "CHALLENGE", "{r1}");
+    let server_first = r1["result"]["response"]["message"].as_str().unwrap();
+
+    // The client bound to the same value the source published → the exchange completes.
+    let (client_final, expected_v) = client.finalize(server_first, BINDING);
+    let r2 = call(&proto, &s, "$/sessionSetupContinue", &client_final).await;
+    assert_eq!(rtype(&r2), "SUCCESS", "{r2}");
+    assert_eq!(
+        r2["result"]["response"]["extra"]["scram"].as_str().unwrap(),
+        expected_v
+    );
+    assert_eq!(s.lifecycle(), SessionLifecycle::Established);
+}
+
+#[tokio::test]
+async fn scram_binding_source_is_not_consulted_off_a_proxied_transport() {
+    let (client, creds) = alice();
+    let proto = server_bound(
+        InMemory(HashMap::from([("alice".to_string(), creds)])),
+        FixedBinding(BINDING.to_vec()),
+    );
+    // Trusted-local unix: encrypted (so SCRAM is offered) but not proxied, so the source is skipped
+    // and client-first is denied for want of a binding — never silently borrowing the proxied value.
+    let s = trusted_local_session(&proto);
+    let r = call(
+        &proto,
+        &s,
+        "$/sessionSetup",
+        &client.first("p=tls-server-end-point"),
+    )
+    .await;
+    assert_eq!(rtype(&r), "DENIED", "{r}");
+    assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }
 
 // --- the keyring-backed CredentialSource (the `keyring` feature) ---------------------------------

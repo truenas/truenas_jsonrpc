@@ -16,9 +16,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use openssl::base64::decode_block;
 use serde_json::{json, Value};
-use truenas_rpc_utils_unsafe::keyring::{KeyRing, ScramRecord};
+use truenas_rpc_utils_unsafe::keyring::{Found, KeyRing, KeyType, ScramRecord};
 
-use crate::scram::{CredentialSource, ScramCredentials};
+use crate::scram::{ChannelBindingSource, CredentialSource, ScramCredentials};
 
 /// The default record → identity mapping: `{ "username": <name> }`.
 fn default_identity(record: &ScramRecord) -> Value {
@@ -93,5 +93,64 @@ fn is_expired(record: &ScramRecord) -> bool {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(now) => now.as_secs() as i64 >= record.expiry,
         Err(_) => false,
+    }
+}
+
+/// The default keyring key description the published `tls-server-end-point` channel binding is stored
+/// under.
+pub const CHANNEL_BINDING_KEY: &str = "tls-server-end-point";
+
+/// A [`ChannelBindingSource`] that reads the published `tls-server-end-point` value from a kernel
+/// keyring — for a reverse-proxied service where TLS is terminated upstream (e.g. nginx) and the
+/// active certificate's binding is published into the per-service keyring by the middleware.
+///
+/// The value is re-read on every lookup, so a certificate rotation that republishes the key is picked
+/// up without a restart. Pair it with
+/// [`scram_bound`](crate::AuthStackBuilder::scram_bound):
+///
+/// ```no_run
+/// use truenas_rpc_auth::{AuthStack, KeyringChannelBinding, KeyringCredentials};
+/// use truenas_rpc_utils_unsafe::keyring::{KeyringConfig, KeyringStore};
+///
+/// let store = KeyringStore::open(&KeyringConfig::from_json(
+///     r#"{ "keyring_type": "persistent", "keyring_identifier": 0 }"#,
+/// )?)?;
+/// let stack = AuthStack::builder()
+///     .scram_bound(
+///         KeyringCredentials::new(store.server_keys()),
+///         KeyringChannelBinding::new(store.root()),
+///     )
+///     .build();
+/// # Ok::<(), truenas_rpc_utils_unsafe::keyring::Error>(())
+/// ```
+pub struct KeyringChannelBinding {
+    ring: KeyRing,
+    description: String,
+}
+
+impl KeyringChannelBinding {
+    /// Read the binding from `ring` under the default key ([`CHANNEL_BINDING_KEY`]).
+    pub fn new(ring: KeyRing) -> Self {
+        Self {
+            ring,
+            description: CHANNEL_BINDING_KEY.to_string(),
+        }
+    }
+
+    /// Read the binding from `ring` under a custom key `description`.
+    pub fn with_key(ring: KeyRing, description: impl Into<String>) -> Self {
+        Self {
+            ring,
+            description: description.into(),
+        }
+    }
+}
+
+impl ChannelBindingSource for KeyringChannelBinding {
+    fn tls_server_end_point(&self) -> Option<Vec<u8>> {
+        match self.ring.search(KeyType::User, &self.description).ok()? {
+            Some(Found::Key(key)) => key.read_data().ok(),
+            _ => None,
+        }
     }
 }

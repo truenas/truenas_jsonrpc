@@ -296,8 +296,7 @@ impl AuthStackBuilder {
 
     /// Set the username→uid resolver used for a [`Principal::User`] (SCRAM / mTLS): it maps an
     /// authenticated account name to the uid authorization keys off, or `None` to grant no roles.
-    /// With the `nss` feature, [`resolve_users_via_nss`](Self::resolve_users_via_nss) wires
-    /// `getpwnam` here.
+    /// With the `nss` feature, `resolve_users_via_nss` wires `getpwnam` here.
     #[must_use]
     pub fn user_resolver(
         mut self,
@@ -311,7 +310,7 @@ impl AuthStackBuilder {
     /// authenticated via the given mechanism (`"UNIX_SOCKET"` / `"SCRAM"` / `"CLIENT_CERTIFICATE"` /
     /// …) — assurance/channel-based authorization. **uid 0 is always full admin** regardless (an
     /// anti-lockout net), so the source is consulted only for non-root uids. With the `keyring`
-    /// feature, [`roles_from_keyring`](Self::roles_from_keyring) wires the `server_roles` ring here.
+    /// feature, `roles_from_keyring` wires the `server_roles` ring here.
     #[must_use]
     pub fn role_source(
         mut self,

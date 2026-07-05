@@ -62,7 +62,7 @@ pub use channel::{Capability, Channel};
 #[cfg(feature = "gssapi")]
 pub use gssapi::{default_principal_map, Gssapi, GSSAPI_TAG};
 #[cfg(feature = "keyring")]
-pub use keyring::KeyringCredentials;
+pub use keyring::{KeyringChannelBinding, KeyringCredentials, CHANNEL_BINDING_KEY};
 pub use mechanism::Mechanism;
 pub use mtls::{Mtls, MTLS_TAG};
 #[cfg(feature = "oauth")]
@@ -73,7 +73,9 @@ pub use passthrough::{
     BrokerContext, BrokerServer, BrokerVerdict, Passthrough, PeerCred, PASSTHROUGH_TAG,
 };
 #[cfg(feature = "scram")]
-pub use scram::{derive_verifier, CredentialSource, Scram, ScramCredentials, SCRAM_TAG};
+pub use scram::{
+    derive_verifier, ChannelBindingSource, CredentialSource, Scram, ScramCredentials, SCRAM_TAG,
+};
 pub use sessions::render_auth_session;
 pub use stack::{install, AuthStack, AuthStackBuilder, FULL_ADMIN};
 pub use state::{AuthSession, AuthSessionState};

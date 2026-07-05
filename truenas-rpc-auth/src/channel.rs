@@ -79,4 +79,16 @@ impl Channel {
     pub fn has_all(&self, required: &[Capability]) -> bool {
         required.iter().all(|&c| self.has(c))
     }
+
+    /// Whether TLS was terminated *upstream* of this server — a reverse-proxied AF_UNIX socket
+    /// (including a proxied `wss://`, which nginx forwards over a unix socket) — so the server holds
+    /// no channel binding of its own and a `ChannelBindingSource` (the `scram` feature) must supply
+    /// the published `tls-server-end-point` value.
+    ///
+    /// `false` for server-terminated TLS (kTLS / userspace `wss://`), where the binding is already in
+    /// [`channel_binding`](Self::channel_binding), and for trusted-local AF_UNIX / plain TCP. This is
+    /// exactly the gate SCRAM uses before consulting an out-of-band binding source.
+    pub fn binding_terminated_upstream(&self) -> bool {
+        self.posture == Some(TransportPosture::ProxiedUnix)
+    }
 }

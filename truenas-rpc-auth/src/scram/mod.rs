@@ -12,6 +12,7 @@ mod crypto;
 mod message;
 
 use std::any::Any;
+use std::sync::Arc;
 
 use openssl::base64::{decode_block, encode_block};
 use serde_json::{json, Value};
@@ -73,15 +74,44 @@ pub trait CredentialSource: Send + Sync {
     fn scram_credentials(&self, username: &str) -> Option<ScramCredentials>;
 }
 
-/// The SCRAM-SHA-512-PLUS mechanism over a [`CredentialSource`].
+/// A source of the server's `tls-server-end-point` channel-binding value for connections where TLS
+/// was terminated *upstream* (a reverse proxy), so the server has none of its own. SCRAM consults it
+/// **only** on a channel where
+/// [`binding_terminated_upstream`](crate::Channel::binding_terminated_upstream) holds — a
+/// reverse-proxied AF_UNIX socket, including proxied `wss://` — never on server-terminated TLS or a
+/// trusted-local socket. A keyring-backed implementation is `KeyringChannelBinding` (the `keyring`
+/// feature).
+pub trait ChannelBindingSource: Send + Sync {
+    /// The active server certificate's `tls-server-end-point` value (RFC 5929), or `None` if
+    /// unavailable.
+    fn tls_server_end_point(&self) -> Option<Vec<u8>>;
+}
+
+/// The SCRAM-SHA-512-PLUS mechanism over a [`CredentialSource`], optionally with a
+/// [`ChannelBindingSource`] for reverse-proxied transports.
 pub struct Scram<C> {
     source: C,
+    binding: Option<Arc<dyn ChannelBindingSource>>,
 }
 
 impl<C> Scram<C> {
-    /// Build the mechanism over a credential source.
+    /// Build the mechanism over a credential source. The channel binding is taken from the
+    /// connection's own TLS; on a reverse-proxied transport (no server-side TLS) it is absent — use
+    /// [`with_binding`](Self::with_binding) to supply it out of band.
     pub fn new(source: C) -> Self {
-        Self { source }
+        Self {
+            source,
+            binding: None,
+        }
+    }
+
+    /// Build the mechanism with a `binding` source consulted when TLS was terminated upstream (a
+    /// reverse-proxied AF_UNIX socket / proxied `wss://`); see [`ChannelBindingSource`].
+    pub fn with_binding<B: ChannelBindingSource + 'static>(source: C, binding: B) -> Self {
+        Self {
+            source,
+            binding: Some(Arc::new(binding)),
+        }
     }
 }
 
@@ -130,13 +160,21 @@ impl<C: CredentialSource> Scram<C> {
             return reject(RejectKind::AuthErr);
         };
 
-        // Enforce SCRAM-PLUS: the client must request tls-server-end-point binding, and the channel
-        // must actually carry a binding value (i.e. it's a TLS connection).
+        // Enforce SCRAM-PLUS: the client must request tls-server-end-point binding.
         if cf.cbind != Cbind::TlsServerEndPoint {
             return reject(RejectKind::AuthErr); // n / y — no-binding or downgrade
         }
-        let Some(binding) = channel.channel_binding.clone() else {
-            return reject(RejectKind::Denied); // SCRAM-PLUS requires a TLS channel binding
+        // The binding value: the server's own TLS if it terminated it, else — on a reverse-proxied
+        // transport where TLS was terminated upstream — the out-of-band source (e.g. the keyring).
+        let binding = channel.channel_binding.clone().or_else(|| {
+            if channel.binding_terminated_upstream() {
+                self.binding.as_ref().and_then(|b| b.tls_server_end_point())
+            } else {
+                None
+            }
+        });
+        let Some(binding) = binding else {
+            return reject(RejectKind::Denied); // SCRAM-PLUS requires a channel binding
         };
 
         let username = message::unescape_username(&cf.username_raw);
@@ -243,9 +281,25 @@ impl<C: CredentialSource> Scram<C> {
 
 impl AuthStackBuilder {
     /// Enable SCRAM-SHA-512-PLUS under the [`SCRAM_TAG`] tag, looking credentials up via `source`.
+    /// The channel binding comes from the connection's own TLS; use
+    /// [`scram_bound`](Self::scram_bound) for a reverse-proxied service where TLS is terminated
+    /// upstream.
     #[must_use]
     pub fn scram<C: CredentialSource + 'static>(self, source: C) -> Self {
         self.mechanism(SCRAM_TAG, Scram::new(source))
+    }
+
+    /// Enable SCRAM-SHA-512-PLUS with an out-of-band [`ChannelBindingSource`] (e.g. a keyring-backed
+    /// `KeyringChannelBinding`), consulted on reverse-proxied transports (proxied AF_UNIX / `wss://`)
+    /// where TLS was terminated upstream and the active cert's `tls-server-end-point` is published
+    /// out of band.
+    #[must_use]
+    pub fn scram_bound<C, B>(self, source: C, binding: B) -> Self
+    where
+        C: CredentialSource + 'static,
+        B: ChannelBindingSource + 'static,
+    {
+        self.mechanism(SCRAM_TAG, Scram::with_binding(source, binding))
     }
 }
 
