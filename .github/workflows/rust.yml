@@ -84,6 +84,10 @@ jobs:
           # The unsafe/FFI utilities (keyring / audit / gssapi modules): tests self-skip without kernel
           # caps (audit / keyring) or a KDC (gssapi).
           cargo test -p truenas-rpc-utils-unsafe --all-features --locked
+          # The daemon harness (config + signalfd + serve + lifecycle). Behavioral; the signal test
+          # uses thread-directed pthread_kill, so it needs no elevated privileges. No feature flags,
+          # so it is not in the feature matrix below.
+          cargo test -p truenas-rpc-daemon --locked
 
   # Feature-combination matrix on the socket crates: each feature individually, plus default and
   # all-on, so a mis-gated `#[cfg(feature)]` cannot hide behind `--all-features`.

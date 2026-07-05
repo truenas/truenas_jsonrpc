@@ -50,9 +50,11 @@ for b in "${BINS[@]}"; do [ -n "$b" ] && OBJ+=(--object "$b"); done
 # binaries; its generated output is covered behaviorally by `truenas-xdr`'s tests), and the
 # FFI / socket-I/O crates excluded by design (`truenas-rpc-server` does kTLS/SCM_RIGHTS I/O;
 # `truenas-rpc-client` does socket I/O; `truenas-rpc-utils-unsafe` does NETLINK_AUDIT / keyring / krb5
-# FFI — all reachable from the default-member demo but tested behaviorally, not held to the line gate).
+# FFI — all reachable from the default-member demo but tested behaviorally, not held to the line gate;
+# `truenas-rpc-daemon` (owns a runtime + signalfd + serves sockets) is likewise behavioral and, not
+# being a default member, never even enters this run.
 # See the workspace Cargo.toml.
-IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-rpc-server/|truenas-rpc-client/|truenas-rpc-utils-unsafe/)'
+IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-rpc-server/|truenas-rpc-client/|truenas-rpc-utils-unsafe/|truenas-rpc-daemon/)'
 
 # Merged line coverage, exported as lcov (the standard interchange format Codecov/Coveralls
 # consume): a source line is covered if ANY test executed it. We deliberately gate on this

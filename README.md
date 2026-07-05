@@ -334,6 +334,12 @@ plus a **server** or **client** crate, and a build-dependency on the codegen. Th
 - **`truenas-rpc-pyo3`** — **optional**, only if you run `python:true` handler bodies in an
   embedded CPython interpreter. It is excluded from the workspace's default members, so a default
   `cargo build` links **zero** libpython.
+- **`truenas-rpc-daemon`** — *optional* **daemon harness** for building a systemd-managed service:
+  INI config with `SIGHUP` reload, UNIX signal handling (via `nix` signalfd), init / periodic /
+  shutdown lifecycle hooks, and binding + serving one or more `TruenasRpcServer`s with `sd_notify`
+  readiness. The turn-key `main` is just a config mapping + your codegen'd protocols/handlers + a
+  systemd unit — including declaring authentication (peer-cred / SCRAM) on shared unix + proxied
+  sockets; see [its README](truenas-rpc-daemon/README.md).
 
 The remaining crates are **internal** — `truenas-filter` (the query engine, re-exported through
 `truenas-rpc`), `truenas-xdr` + `truenas-xdr-derive` (the XDR codec + its `derive` proc-macro), and

@@ -875,6 +875,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "truenas-rpc-daemon"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "truenas-rpc",
+ "truenas-rpc-auth",
+ "truenas-rpc-server",
+ "truenas_ros",
+]
+
+[[package]]
 name = "truenas-rpc-pyclient"
 version = "0.1.0"
 dependencies = [
@@ -949,6 +964,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "truenas_ros"
+version = "0.1.0"
+source = "git+https://github.com/truenas/truenas_ros?tag=v0.1.0#a50f78ff13ed54aca19a63e2e68dfbddf57a006a"
+dependencies = [
+ "bitflags",
+ "libc",
 ]
 
 [[package]]

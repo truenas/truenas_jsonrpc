@@ -15,18 +15,21 @@ members = [
     "truenas-rpc-pyclient",
     "truenas-rpc-auth",
     "truenas-rpc-utils-unsafe",
+    "truenas-rpc-daemon",
     "examples/demo",
     "examples/demo-py",
 ]
-# Six crates are excluded from the default set (a plain `cargo build`/`cargo test` and `coverage.sh`,
+# Seven crates are excluded from the default set (a plain `cargo build`/`cargo test` and `coverage.sh`,
 # which run without `-p`, skip them): `truenas-rpc-pyo3` (embedded CPython) and `truenas-rpc-pyclient`
 # (the generated Python client's runtime, high-level pyo3) both link libpython (so the default build
 # links none); `truenas-rpc-server` and `truenas-rpc-client` do socket / kTLS / SCM_RIGHTS I/O that
 # can't be unit-tested to 100% deterministically; `truenas-rpc-auth` (peer-cred / mTLS / SCRAM /
 # GSSAPI, behind feature flags + OpenSSL) sits above the core; and `truenas-rpc-utils-unsafe` collects
 # the direct-syscall / FFI backends (kernel keyring, NETLINK_AUDIT, the MIT krb5 GSSAPI acceptor),
-# whose tests need a keyring / CAP_AUDIT_WRITE / a KDC. All are covered behaviorally and excluded from
-# the coverage gate, but still built by `cargo clippy --workspace` and tested with `cargo test -p …`.
+# whose tests need a keyring / CAP_AUDIT_WRITE / a KDC; and `truenas-rpc-daemon` (the systemd service
+# harness) owns a tokio runtime, blocks process signals, and drives signalfd + socket I/O, so it can't
+# be unit-tested deterministically either. All are covered behaviorally and excluded from the coverage
+# gate, but still built by `cargo clippy --workspace` and tested with `cargo test -p …`.
 default-members = [
     "truenas-rpc",
     "truenas-filter",
@@ -61,3 +64,7 @@ async-trait = "0.1"
 truenas-filter = { path = "truenas-filter" }
 # ...and on the XDR codec for the binary wire (the `xdr:true` methods + the TXDR frame).
 truenas-xdr = { path = "truenas-xdr" }
+# INI config-file parser for `truenas-rpc-daemon` (pinned to tag `v0.1.0`; the workspace's only git
+# dep). Only the `configfile` module is pulled (`default-features = false`), so it brings just libc +
+# bitflags.
+truenas_ros = { git = "https://github.com/truenas/truenas_ros", tag = "v0.1.0", default-features = false, features = ["configfile"] }

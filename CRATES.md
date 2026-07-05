@@ -20,6 +20,7 @@ coverage model. For the *consumer's* view ("what goes in my `Cargo.toml`") see t
 | [`truenas-rpc-pyo3`](#truenas-rpc-pyo3) | Embedded-CPython bridge for `python:true` bodies | opt-in | behavioral |
 | [`truenas-rpc-pyclient`](#truenas-rpc-pyclient) | Runtime for the generated Python client | opt-in | behavioral |
 | [`truenas-rpc-utils-unsafe`](#truenas-rpc-utils-unsafe) | Opt-in unsafe utils: kernel keyring / audit / GSSAPI FFI | opt-in | behavioral |
+| [`truenas-rpc-daemon`](#truenas-rpc-daemon) | Turn-key systemd daemon harness (config, signals, lifecycle, serving) | opt-in | behavioral |
 | [`examples/demo`](#examplesdemo) | End-to-end codegen demo / integration test | default | ignored (`/examples/`) |
 
 **Build** — *default* crates build and test with a plain `cargo build` / `cargo test` (they are the
@@ -151,6 +152,22 @@ Each feature pulls only its own dependencies, so a consumer wanting one module n
   per module; **build:** `pkg-config` 0.3 (`gssapi`; `krb5-config` fallback).
 - **Features:** `keyring`, `audit`, `gssapi` (all off by default).
 - **Lint:** `unsafe_code = "deny"` (per-site allow + `// SAFETY:`).
+
+### truenas-rpc-daemon
+A turn-key, systemd-native **daemon harness** that turns codegen'd protocols + handlers into a running
+service. It owns the tokio runtime, loads an INI config (re-read on `SIGHUP`), blocks + handles UNIX
+signals via `nix` signalfd (driven through tokio `AsyncFd`), runs init / periodic / shutdown lifecycle
+hooks, and binds + serves one or more `TruenasRpcServer`s with systemd `sd_notify` readiness. `Daemon<C>`
+is generic only over the application config type — each `Service` erases its server's session type, so
+heterogeneous servers coexist, and the compile-time transport-safety of the server crate is preserved
+(`listen_tcp` requires `NetworkWire`).
+- **Internal:** `truenas-rpc-server` (holds + serves the servers); `truenas-rpc` (dev-only, for the
+  example + tests).
+- **External:** `tokio` (`rt-multi-thread` / `net` / `sync` / `time` / `macros`), `nix` (`signal`;
+  `pthread` dev-only), `thiserror`, `truenas_ros` (git-pinned, `configfile`-only — INI parsing).
+- **Features:** none.
+- **Lint:** `unsafe_code = "forbid"` (`lints.workspace = true`) — signalfd and `sd_notify` are driven
+  through safe `nix` / `std` wrappers, so the harness needs no unsafe.
 
 ### examples/demo
 `demo-consumer` — the documented `json-idl` + `build.rs` codegen layout, exercised as a live
