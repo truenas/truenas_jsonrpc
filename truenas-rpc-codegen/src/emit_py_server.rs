@@ -23,7 +23,7 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     let mut out = String::new();
     out.push_str(&header(origin));
     out.push_str(&format!(
-        "from __future__ import annotations\n\nfrom types import MappingProxyType\n\nimport msgspec\n\nfrom {types_mod} import METHODS\n\n\n"
+        "from __future__ import annotations\n\nfrom collections.abc import Callable\nfrom types import MappingProxyType\nfrom typing import Any\n\nimport msgspec\n\nfrom {types_mod} import METHODS\n\n\n"
     ));
     out.push_str(FRAMEWORK);
     Ok(finalize(out))
@@ -55,34 +55,34 @@ class Context:
     runtime audit detail.
     """
 
-    def __init__(self, session: bytes, call) -> None:
+    def __init__(self, session: bytes, call: Callable[..., bytes]) -> None:
         self.session = session
         self.call = call
         self.audit: str | None = None
 
 
-_HANDLERS: dict[str, object] = {}
+_HANDLERS: dict[str, Callable[..., object]] = {}
 
 # A decoder per method's params type + one shared encoder, built once from METHODS and reused every
 # call (msgspec's one-shot ``json.decode``/``encode`` rebuild these each time). A read-only proxy —
 # the keys mirror METHODS, so a lookup miss is "method not found".
-_DECODERS: MappingProxyType[str, msgspec.json.Decoder] = MappingProxyType(
+_DECODERS: MappingProxyType[str, msgspec.json.Decoder[Any]] = MappingProxyType(
     {name: msgspec.json.Decoder(params) for name, (params, _result) in METHODS.items()}
 )
 _ENCODER = msgspec.json.Encoder()
 
 
-def method(name: str):
+def method(name: str) -> Callable[[Callable[..., object]], Callable[..., object]]:
     """Register the decorated ``handler(request, ctx)`` for the python:true method ``name``."""
 
-    def register(fn):
+    def register(fn: Callable[..., object]) -> Callable[..., object]:
         _HANDLERS[name] = fn
         return fn
 
     return register
 
 
-def dispatch(name: str, params: bytes, session: bytes, call) -> tuple[int, bytes, bytes]:
+def dispatch(name: str, params: bytes, session: bytes, call: Callable[..., bytes]) -> tuple[int, bytes, bytes]:
     """The embedded-bridge entry point: look up the method, decode ``params`` by its type, run the
     handler, and encode the result. Returns ``(status, payload, audit)`` — status ``0`` with the
     result JSON as payload, or a JSON-RPC error ``code`` with the message as payload."""

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 from types import MappingProxyType
+from typing import Any, cast
 
 import msgspec
 import truenas_rpc_pyclient
@@ -15,7 +16,7 @@ from sample_types import CrashArgs, LoginArgs, LoginResult, PingArgs, PingResult
 
 
 _ENCODER = msgspec.json.Encoder()
-_DECODERS: MappingProxyType[str, msgspec.json.Decoder] = MappingProxyType({
+_DECODERS: MappingProxyType[str, msgspec.json.Decoder[Any]] = MappingProxyType({
     "login": msgspec.json.Decoder(LoginResult),
     "ping": msgspec.json.Decoder(PingResult),
     "crash": msgspec.json.Decoder(PingResult),
@@ -29,13 +30,13 @@ class SampleClient:
     PROTOCOL = "sample"
     VERSION = "1.0.0"
 
-    def __init__(self, raw):
+    def __init__(self, raw: truenas_rpc_pyclient.RawClient) -> None:
         """`raw` is the byte transport this client wraps (an internal detail; prefer `connect`)."""
         self._raw = raw
-        self._negotiated = None
+        self._negotiated: truenas_rpc_pyclient.Negotiated | None = None
 
     @classmethod
-    def connect(cls, endpoint):
+    def connect(cls, endpoint: str) -> SampleClient:
         """Connect over AF_UNIX at `endpoint` and `$/negotiate` this client's `PROTOCOL`."""
         raw = truenas_rpc_pyclient.connect(endpoint, cls.PROTOCOL)
         obj = cls(raw)
@@ -43,31 +44,34 @@ class SampleClient:
         return obj
 
     @property
-    def negotiated(self):
+    def negotiated(self) -> truenas_rpc_pyclient.Negotiated | None:
         """The `$/negotiate` result (`{'protocol', 'server', 'available'}`), or None for a BYO transport."""
         return self._negotiated
 
     @property
-    def available(self):
+    def available(self) -> list[str] | None:
         """The protocol names the server offered at `$/negotiate` (discovery), or None for a BYO transport."""
         return None if self._negotiated is None else self._negotiated["available"]
 
     def login(self, request: LoginArgs) -> LoginResult:
         """Authenticate a user; returns a session token."""
-        return _DECODERS["login"].decode(
-            self._raw.call("login", _ENCODER.encode(request))
+        return cast(
+            LoginResult,
+            _DECODERS["login"].decode(self._raw.call("login", _ENCODER.encode(request))),
         )
 
     def ping(self, request: PingArgs) -> PingResult:
         """Liveness probe."""
-        return _DECODERS["ping"].decode(
-            self._raw.call("ping", _ENCODER.encode(request))
+        return cast(
+            PingResult,
+            _DECODERS["ping"].decode(self._raw.call("ping", _ENCODER.encode(request))),
         )
 
     def crash(self, request: CrashArgs) -> PingResult:
         """Always raises (exercises the error-audit path)."""
-        return _DECODERS["crash"].decode(
-            self._raw.call("crash", _ENCODER.encode(request))
+        return cast(
+            PingResult,
+            _DECODERS["crash"].decode(self._raw.call("crash", _ENCODER.encode(request))),
         )
 
     # x.query: filterable query — not in the basic msgspec client.

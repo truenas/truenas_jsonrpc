@@ -59,23 +59,25 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     // Pinned protocol identity — selecting a version = instantiating the right client class.
     out.push_str(&format!("    PROTOCOL = {}\n", str_lit(&spec.name)));
     out.push_str(&format!("    VERSION = {}\n\n", str_lit(&spec.version)));
-    out.push_str("    def __init__(self, raw):\n");
+    out.push_str("    def __init__(self, raw: truenas_rpc_pyclient.RawClient) -> None:\n");
     out.push_str("        \"\"\"`raw` is the byte transport this client wraps (an internal detail; prefer `connect`).\"\"\"\n");
     out.push_str("        self._raw = raw\n");
-    out.push_str("        self._negotiated = None\n\n");
+    out.push_str("        self._negotiated: truenas_rpc_pyclient.Negotiated | None = None\n\n");
     out.push_str("    @classmethod\n");
-    out.push_str("    def connect(cls, endpoint):\n");
+    out.push_str(&format!(
+        "    def connect(cls, endpoint: str) -> {class}:\n"
+    ));
     out.push_str("        \"\"\"Connect over AF_UNIX at `endpoint` and `$/negotiate` this client's `PROTOCOL`.\"\"\"\n");
     out.push_str("        raw = truenas_rpc_pyclient.connect(endpoint, cls.PROTOCOL)\n");
     out.push_str("        obj = cls(raw)\n");
     out.push_str("        obj._negotiated = raw.negotiated()\n");
     out.push_str("        return obj\n\n");
     out.push_str("    @property\n");
-    out.push_str("    def negotiated(self):\n");
+    out.push_str("    def negotiated(self) -> truenas_rpc_pyclient.Negotiated | None:\n");
     out.push_str("        \"\"\"The `$/negotiate` result (`{'protocol', 'server', 'available'}`), or None for a BYO transport.\"\"\"\n");
     out.push_str("        return self._negotiated\n\n");
     out.push_str("    @property\n");
-    out.push_str("    def available(self):\n");
+    out.push_str("    def available(self) -> list[str] | None:\n");
     out.push_str("        \"\"\"The protocol names the server offered at `$/negotiate` (discovery), or None for a BYO transport.\"\"\"\n");
     out.push_str(
         "        return None if self._negotiated is None else self._negotiated[\"available\"]\n",
@@ -99,7 +101,7 @@ fn header(origin: &str) -> String {
 fn imports(types_mod: &str, used: &BTreeSet<String>, has_decoders: bool) -> String {
     let mut out = String::from("from __future__ import annotations\n\n");
     if has_decoders {
-        out.push_str("from types import MappingProxyType\n\n");
+        out.push_str("from types import MappingProxyType\nfrom typing import Any, cast\n\n");
     }
     out.push_str("import msgspec\nimport truenas_rpc_pyclient\n");
     if !used.is_empty() {
@@ -121,7 +123,7 @@ fn decoder_table(rows: &[(String, String)]) -> String {
         ));
     }
     format!(
-        "_ENCODER = msgspec.json.Encoder()\n_DECODERS: MappingProxyType[str, msgspec.json.Decoder] = MappingProxyType({{\n{entries}}})\n"
+        "_ENCODER = msgspec.json.Encoder()\n_DECODERS: MappingProxyType[str, msgspec.json.Decoder[Any]] = MappingProxyType({{\n{entries}}})\n"
     )
 }
 
@@ -145,7 +147,7 @@ fn emit_method(
         s.push_str(&format!("        \"\"\"{doc}\"\"\"\n"));
     }
     s.push_str(&format!(
-        "        return _DECODERS[{w}].decode(\n            self._raw.call({w}, _ENCODER.encode(request))\n        )\n\n"
+        "        return cast(\n            {result},\n            _DECODERS[{w}].decode(self._raw.call({w}, _ENCODER.encode(request))),\n        )\n\n"
     ));
     s
 }

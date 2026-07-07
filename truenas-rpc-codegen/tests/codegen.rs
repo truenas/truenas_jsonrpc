@@ -297,14 +297,47 @@ fn versioned_protocol_name_clients() {
     assert!(py.contains("from api_v1_types import"));
     assert!(py.contains(r#"    PROTOCOL = "api.v1""#));
     assert!(py.contains(r#"    VERSION = "2.0.0""#));
-    assert!(py.contains("    def connect(cls, endpoint):"));
+    assert!(py.contains("    def connect(cls, endpoint: str) -> ApiV1Client:"));
     assert!(py.contains("truenas_rpc_pyclient.connect(endpoint, cls.PROTOCOL)"));
-    assert!(py.contains("    def negotiated(self):") && py.contains("    def available(self):"));
+    assert!(py.contains("    def negotiated(self) -> truenas_rpc_pyclient.Negotiated | None:"));
+    assert!(py.contains("    def available(self) -> list[str] | None:"));
 
     // The types + server modules use the sanitized module name too.
     assert!(generate_py_server(&spec)
         .unwrap()
         .contains("from api_v1_types import METHODS"));
+}
+
+#[test]
+fn generated_python_goldens_pass_ruff() {
+    // Opportunistic guard: the committed `.py` goldens stay `ruff`-clean. Skipped where `ruff` isn't
+    // installed (a minimal image). `mypy --strict` cleanliness is verified out of band (it needs a
+    // Python env with `msgspec` + the `truenas_rpc_pyclient` stub, so it's not gated here).
+    use std::process::Command;
+    let have_ruff = Command::new("ruff")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !have_ruff {
+        return;
+    }
+    let out = Command::new("ruff")
+        .args([
+            "check",
+            "--no-cache",
+            "tests/fixtures/expected_structs.py",
+            "tests/fixtures/expected_client.py",
+            "tests/fixtures/expected_server.py",
+        ])
+        .output()
+        .expect("run ruff");
+    assert!(
+        out.status.success(),
+        "ruff on the generated .py goldens failed:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
 
 #[test]
