@@ -16,10 +16,11 @@ members = [
     "truenas-rpc-auth",
     "truenas-rpc-utils-unsafe",
     "truenas-rpc-daemon",
+    "truenas-rpc-cache",
     "examples/demo",
     "examples/demo-py",
 ]
-# Seven crates are excluded from the default set (a plain `cargo build`/`cargo test` and `coverage.sh`,
+# Eight crates are excluded from the default set (a plain `cargo build`/`cargo test` and `coverage.sh`,
 # which run without `-p`, skip them): `truenas-rpc-pyo3` (embedded CPython) and `truenas-rpc-pyclient`
 # (the generated Python client's runtime, high-level pyo3) both link libpython (so the default build
 # links none); `truenas-rpc-server` and `truenas-rpc-client` do socket / kTLS / SCM_RIGHTS I/O that
@@ -28,7 +29,8 @@ members = [
 # the direct-syscall / FFI backends (kernel keyring, NETLINK_AUDIT, the MIT krb5 GSSAPI acceptor),
 # whose tests need a keyring / CAP_AUDIT_WRITE / a KDC; and `truenas-rpc-daemon` (the systemd service
 # harness) owns a tokio runtime, blocks process signals, and drives signalfd + socket I/O, so it can't
-# be unit-tested deterministically either. All are covered behaviorally and excluded from the coverage
+# be unit-tested deterministically either; and `truenas-rpc-cache` vendors + links liblmdb for its
+# persistent backend behind the opt-in `lmdb` feature. All are covered behaviorally and excluded from the coverage
 # gate, but still built by `cargo clippy --workspace` and tested with `cargo test -p …`.
 default-members = [
     "truenas-rpc",

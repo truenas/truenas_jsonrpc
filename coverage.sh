@@ -54,7 +54,7 @@ for b in "${BINS[@]}"; do [ -n "$b" ] && OBJ+=(--object "$b"); done
 # `truenas-rpc-daemon` (owns a runtime + signalfd + serves sockets) is likewise behavioral and, not
 # being a default member, never even enters this run.
 # See the workspace Cargo.toml.
-IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-rpc-server/|truenas-rpc-client/|truenas-rpc-utils-unsafe/|truenas-rpc-daemon/)'
+IGNORE='--ignore-filename-regex=(/\.cargo/|/rustc/|/library/|/tests/|/examples/|/target/|truenas-xdr-derive/|truenas-rpc-server/|truenas-rpc-client/|truenas-rpc-utils-unsafe/|truenas-rpc-daemon/|truenas-rpc-cache/)'
 
 # Merged line coverage, exported as lcov (the standard interchange format Codecov/Coveralls
 # consume): a source line is covered if ANY test executed it. We deliberately gate on this

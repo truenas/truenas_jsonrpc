@@ -64,6 +64,9 @@ passthrough = []
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+# The cache / state store (persistent LMDB backend) — dev-only, for the `cache_state` integration
+# test that proves the `self.cache` handler pattern. Not a runtime dependency of the server.
+truenas-rpc-cache = { path = "../truenas-rpc-cache", features = ["lmdb"] }
 
 # This crate makes syscalls (SO_PEERCRED now; kTLS / SCM_RIGHTS in later phases), so it cannot
 # use the workspace's `unsafe_code = "forbid"`. It denies unsafe by default and allows it only

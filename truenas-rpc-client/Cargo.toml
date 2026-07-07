@@ -40,7 +40,8 @@ uuid = { workspace = true }
 thiserror = { workspace = true }
 async-trait = { workspace = true }
 bytes = "1"
-socket2 = "0.5"
+# Socket options (TCP keepalive, O_NONBLOCK). Track tokio's socket2 major so the graph carries one version.
+socket2 = "0.6"
 # O_NONBLOCK toggle for the raw-fd transfer (blocking handler, then restore tokio). Already in the lock.
 libc = "0.2"
 tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt", "rt-multi-thread"] }

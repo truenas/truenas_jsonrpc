@@ -88,6 +88,9 @@ jobs:
           # uses thread-directed pthread_kill, so it needs no elevated privileges. No feature flags,
           # so it is not in the feature matrix below.
           cargo test -p truenas-rpc-daemon --locked
+          # The cache / state store. The in-memory backend is pure-safe Rust; `--all-features` also
+          # builds the persistent LMDB backend (vendored liblmdb compiled via cc).
+          cargo test -p truenas-rpc-cache --all-features --locked
 
   # Feature-combination matrix on the socket crates: each feature individually, plus default and
   # all-on, so a mis-gated `#[cfg(feature)]` cannot hide behind `--all-features`.
@@ -112,6 +115,8 @@ jobs:
           - { crate: truenas-rpc-auth, features: "scram" }
           - { crate: truenas-rpc-auth, features: "oauth" }
           - { crate: truenas-rpc-auth, features: "scram keyring nss oauth gssapi passthrough" }
+          - { crate: truenas-rpc-cache, features: "" }       # in-memory backend only (no C)
+          - { crate: truenas-rpc-cache, features: "lmdb" }   # + persistent LMDB (vendored liblmdb)
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
