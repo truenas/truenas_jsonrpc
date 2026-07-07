@@ -21,12 +21,17 @@ pub enum Transport {
 /// The trust/encryption posture a listener declares for its connections — what the auth stack may
 /// rely on. A property of the underlying socket + TLS termination, **independent of framing** (raw
 /// JSON-RPC and WebSocket over the same socket share a posture). A connection with no posture
-/// (`Peer::posture == None`) — plain TCP or userspace-TLS — is not trusted and may not authenticate.
+/// (`Peer::posture == None`) — plain TCP (including plain `ws://`) — is not trusted and may not
+/// authenticate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TransportPosture {
     /// In-app kTLS termination: a direct, encrypted connection with a kernel-plaintext fd.
     KernelTls,
+    /// In-app **userspace** TLS termination — the `wss://` WebSocket path. Encrypted, but the TLS
+    /// library owns the stream, so there is no plaintext fd (no passthrough / raw-fd transfer).
+    /// Credential auth (SCRAM / OAuth / bearer) is permitted; peer-cred is not (no `SO_PEERCRED`).
+    UserspaceTls,
     /// Behind a reverse proxy over AF_UNIX (TLS terminated upstream). `SO_PEERCRED` is the proxy's
     /// uid, **not** the end client's — never trusted; auth via a credential mechanism or the broker.
     ProxiedUnix,

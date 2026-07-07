@@ -19,6 +19,7 @@ members = [
     "truenas-rpc-cache",
     "examples/demo",
     "examples/demo-py",
+    "examples/demo-ws",
 ]
 # Eight crates are excluded from the default set (a plain `cargo build`/`cargo test` and `coverage.sh`,
 # which run without `-p`, skip them): `truenas-rpc-pyo3` (embedded CPython) and `truenas-rpc-pyclient`

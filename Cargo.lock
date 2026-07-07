@@ -136,6 +136,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "demo-ws"
+version = "0.0.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "tokio",
+ "truenas-rpc",
+ "truenas-rpc-auth",
+ "truenas-rpc-codegen",
+ "truenas-rpc-server",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

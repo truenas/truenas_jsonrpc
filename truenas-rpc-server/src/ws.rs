@@ -131,7 +131,16 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
                 let Ok(ws) = tokio_tungstenite::accept_async(tls_stream).await else {
                     return;
                 };
-                serve_ws(ws, crate::tls::tls_peer(addr, cert, binding, None), shared).await;
+                // `wss://` is userspace TLS: encrypted + an explicit operator opt-in, so it declares a
+                // posture and may authenticate by credential (SCRAM / OAuth / bearer). Plain `ws://`
+                // (no TLS) stays postureless. Peer-cred / passthrough remain excluded (no ucred / fd).
+                let peer = crate::tls::tls_peer(
+                    addr,
+                    cert,
+                    binding,
+                    Some(crate::peer::TransportPosture::UserspaceTls),
+                );
+                serve_ws(ws, peer, shared).await;
             });
         }
     }

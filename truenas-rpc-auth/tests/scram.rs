@@ -147,6 +147,20 @@ fn tls_session(
     proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))
 }
 
+/// A `wss://`-style session: **userspace** TLS — encrypted, `UserspaceTls` posture, no channel
+/// binding (a browser can't read one). Credential auth is allowed; peer-cred is not.
+fn userspace_tls_session(proto: &JsonRpcProtocol<AuthSession>) -> Arc<Session<AuthSession>> {
+    let peer = Peer {
+        tls: Some(TlsPeer {
+            peer_cert: None,
+            channel_binding: None,
+        }),
+        posture: Some(TransportPosture::UserspaceTls),
+        ..Peer::tcp("127.0.0.1:9000".parse().unwrap())
+    };
+    proto.new_session(AuthSession::from_peer(&peer), Arc::new(NullOutbound))
+}
+
 async fn call(
     proto: &JsonRpcProtocol<AuthSession>,
     s: &Arc<Session<AuthSession>>,
@@ -283,6 +297,44 @@ async fn a_y_downgrade_is_rejected_even_when_unbound_is_enabled() {
     // refuse, even with unbound enabled (which accepts only the honest `n`).
     let r = call(&proto, &s, "$/sessionSetup", &client.first("y")).await;
     assert_eq!(rtype(&r), "AUTH_ERR", "{r}");
+    assert_eq!(s.lifecycle(), SessionLifecycle::None);
+}
+
+#[tokio::test]
+async fn unbound_scram_succeeds_over_userspace_tls_wss() {
+    let (client, creds) = alice();
+    let proto = server_unbound(creds);
+    // A `wss://` (userspace-TLS) session declares the `UserspaceTls` posture → credential auth runs.
+    let s = userspace_tls_session(&proto);
+
+    let r1 = call(&proto, &s, "$/sessionSetup", &client.first("n")).await;
+    assert_eq!(rtype(&r1), "CHALLENGE", "{r1}");
+    let server_first = r1["result"]["response"]["message"].as_str().unwrap();
+
+    let (client_final, expected_v) = client.finalize_unbound(server_first);
+    let r2 = call(&proto, &s, "$/sessionSetupContinue", &client_final).await;
+    assert_eq!(rtype(&r2), "SUCCESS", "{r2}");
+    assert_eq!(
+        r2["result"]["response"]["extra"]["scram"].as_str().unwrap(),
+        expected_v
+    );
+    assert_eq!(s.lifecycle(), SessionLifecycle::Established);
+}
+
+#[tokio::test]
+async fn peercred_default_is_denied_over_userspace_tls_wss() {
+    let (_c, creds) = alice();
+    let proto = server_unbound(creds);
+    let s = userspace_tls_session(&proto);
+    // No mechanism = the peer-cred default; over wss (UserspaceTls, no SO_PEERCRED) it must refuse.
+    // wss authenticates by credential, never peer-cred.
+    let wire = serde_json::to_vec(&json!({
+        "jsonrpc": "2.0", "method": "$/sessionSetup", "id": ID, "params": {},
+    }))
+    .unwrap();
+    let r: Value =
+        serde_json::from_slice(&proto.dispatch(&wire, &s).await.into_bytes().unwrap()).unwrap();
+    assert_eq!(rtype(&r), "DENIED", "{r}");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }
 

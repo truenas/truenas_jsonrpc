@@ -92,6 +92,42 @@ jobs:
           # builds the persistent LMDB backend (vendored liblmdb compiled via cc).
           cargo test -p truenas-rpc-cache --all-features --locked
 
+  # The generated TypeScript client: the runtime's own checks (`tsc --strict` + a Node SCRAM
+  # known-answer/round-trip test), the codegen `tsc` golden guard (which self-skips without a
+  # toolchain — here `tsc` is on PATH so it runs for real), and a **live end-to-end**: a `wss://`
+  # server (unbound SCRAM + echo/add + a pub/sub topic) driven by a Node client that consumes the
+  # generated TS client. Node 22 supplies the native global `WebSocket`.
+  ts:
+    name: TypeScript — checks + wss E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Runtime checks (tsc --strict + node SCRAM KAT/round-trip)
+        run: cd truenas-rpc-tsclient && npm install && npm test
+      - name: Codegen goldens type-check (tsc on PATH → the guard runs for real)
+        run: |
+          npm i -g typescript
+          cargo test -p truenas-rpc-codegen generated_typescript_goldens_typecheck --locked
+      - name: Live wss E2E — SCRAM auth + pub/sub via the generated client
+        run: |
+          set -euo pipefail
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost -keyout key.pem -out cert.pem
+          cargo build -p demo-ws --bin e2e_server --locked
+          cargo run -q -p truenas-rpc-codegen --example codegen -- ts-types  examples/demo-ws/json-idl --out examples/demo-ws/e2e/e2e_types.ts
+          cargo run -q -p truenas-rpc-codegen --example codegen -- ts-client examples/demo-ws/json-idl --out examples/demo-ws/e2e/e2e_client.ts
+          ./target/debug/e2e_server --cert cert.pem --key key.pem > server.log 2>&1 &
+          for _ in $(seq 1 100); do grep -q '^PORT=' server.log && break; sleep 0.1; done
+          PORT=$(grep '^PORT=' server.log | head -1 | cut -d= -f2)
+          echo "server on port $PORT"
+          ( cd examples/demo-ws/e2e && npm install && E2E_URL="wss://127.0.0.1:$PORT" NODE_TLS_REJECT_UNAUTHORIZED=0 npm test ) \
+            || { echo '--- server log ---'; cat server.log; exit 1; }
+
   # Feature-combination matrix on the socket crates: each feature individually, plus default and
   # all-on, so a mis-gated `#[cfg(feature)]` cannot hide behind `--all-features`.
   features:
