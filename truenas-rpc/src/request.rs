@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use async_trait::async_trait;
 use serde::Serialize;
+use serde_json::value::RawValue;
 
 use crate::error::JsonRpcError;
 use crate::session::Session;
@@ -37,6 +38,17 @@ pub(crate) trait InternalCaller<S>: Send + Sync {
         cx: RequestCtx<S>,
         elevated: bool,
     ) -> Result<Box<dyn Any + Send>, JsonRpcError>;
+    /// **Synchronous, JSON in/out** by-name call — decode `params_json` into a *sync* target's
+    /// `Accepts`, run it in-process on the current (blocking-pool) thread with no runtime hop, and
+    /// encode its result as bare JSON. For a caller that is itself sync (a python body via `call`). An
+    /// *async* target isn't callable this way and errors.
+    fn call_named_json(
+        &self,
+        name: &str,
+        params_json: &[u8],
+        cx: RequestCtx<S>,
+        elevated: bool,
+    ) -> Result<Box<RawValue>, JsonRpcError>;
 }
 
 /// A request id held in its wire-native form, formatted to text only on demand. The JSON wire's
@@ -248,6 +260,31 @@ impl<S> RequestCtx<S> {
         self.caller()?
             .call_named(name.to_owned(), args, self.clone(), true)
             .await
+    }
+
+    /// **JSON in/out** in-process call: decode `params_json` into another registered **sync**
+    /// method's params, run it in-process on the current (blocking-pool) thread with no runtime hop —
+    /// **as the authenticated caller** (role gate applied) — and return its result as bare JSON. The
+    /// path a python body's `call(...)` takes (the python side owns the types, so the boundary is
+    /// bytes). An **async** target isn't callable this way and errors; so do unknown / non-plain
+    /// methods, or a ctx with no call seam.
+    pub fn call_named_json(
+        &self,
+        name: &str,
+        params_json: &[u8],
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        self.caller()?
+            .call_named_json(name, params_json, self.clone(), false)
+    }
+
+    /// [`call_named_json`](Self::call_named_json) **elevated** — skips the role gate (full admin).
+    pub fn call_named_json_elevated(
+        &self,
+        name: &str,
+        params_json: &[u8],
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        self.caller()?
+            .call_named_json(name, params_json, self.clone(), true)
     }
 
     fn caller(&self) -> Result<&Arc<dyn InternalCaller<S>>, JsonRpcError> {

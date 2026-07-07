@@ -41,7 +41,7 @@ pub use protocol::{
     AuditOutcome, AuditSink, CancelTarget, Canceller, Dispatched, JsonRpcProtocol,
     JsonRpcProtocolBuilder, ServerInfoHandler, Service, SessionInfo,
 };
-pub use pydispatch::{PyDispatcher, PyOutcome, PyResult};
+pub use pydispatch::{InProcessCaller, PyDispatcher, PyOutcome, PyResult};
 pub use request::RequestCtx;
 pub use role::{RoleMask, Roles};
 pub use session::{

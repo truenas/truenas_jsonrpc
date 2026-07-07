@@ -28,7 +28,7 @@ use crate::method::{
     Method, MethodDef, MethodImpl, MethodMeta, RpcFdPassMethod, RpcFdTransferMethod, RpcMethod,
     SubscriptionDef, SubscriptionImpl, WireParams,
 };
-use crate::pydispatch::{PyDispatcher, PyOutcome, PyResult};
+use crate::pydispatch::{InProcessCaller, PyDispatcher, PyOutcome, PyResult};
 use crate::request::{InternalCaller, RequestCtx};
 use crate::role::{RoleMask, Roles};
 use crate::session::{
@@ -2226,6 +2226,54 @@ impl<S: Send + Sync + 'static> Caller<S> {
         }
         outcome
     }
+
+    /// Synchronous **JSON in/out** in-process run: role-gate (unless `elevated`) + opt-in
+    /// elevated-audit, then decode `params_json` and run a **sync** target's handler directly on this
+    /// (blocking-pool) thread — no runtime hop — encoding its result as bare JSON. An async target
+    /// isn't callable synchronously; other kinds aren't internally callable.
+    fn run_value_json(
+        &self,
+        method: Arc<Method<S>>,
+        params_json: &[u8],
+        cx: RequestCtx<S>,
+        elevated: bool,
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        if !elevated {
+            role_gate(method.meta.required, cx.session())?;
+        }
+        let audit =
+            (elevated && self.audit_elevated).then(|| (method.meta.clone(), cx.session().clone()));
+        let outcome = match &method.imp {
+            MethodImpl::Sync(e) => {
+                let raw = parse_json_params(params_json)?;
+                let (decoded, _) = e.decode(WireParams::Json(raw.as_deref()), false)?;
+                let mut out = Vec::new();
+                e.run_into(Encode::JsonBody, decoded, &cx, &mut out)?;
+                json_body_to_raw(out)
+            }
+            MethodImpl::Async(_) => Err(JsonRpcError::internal(
+                "async method is not callable synchronously",
+            )),
+            _ => Err(JsonRpcError::internal("method is not internally callable")),
+        };
+        if let (Some((meta, session)), Some(sink)) = (audit, &self.audit_sink) {
+            let req = RequestInfo {
+                method: meta.name.to_string(),
+                id: None,
+                params: Value::Null,
+                roles: meta.roles.to_vec(),
+            };
+            audit_call(
+                sink.as_ref(),
+                &meta,
+                &req,
+                audit_outcome(&outcome),
+                None,
+                &session,
+            );
+        }
+        outcome
+    }
 }
 
 #[async_trait]
@@ -2260,6 +2308,63 @@ impl<S: Send + Sync + 'static> InternalCaller<S> for Caller<S> {
             .ok_or_else(|| JsonRpcError::method_not_found("method not found"))?;
         self.run(method, args, cx, elevated).await
     }
+    fn call_named_json(
+        &self,
+        name: &str,
+        params_json: &[u8],
+        cx: RequestCtx<S>,
+        elevated: bool,
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        let method = self
+            .registry
+            .methods
+            .get(name)
+            .cloned()
+            .ok_or_else(|| JsonRpcError::method_not_found("method not found"))?;
+        self.run_value_json(method, params_json, cx, elevated)
+    }
+}
+
+/// The [`InProcessCaller`] handed to a python body (the `call` callable): an `S`-erased, sync facade
+/// over the calling request's [`RequestCtx::call_named_json`], built from `cx` per dispatch. Erasing `S` keeps
+/// the (deliberately `S`-agnostic) [`PyDispatcher`] seam free of the daemon's state type; JSON bytes
+/// in/out — the python side (msgspec) owns the types.
+struct PyInProcessCaller<S> {
+    cx: RequestCtx<S>,
+}
+
+impl<S: Send + Sync + 'static> InProcessCaller for PyInProcessCaller<S> {
+    fn call_json(
+        &self,
+        name: &str,
+        params_json: &[u8],
+        elevated: bool,
+    ) -> Result<Box<RawValue>, JsonRpcError> {
+        if elevated {
+            self.cx.call_named_json_elevated(name, params_json)
+        } else {
+            self.cx.call_named_json(name, params_json)
+        }
+    }
+}
+
+/// Parse in-process JSON call params into a borrowable `RawValue` (`None` for empty). INVALID_PARAMS
+/// on malformed JSON — matching the wire path's param validation.
+fn parse_json_params(params_json: &[u8]) -> Result<Option<Box<RawValue>>, JsonRpcError> {
+    if params_json.is_empty() {
+        return Ok(None);
+    }
+    serde_json::from_slice::<Box<RawValue>>(params_json)
+        .map(Some)
+        .map_err(|e| JsonRpcError::invalid_params(e.to_string()))
+}
+
+/// An `Encode::JsonBody` result buffer → a `RawValue` (valid UTF-8 JSON by construction).
+fn json_body_to_raw(out: Vec<u8>) -> Result<Box<RawValue>, JsonRpcError> {
+    let text = String::from_utf8(out)
+        .map_err(|e| JsonRpcError::internal(format!("non-UTF8 JSON result: {e}")))?;
+    RawValue::from_string(text)
+        .map_err(|e| JsonRpcError::internal(format!("invalid JSON result: {e}")))
 }
 
 /// Run a registered method on already-decoded `args`, returning its boxed typed result with **no
@@ -2508,10 +2613,15 @@ impl<S: Send + Sync + 'static> Pipeline<S> {
                 Some(dispatcher) => {
                     let params_json = params.map(|r| r.get().as_bytes()).unwrap_or(b"{}");
                     let view = build_session_view(&self.session);
+                    // The in-process call handle a python body uses (the `call` callable): an
+                    // S-erased, sync facade over this request's `cx.call_named_json`. `Arc` so the
+                    // byte bridge can wrap it in a capsule owned by the Python `call` object.
+                    let caller: Arc<dyn InProcessCaller> =
+                        Arc::new(PyInProcessCaller { cx: cx.clone() });
                     let PyResult {
                         outcome,
                         audit_message,
-                    } = dispatcher.dispatch(self.req.method.as_str(), params_json, &view);
+                    } = dispatcher.dispatch(self.req.method.as_str(), params_json, &view, caller);
                     if let Some(message) = audit_message {
                         if let Some(detail) = &audit_detail {
                             *detail.lock().unwrap_or_else(PoisonError::into_inner) = Some(message);

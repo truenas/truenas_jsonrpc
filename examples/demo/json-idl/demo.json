@@ -124,6 +124,13 @@
       "params": { "$ref": "#/$defs/TransferArgs" },
       "result": { "$ref": "#/$defs/UploadDone" },
       "transfer": { "direction": "upload" }
+    },
+    "py.hello": {
+      "summary": "Python-implemented: forwards to `greet` via `mw` (exercises live pyo3 typed dispatch).",
+      "handler": "py_hello",
+      "params": { "$ref": "#/$defs/GreetArgs" },
+      "result": { "$ref": "#/$defs/GreetResult" },
+      "python": true
     }
   }
 }

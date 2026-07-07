@@ -73,6 +73,9 @@ pub(crate) enum Encode<'a> {
     /// Write the bare XDR-serialized result body, **unframed** — the in-process op-table path
     /// ([`RequestCtx::call_op`] / `run_proc`), whose caller frames the result its own way.
     XdrBody,
+    /// Write the bare JSON-serialized result value, **unframed** — the in-process by-name JSON path
+    /// ([`RequestCtx::call_named_json`], the `call` byte seam), whose caller frames it its own way.
+    JsonBody,
 }
 
 impl Encode<'_> {
@@ -91,6 +94,8 @@ impl Encode<'_> {
                 .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}"))),
             Encode::XdrBody => truenas_xdr::to_writer(&mut *out, value)
                 .map_err(|e| JsonRpcError::internal(format!("XDR encode failed: {e}"))),
+            Encode::JsonBody => serde_json::to_writer(&mut *out, value)
+                .map_err(|e| JsonRpcError::internal(format!("JSON encode failed: {e}"))),
         }
     }
 }
@@ -404,6 +409,9 @@ where
                 let result = (self.f)(aug.base, cx, &cf, &co)?;
                 finalize_json_into(result, &aug.query_options, encode, out)
             }
+            Encode::JsonBody => Err(JsonRpcError::internal(
+                "filterable is not internally callable",
+            )),
             Encode::Xdr(_) | Encode::XdrBody => {
                 let (base, xopts, filters_json) = *decoded
                     .downcast::<(A, XdrQueryOptions, String)>()

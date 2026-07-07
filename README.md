@@ -135,25 +135,30 @@ the CLI) is documented in the [`truenas-rpc-codegen` README](truenas-rpc-codegen
 
 ### Consume it from Python
 
-The same spec also generates an optional **Python client** — a PyO3 extension module. Add
-`.emit_pyclient()` to `build.rs`, build the crate as a `cdylib` (e.g. with maturin), and call it —
-typed request in, typed response out:
+The same spec also generates an optional **Python client** — typed [`msgspec`](https://jcristharif.com/msgspec/)
+structs over a thin byte transport. `build.rs` emits three `.py` modules (`.emit_py_structs()` /
+`.emit_py_client()` / `.emit_py_server()`); the client wraps a `RawClient` (from
+[`truenas-rpc-pyclient`](truenas-rpc-pyclient), a `pyo3-ffi` shim over the Rust engine) — typed
+request in, typed response out:
 
 ```python
-import catalog                                          # module name = the spec `name`
-client = catalog.CatalogClient.connect(catalog.Endpoint.unix("/run/catalog.sock"))
+import truenas_rpc_pyclient
+from catalog_client import CatalogClient           # module = the spec `name`
+from catalog_types import GetThingArgs              # a msgspec.Struct per $defs type
 
-thing = client.getthething(catalog.GetThingArgs(id=42))   # a class per $defs type; method = handler
-print(thing.name, thing.tags)                             # typed attribute getters
-client.close()
+raw = truenas_rpc_pyclient.connect("/run/catalog.sock", "catalog")
+client = CatalogClient(raw)
+
+thing = client.getthething(GetThingArgs(id=42))     # method = handler; msgspec-typed in/out
+print(thing.name, thing.tags)                       # typed attributes
 ```
 
-The request/response classes have keyword constructors and attribute getters, and a failure raises
-`RpcError`. The call is **synchronous** — it's a thin wrapper over the *Rust* typed client (which does
-the wire (de)serialization), driven on a background runtime via
-[`truenas-rpc-pyclient`](truenas-rpc-pyclient). [`examples/demo-py`](examples/demo-py) is a runnable
-build. This is the **basic** client (connect / call / close); subscriptions, filterable queries, and
-raw-fd transfers are follow-ons, and nested `$ref` fields currently surface as `dict`s.
+The `msgspec.Struct` types (de)serialize on the Python side; `RawClient.call(method, params_bytes)`
+just shuttles the JSON bytes to the Rust engine and back, so nested `$ref`, enums, and secrets are all
+faithfully typed. A server error raises `RpcError`. The call is **synchronous** (the Rust engine's
+async is driven on a background runtime with the GIL released).
+[`examples/demo-py`](examples/demo-py) is a runnable build. This is the **basic** client (connect /
+call); subscriptions, filterable queries, and raw-fd transfers are follow-ons.
 
 ### Best practices
 
@@ -340,6 +345,11 @@ plus a **server** or **client** crate, and a build-dependency on the codegen. Th
   readiness. The turn-key `main` is just a config mapping + your codegen'd protocols/handlers + a
   systemd unit — including declaring authentication (peer-cred / SCRAM) on shared unix + proxied
   sockets; see [its README](truenas-rpc-daemon/README.md).
+- **`truenas-rpc-cache`** — *optional* **cache & state store**: one `Cache<V>` API
+  (`get` / `put` / `pop` / `get_or_put` / `traverse` / `cleanup_expired`, with TTL) over an
+  **in-memory** backend (default) or a **persistent LMDB** backend (the `lmdb` feature; survives
+  reboots, our own vendored liblmdb). A service holds an `Arc<Cache<_>>`; see
+  [its README](truenas-rpc-cache/README.md).
 
 The remaining crates are **internal** — `truenas-filter` (the query engine, re-exported through
 `truenas-rpc`), `truenas-xdr` + `truenas-xdr-derive` (the XDR codec + its `derive` proc-macro), and

@@ -1,14 +1,15 @@
 # `truenas-rpc-pyclient` — the runtime for the **generated Python client**
-# (`truenas-rpc-codegen`'s `emit_pyclient`). It is the Python analogue of `truenas-rpc-client`: a
-# small, hand-written **sync bridge** over the async `JsonRpcClient` (a shared tokio runtime + GIL-
-# releasing `block_on`), plus the reusable `Endpoint` / `ClientConfig` classes and the `RpcError`
-# exception the generated `#[pyclass]`es register. Built with the *high-level* pyo3 framework
-# (`#[pyclass]`/`#[pymethods]`), unlike `truenas-rpc-pyo3` (raw `pyo3-ffi`, embedding). It links
-# libpython, so — like `truenas-rpc-pyo3` — it is NOT in the workspace `default-members`.
+# (`truenas-rpc-codegen`'s `emit_py_client`). It is a thin `pyo3-ffi` shim that exposes the Rust
+# `truenas-rpc-client` engine to Python as a `RawClient` with a **byte boundary**:
+# `RawClient.call(method, params_bytes) -> result_bytes`. The generated `<Proto>Client` (msgspec)
+# encodes/decodes on the Python side; this crate only shuttles bytes and bridges async→sync (a shared
+# tokio runtime + GIL-releasing `block_on`). No per-type translation, no high-level pyo3 — the same
+# raw `pyo3-ffi` the embedded server bridge (`truenas-rpc-pyo3`) uses. It links libpython, so — like
+# `truenas-rpc-pyo3` — it is NOT in the workspace `default-members`.
 [package]
 name = "truenas-rpc-pyclient"
 version = "0.1.0"
-description = "Runtime for the truenas-rpc generated Python client: a sync bridge over truenas-rpc-client"
+description = "Runtime for the truenas-rpc generated Python client: a thin pyo3-ffi RawClient (byte boundary) over truenas-rpc-client"
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
@@ -18,28 +19,22 @@ rust-version.workspace = true
 [dependencies]
 truenas-rpc = { path = "../truenas-rpc" }
 truenas-rpc-client = { path = "../truenas-rpc-client" }
-serde = { workspace = true }
-serde_json = { workspace = true }
 # A shared multi-thread runtime hosts every client's background connection tasks; the blocking bridge
 # `block_on`s calls on it (`enable_all` needs the net + time drivers).
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros"] }
-# The high-level pyo3 framework: `#[pyclass]` / `#[pymethods]` to expose the client + generated types
-# to Python. NO `extension-module` here — this is the leaf lib (the consumer's cdylib enables it), so
-# this crate's own tests still link libpython and can start an interpreter.
-pyo3 = { version = "0.23" }
-# The Python <-> Rust struct boundary: serde straight to/from Python objects (no intermediate JSON
-# string). One uniform conversion handles every generated field shape (nested $ref, enum, Secret,
-# Vec, Option), since they are all `Serialize`/`Deserialize`.
-pythonize = "0.23"
+# The raw CPython C-API + libpython linking (via its `pyo3-build-config` build dep) — no pyo3
+# framework, no proc-macros. Default features only: do NOT enable `extension-module` (which would
+# stop linking libpython and break the in-process test).
+pyo3-ffi = { version = "0.23" }
 
 [dev-dependencies]
-# The round-trip test stands up a live `TruenasRpcServer` over AF_UNIX and drives the blocking bridge.
+# The round-trip test stands up a live `TruenasRpcServer` over AF_UNIX and drives the RawClient.
 truenas-rpc-server = { path = "../truenas-rpc-server" }
+serde_json = { workspace = true }
 
-# The high-level pyo3 macros (`#[pyclass]`/`#[pymethods]`/`#[pymodule]`) expand to `unsafe`
-# trampolines that can't be per-site annotated (unlike the hand-written FFI in `truenas-rpc-pyo3`,
-# which uses `deny` + `#[allow(unsafe_code)]`), so this crate must allow unsafe wholesale. It is
-# opt-in and excluded from `default-members`, so the strict, `forbid`-unsafe core is unaffected.
+# Not `lints.workspace = true`: this crate calls the raw CPython C-API, so it needs `unsafe` (the
+# workspace forbids it outright and `forbid` can't be locally relaxed). Mirror the embedded bridge's
+# FFI policy — `deny` with per-site `#[allow(unsafe_code)]` + `// SAFETY:`.
 [lints.rust]
-unsafe_code = "allow"
+unsafe_code = "deny"
 missing_docs = "warn"

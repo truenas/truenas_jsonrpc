@@ -8,7 +8,9 @@
 
 mod emit_client;
 mod emit_openrpc;
-mod emit_pyclient;
+mod emit_py_client;
+mod emit_py_server;
+mod emit_py_structs;
 mod emit_server;
 mod emit_types;
 mod error;
@@ -135,11 +137,23 @@ pub fn generate_openrpc(spec: &Spec) -> Result<String> {
     emit_openrpc::generate(&spec.raw, &spec.origin)
 }
 
-/// Emit the **optional** Python client (a PyO3 extension module): a `#[pyclass]` per `$defs` type + a
-/// `#[pyclass]` client wrapping the generated Rust typed client ([`generate_client`]), over the
-/// hand-written `truenas-rpc-pyclient` runtime. Non-default — the consumer opts in by calling it.
-pub fn generate_pyclient(spec: &Spec) -> Result<String> {
-    emit_pyclient::generate(&spec.raw, &spec.origin)
+/// Emit the Python **API-types** module: one `msgspec.Struct` per `$defs`, the generated
+/// `enum.StrEnum`s, and a `METHODS` table (wire name → `(Params, Result)`). Shared by the generated
+/// Python client and server-dispatch shim. Emits `.py` text (msgspec — no pyo3).
+pub fn generate_py_structs(spec: &Spec) -> Result<String> {
+    emit_py_structs::generate(&spec.raw, &spec.origin)
+}
+
+/// Emit the Python **client** module: a `<Pascal>Client` over a raw byte transport (the
+/// `truenas-rpc-pyclient` `RawClient`), one msgspec-typed method per plain `request -> result` RPC.
+pub fn generate_py_client(spec: &Spec) -> Result<String> {
+    emit_py_client::generate(&spec.raw, &spec.origin)
+}
+
+/// Emit the Python **server-dispatch** module: the `dispatch(name, params, session, call)` framework
+/// the embedded bridge drives (a `@method` registry over the [`generate_py_structs`] `METHODS`).
+pub fn generate_py_server(spec: &Spec) -> Result<String> {
+    emit_py_server::generate(&spec.raw, &spec.origin)
 }
 
 // --- build.rs helper ---------------------------------------------------------
@@ -199,9 +213,21 @@ impl Build {
         self.emit("openrpc.json", generate_openrpc)
     }
 
-    /// Emit `pyclient_gen.rs` (the optional PyO3 Python client); returns its path (for `include!`).
-    pub fn emit_pyclient(self) -> Result<PathBuf> {
-        self.emit("pyclient_gen.rs", generate_pyclient)
+    /// Emit `<service>_types.py` (the msgspec API types + `METHODS`); returns its path. The client and
+    /// server-dispatch modules import from it, so the filename tracks the service name.
+    pub fn emit_py_structs(self) -> Result<PathBuf> {
+        self.emit_py("_types.py", generate_py_structs)
+    }
+
+    /// Emit `<service>_client.py` (the typed msgspec client over a `RawClient`); returns its path.
+    pub fn emit_py_client(self) -> Result<PathBuf> {
+        self.emit_py("_client.py", generate_py_client)
+    }
+
+    /// Emit `<service>_server.py` (the `dispatch(name, params, session, call)` framework); returns its
+    /// path.
+    pub fn emit_py_server(self) -> Result<PathBuf> {
+        self.emit_py("_server.py", generate_py_server)
     }
 
     fn resolved_json_idl(&self) -> Result<PathBuf> {
@@ -242,6 +268,22 @@ impl Build {
         }
         Ok(path)
     }
+
+    /// Like [`emit`](Self::emit), but the filename is `<service><suffix>` (the Python modules import
+    /// each other by service name, so the artifact names track it).
+    fn emit_py(&self, suffix: &str, generate: impl Fn(&Spec) -> Result<String>) -> Result<PathBuf> {
+        let dir = self.resolved_json_idl()?;
+        let spec = Spec::load_dir(&dir)?;
+        let module = emit_py_structs::py_module(&spec.raw)?;
+        let code = generate(&spec)?;
+        let path = self.resolved_out()?.join(format!("{module}{suffix}"));
+        std::fs::write(&path, code)?;
+        println!("cargo:rerun-if-changed={}", dir.display());
+        for f in spec.source_files() {
+            println!("cargo:rerun-if-changed={}", f.display());
+        }
+        Ok(path)
+    }
 }
 
 // --- CLI (used by the `codegen` example) -------------------------------------
@@ -252,7 +294,7 @@ pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
     let sub = args.first().map(String::as_str);
     let dir = args.get(1).ok_or_else(|| {
         CodegenError::new(
-            "usage: <types|server|client|openrpc|pyclient> <json-idl-dir> [--out FILE]",
+            "usage: <types|server|client|openrpc|py-structs|py-client|py-server> <json-idl-dir> [--out FILE]",
         )
     })?;
     let out_file = match args.get(2).map(String::as_str) {
@@ -270,12 +312,10 @@ pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
         Some("server") => generate_server(&spec)?,
         Some("client") => generate_client(&spec)?,
         Some("openrpc") => generate_openrpc(&spec)?,
-        Some("pyclient") => generate_pyclient(&spec)?,
-        other => {
-            return Err(CodegenError::new(format!(
-                "unknown subcommand {other:?} (expected types|server|client|openrpc|pyclient)"
-            )))
-        }
+        Some("py-structs") => generate_py_structs(&spec)?,
+        Some("py-client") => generate_py_client(&spec)?,
+        Some("py-server") => generate_py_server(&spec)?,
+        other => return Err(CodegenError::new(format!("unknown subcommand {other:?}"))),
     };
     match out_file {
         Some(f) => std::fs::write(f, text)?,

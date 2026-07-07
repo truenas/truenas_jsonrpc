@@ -190,7 +190,7 @@ mod tests {
     async fn generated_client_over_a_live_server() {
         // The full pipeline: json-idl → generated server (`register`) served over `JsonRpc`, and the
         // json-idl → generated `DemoClient` driving it over a real AF_UNIX socket via the client engine.
-        use truenas_rpc_client::{ClientConfig, Endpoint, JsonRpcClient, QueryResult};
+        use truenas_rpc_client::{ClientConfig, Endpoint, QueryResult};
         use truenas_rpc_server::{JsonRpc, TruenasRpcServer, UnixConfig};
 
         let path = std::env::temp_dir().join(format!("demo-e2e-{}.sock", std::process::id()));
@@ -201,15 +201,13 @@ mod tests {
         let listener = TruenasRpcServer::<()>::bind_unix(&UnixConfig::new(&path)).unwrap();
         let task = tokio::spawn(async move { server.serve_unix_listener(listener, JsonRpc).await });
 
-        let (jc, negotiated, _notifs) = JsonRpcClient::connect_negotiate(
-            &Endpoint::unix(&path),
-            "demo",
-            ClientConfig::default(),
-        )
-        .await
-        .unwrap();
+        // The generated client pins + `$/negotiate`s its own protocol — instantiating it selects
+        // the version (here `DemoClient::PROTOCOL == "demo"`).
+        let (client, negotiated, _notifs) =
+            DemoClient::connect(&Endpoint::unix(&path), ClientConfig::default())
+                .await
+                .unwrap();
         assert_eq!(negotiated.protocol, "demo");
-        let client = DemoClient::new(jc);
 
         // Plain typed call, then the dual-wire `add`, then a secret round-trip.
         assert_eq!(

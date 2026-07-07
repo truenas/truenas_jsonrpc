@@ -21,6 +21,7 @@ coverage model. For the *consumer's* view ("what goes in my `Cargo.toml`") see t
 | [`truenas-rpc-pyclient`](#truenas-rpc-pyclient) | Runtime for the generated Python client | opt-in | behavioral |
 | [`truenas-rpc-utils-unsafe`](#truenas-rpc-utils-unsafe) | Opt-in unsafe utils: kernel keyring / audit / GSSAPI FFI | opt-in | behavioral |
 | [`truenas-rpc-daemon`](#truenas-rpc-daemon) | Turn-key systemd daemon harness (config, signals, lifecycle, serving) | opt-in | behavioral |
+| [`truenas-rpc-cache`](#truenas-rpc-cache) | In-memory / persistent-LMDB cache & state store | opt-in | behavioral |
 | [`examples/demo`](#examplesdemo) | End-to-end codegen demo / integration test | default | ignored (`/examples/`) |
 
 **Build** — *default* crates build and test with a plain `cargo build` / `cargo test` (they are the
@@ -69,9 +70,10 @@ on it directly.
 - **Features:** none.
 
 ### truenas-rpc-codegen
-The `json-idl` → **Rust (server + client) + OpenRPC** generator. Emits source *text* (it is not a
-proc-macro), so it carries only `serde` + `serde_json`. Used as a `build-dependency` via `Build`, or
-as a CLI (`cargo run --example codegen`). *This is the crate the new `emit_pyclient` emitter lives in.*
+The `json-idl` → **Rust (server + client) + OpenRPC + Python (msgspec)** generator. Emits source
+*text* (it is not a proc-macro), so it carries only `serde` + `serde_json`. Used as a
+`build-dependency` via `Build`, or as a CLI (`cargo run --example codegen`). *This is the crate the
+`emit_py_structs` / `emit_py_client` / `emit_py_server` msgspec emitters live in.*
 - **Internal:** none.
 - **External:** `serde`, `serde_json`.
 - **Features:** none.
@@ -93,7 +95,7 @@ The optional async **client engine**: connect over AF_UNIX / TCP / kTLS / WebSoc
 call / subscribe, stream raw-fd transfers, pass fds — and drive the codegen'd typed client via
 `CallEngine`.
 - **Internal:** `truenas-rpc`, `truenas-xdr`.
-- **External:** `serde`, `serde_json`, `uuid`, `thiserror`, `async-trait`, `bytes` 1, `socket2` 0.5,
+- **External:** `serde`, `serde_json`, `uuid`, `thiserror`, `async-trait`, `bytes` 1, `socket2` 0.6,
   `libc` 0.2, `tokio` (`net`, `io-util`, `sync`, `time`, `macros`, `rt`, `rt-multi-thread`); **opt:**
   `nix` 0.29 (`fd-passing`), `openssl` 0.10 / `openssl-sys` 0.9 / `foreign-types` 0.3 (`tls`),
   `tokio-tungstenite` 0.24 / `futures-util` 0.3 / `tokio-openssl` 0.6 (`websocket`).
@@ -121,19 +123,17 @@ framework, no proc-macros**. Excluded from default members, so a default build l
 - **Lint:** `unsafe_code = "deny"` (per-site allow) — raw C-API.
 
 ### truenas-rpc-pyclient
-The runtime for the **generated Python client** (`truenas-rpc-codegen`'s `emit_pyclient`) — the Python
-analogue of `truenas-rpc-client`. A hand-written **sync bridge** that connects + hands the engine to
-the generated Rust typed client, then drives its typed async methods on a shared multi-thread tokio
-runtime with the GIL released (`block_on`); plus `to_py`/`from_py` (the serde struct↔Python boundary),
-the reusable `Endpoint` / `ClientConfig` classes, and the `RpcError` exception the generated
-`#[pyclass]`es register. Built with the *high-level* pyo3 framework (`#[pyclass]`/`#[pymethods]`),
-unlike `truenas-rpc-pyo3`.
+The runtime for the **generated Python client** (`truenas-rpc-codegen`'s `emit_py_client`). A thin
+`pyo3-ffi` shim that exposes the Rust `truenas-rpc-client` engine to Python as a `RawClient` with a
+**byte boundary** — `RawClient.call(method, params_bytes) -> result_bytes`. The generated
+`<Proto>Client` (msgspec) owns the types; this crate only shuttles bytes and bridges async→sync (a
+shared multi-thread tokio runtime + GIL-releasing `block_on`). No per-type translation, no high-level
+pyo3 — the same raw `pyo3-ffi` the `truenas-rpc-pyo3` server bridge uses. A server error surfaces as
+`RpcError((code, message))`.
 - **Internal:** `truenas-rpc`, `truenas-rpc-client`.
-- **External:** `pyo3` 0.23 (high-level framework; no `extension-module` — the consumer's cdylib
-  enables it), `pythonize` 0.23 (the struct↔Python serde boundary), `tokio` (`rt-multi-thread`, `net`,
-  `time`, …), `serde`, `serde_json`.
-- **Lint:** `unsafe_code = "allow"` — the pyo3 macros expand to `unsafe` trampolines that can't be
-  per-site annotated.
+- **External:** `pyo3-ffi` 0.23 (raw C-API + libpython linking; *not* `extension-module`), `tokio`
+  (`rt-multi-thread`, `net`, `time`, …).
+- **Lint:** `unsafe_code = "deny"` (per-site allow) — raw C-API.
 
 ### truenas-rpc-utils-unsafe
 The workspace's opt-in **unsafe utilities** — direct kernel syscalls / FFI, quarantined in one crate so
@@ -168,6 +168,23 @@ heterogeneous servers coexist, and the compile-time transport-safety of the serv
 - **Features:** none.
 - **Lint:** `unsafe_code = "forbid"` (`lints.workspace = true`) — signalfd and `sd_notify` are driven
   through safe `nix` / `std` wrappers, so the harness needs no unsafe.
+
+### truenas-rpc-cache
+A cache & state store — one uniform `Cache<V>` (`get` / `put(ttl)` / `has_key` / `delete` / `pop` /
+`get_or_put` / `traverse` / `cleanup_expired`, mirroring `middlewared/plugins/cache.py`) over two
+backends the caller picks per cache: an **in-memory** concurrent map (default, ephemeral) and a
+**persistent LMDB** store (the `lmdb` feature; survives reboots). TTL is first-class (a `{deadline,
+value}` envelope with lazy expiry); `pop` / `get_or_put` are atomic. The LMDB backend is our own
+hand-written FFI over a **vendored, pinned liblmdb 0.9.35** (compiled with `cc`, no `bindgen`); values
+are **XDR-encoded** (`truenas-xdr`, compact binary — smaller on disk than JSON), and one `MDB_env` is
+pooled per path per process (reference-counted, force-synced + closed on last drop — LMDB forbids
+opening an environment twice in one process).
+- **Internal:** `truenas-xdr` (the `lmdb` value codec); otherwise backend-agnostic — a service holds an `Arc<Cache<V>>`.
+- **External:** `serde`, `thiserror`; **opt (`lmdb`):** `truenas-xdr` (XDR value codec), a `cc` build-dep,
+  and the vendored liblmdb C.
+- **Features:** `lmdb` (off by default — a plain build is the in-memory backend only).
+- **Lint:** `unsafe_code = "deny"` — the LMDB FFI is a module-scoped allow with `// SAFETY:` notes; a
+  memory-only build has none.
 
 ### examples/demo
 `demo-consumer` — the documented `json-idl` + `build.rs` codegen layout, exercised as a live
@@ -243,15 +260,13 @@ deliberately small; several "new" deps are already transitive (noted).
 | `libc` | 0.2 | server, client, utils-unsafe | Direct syscalls (SO_PEERCRED, kTLS, `keyctl`, netlink, `fcntl`) |
 | `nix` | 0.29 | server, client (`fd-passing`), auth (`nss`) | Safe `sendmsg`/`recvmsg` SCM_RIGHTS; `getpwnam_r` |
 | `bytes` | 1 | server, client | Cancel-safe framed reads |
-| `socket2` | 0.5 | client | Socket options on connect |
+| `socket2` | 0.6 | client | Socket options on connect (tracks tokio's version) |
 | `openssl` / `openssl-sys` / `foreign-types` | 0.10 / 0.9 / 0.3 | server (`tls`), client (`tls`), auth (`scram`/`oauth`/`gssapi`) | System OpenSSL: kTLS handshake + crypto/base64 |
 | `tokio-openssl` | 0.6 | server (`tls`), client (`websocket`) | Userspace-TLS `SslStream` pump |
 | `tokio-tungstenite` | 0.24 | server / client (`websocket`) | WebSocket framing |
 | `http` | 1 | server (`websocket`) | Upgrade-request header parsing |
 | `futures-util` | 0.3 | server, client (`websocket`) | `FuturesUnordered`, stream `split()` |
-| `pyo3-ffi` | 0.23 | pyo3 | Raw CPython C-API + libpython linking |
-| `pyo3` | 0.23 | pyclient | High-level `#[pyclass]`/`#[pymethods]` to expose the generated client to Python |
-| `pythonize` | 0.23 | pyclient | serde struct↔Python object conversion (no JSON-string hop) |
+| `pyo3-ffi` | 0.23 | pyo3, pyclient | Raw CPython C-API + libpython linking (embedded bridge + the `RawClient` shim) |
 | `pkg-config` | 0.3 (build) | utils-unsafe (gssapi) | Locate system MIT krb5 |
 
 ## Coverage model

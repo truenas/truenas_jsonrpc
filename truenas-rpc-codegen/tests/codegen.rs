@@ -5,8 +5,8 @@
 use std::path::PathBuf;
 
 use truenas_rpc_codegen::{
-    generate_client, generate_openrpc, generate_pyclient, generate_server, generate_types, run_cli,
-    Build, Spec,
+    generate_client, generate_openrpc, generate_py_client, generate_py_server, generate_py_structs,
+    generate_server, generate_types, run_cli, Build, Spec,
 };
 
 fn sample() -> Spec {
@@ -33,8 +33,18 @@ fn regen_fixtures() {
     )
     .unwrap();
     std::fs::write(
-        "tests/fixtures/expected_pyclient.rs",
-        generate_pyclient(&s).unwrap(),
+        "tests/fixtures/expected_structs.py",
+        generate_py_structs(&s).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        "tests/fixtures/expected_client.py",
+        generate_py_client(&s).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        "tests/fixtures/expected_server.py",
+        generate_py_server(&s).unwrap(),
     )
     .unwrap();
     std::fs::write("tests/fixtures/openrpc.json", generate_openrpc(&s).unwrap()).unwrap();
@@ -75,10 +85,26 @@ fn client_matches_golden() {
 }
 
 #[test]
-fn pyclient_matches_golden() {
+fn py_structs_matches_golden() {
     assert_eq!(
-        generate_pyclient(&sample()).unwrap(),
-        include_str!("fixtures/expected_pyclient.rs")
+        generate_py_structs(&sample()).unwrap(),
+        include_str!("fixtures/expected_structs.py")
+    );
+}
+
+#[test]
+fn py_client_matches_golden() {
+    assert_eq!(
+        generate_py_client(&sample()).unwrap(),
+        include_str!("fixtures/expected_client.py")
+    );
+}
+
+#[test]
+fn py_server_matches_golden() {
+    assert_eq!(
+        generate_py_server(&sample()).unwrap(),
+        include_str!("fixtures/expected_server.py")
     );
 }
 
@@ -111,8 +137,16 @@ fn generation_is_deterministic() {
         generate_client(&sample()).unwrap()
     );
     assert_eq!(
-        generate_pyclient(&sample()).unwrap(),
-        generate_pyclient(&sample()).unwrap()
+        generate_py_structs(&sample()).unwrap(),
+        generate_py_structs(&sample()).unwrap()
+    );
+    assert_eq!(
+        generate_py_client(&sample()).unwrap(),
+        generate_py_client(&sample()).unwrap()
+    );
+    assert_eq!(
+        generate_py_server(&sample()).unwrap(),
+        generate_py_server(&sample()).unwrap()
     );
     assert_eq!(
         generate_openrpc(&sample()).unwrap(),
@@ -158,11 +192,6 @@ fn full_fixture_exercises_remaining_branches() {
     assert!(generate_openrpc(&spec)
         .unwrap()
         .contains("\"x-direction\": \"server_client\""));
-
-    // The Python client skips the subscription (a comment, not a method).
-    let py = generate_pyclient(&spec).unwrap();
-    assert!(py.contains("server->client subscription — not in the basic Python client"));
-    assert!(!py.contains("fn events("));
 }
 
 #[test]
@@ -176,6 +205,204 @@ fn python_methods_table_and_no_handler() {
         .contains("pub struct GreetArgs")); // structs in the types module
     assert!(!s.contains("fn greet(")); // python methods are NOT in the Handlers trait
     assert!(s.contains(r#".audit_message("greeting")"#)); // flags preserved
+}
+
+// --- Python (msgspec) emitters -----------------------------------------------
+
+#[test]
+fn py_structs_full_fixture_type_breadth() {
+    let spec = Spec::load_dir("tests/fixtures/full").unwrap();
+    let s = generate_py_structs(&spec).unwrap();
+
+    // A generated StrEnum + its members.
+    assert!(s.contains("class OptArgsMode(enum.StrEnum):"));
+    assert!(s.contains("    FAST = \"fast\"") && s.contains("    SLOW = \"slow\""));
+    // Every default kind renders as a Python literal / factory / enum member.
+    assert!(s.contains(r#"name: str = "anon""#));
+    assert!(s.contains(r#"label: str = """#));
+    assert!(s.contains("level: int = 0"));
+    assert!(s.contains("count: int = 7"));
+    assert!(s.contains("active: bool = True"));
+    assert!(s.contains("flag: bool = False"));
+    assert!(s.contains("ratio: float = 2.5"));
+    assert!(s.contains("tags: list[str] = msgspec.field(default_factory=list)"));
+    assert!(s.contains("mode: OptArgsMode = OptArgsMode.FAST"));
+    // Required $ref field + an optional (no default) field.
+    assert!(s.contains("evt: Event"));
+    assert!(s.contains("note: str | None = None"));
+    // METHODS lists the plain methods; the subscription is not a row.
+    assert!(s.contains(r#""secure.do": (OptArgs, OptResult)"#));
+    assert!(s.contains(r#""fast.ping": (PingArgs, PingResult)"#));
+    assert!(!s.contains("ev.sub"));
+    // No secret in this fixture → no Annotated import.
+    assert!(!s.contains("from typing import Annotated"));
+
+    // The client skips the subscription (a comment) and exposes the plain methods; the server
+    // imports the METHODS table.
+    let c = generate_py_client(&spec).unwrap();
+    assert!(c.contains("class FullClient:"));
+    assert!(c.contains("# ev.sub: server->client subscription — not in the basic msgspec client."));
+    assert!(c.contains("def secure_do(self, request: OptArgs) -> OptResult:"));
+    assert!(!c.contains("def events("));
+    assert!(generate_py_server(&spec)
+        .unwrap()
+        .contains("from full_types import METHODS"));
+}
+
+#[test]
+fn py_secret_and_module_naming() {
+    // The sample fixture carries secret fields → the Annotated import + Meta wrap.
+    let s = generate_py_structs(&sample()).unwrap();
+    assert!(s.contains("from typing import Annotated"));
+    assert!(s.contains(r#"password: Annotated[str, msgspec.Meta(extra={"secret": True})]"#));
+
+    // The python fixture: module/class names derive from the (underscored) service name, and each
+    // python:true method is a plain METHODS row + a client method.
+    let spec = Spec::load_dir("tests/fixtures/python").unwrap();
+    assert!(generate_py_structs(&spec)
+        .unwrap()
+        .contains(r#""py.greet": (GreetArgs, GreetResult)"#));
+    let c = generate_py_client(&spec).unwrap();
+    assert!(c.contains("from python_sample_types import"));
+    assert!(c.contains("class PythonSampleClient:"));
+    assert!(c.contains("def greet(self, request: GreetArgs) -> GreetResult:"));
+    assert!(generate_py_server(&spec)
+        .unwrap()
+        .contains("from python_sample_types import METHODS"));
+}
+
+#[test]
+fn versioned_protocol_name_clients() {
+    // A dotted, versioned service name (the `$/negotiate` discriminator): the module id is sanitized
+    // (`api.v1` -> `api_v1`), the class keeps the version (`ApiV1Client`), and both clients pin the
+    // protocol identity + expose a negotiating `connect` — instantiating the class selects the version.
+    let spec = Spec::parse(
+        r##"{"name":"api.v1","version":"2.0.0","$defs":{"A":{"type":"object","properties":{},"required":[]}},"methods":{"m":{"handler":"m","params":{"$ref":"#/$defs/A"},"result":{"$ref":"#/$defs/A"}}}}"##,
+        "spec",
+    )
+    .unwrap();
+
+    // Rust client: pinned consts + a concrete connecting constructor over the built-in engine.
+    let rs = generate_client(&spec).unwrap();
+    assert!(rs.contains("pub struct ApiV1Client<E>"));
+    assert!(rs.contains(r#"pub const PROTOCOL: &str = "api.v1";"#));
+    assert!(rs.contains(r#"pub const VERSION: &str = "2.0.0";"#));
+    assert!(rs.contains("impl ApiV1Client<truenas_rpc_client::JsonRpcClient> {"));
+    assert!(rs.contains("pub async fn connect("));
+    assert!(rs.contains("connect_negotiate(endpoint, Self::PROTOCOL, config)"));
+
+    // Python client: sanitized module import, pinned identity, negotiating classmethod + properties.
+    let py = generate_py_client(&spec).unwrap();
+    assert!(py.contains("class ApiV1Client:"));
+    assert!(py.contains("from api_v1_types import"));
+    assert!(py.contains(r#"    PROTOCOL = "api.v1""#));
+    assert!(py.contains(r#"    VERSION = "2.0.0""#));
+    assert!(py.contains("    def connect(cls, endpoint):"));
+    assert!(py.contains("truenas_rpc_pyclient.connect(endpoint, cls.PROTOCOL)"));
+    assert!(py.contains("    def negotiated(self):") && py.contains("    def available(self):"));
+
+    // The types + server modules use the sanitized module name too.
+    assert!(generate_py_server(&spec)
+        .unwrap()
+        .contains("from api_v1_types import METHODS"));
+}
+
+#[test]
+fn py_emitter_errors() {
+    let structs_err = |spec: &str| {
+        generate_py_structs(&Spec::parse(spec, "spec").unwrap())
+            .unwrap_err()
+            .to_string()
+    };
+    // A non-object $def and a non-identifier field are rejected.
+    assert!(structs_err(
+        r##"{"name":"t","version":"1","$defs":{"A":{"type":"string"}},"methods":{}}"##
+    )
+    .contains("must be a JSON object schema"));
+    assert!(structs_err(r##"{"name":"t","version":"1","$defs":{"A":{"type":"object","properties":{"bad-name":{"type":"string"}}}},"methods":{}}"##)
+        .contains("not a valid identifier"));
+
+    // A plain method's params/result must be a `$ref`, with a `result` present (shared validation
+    // surfaces in structs, client, and server).
+    let m = |body: &str| {
+        format!(
+            r##"{{"name":"t","version":"1","$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"m":{{"handler":"m",{body}}}}}}}"##
+        )
+    };
+    assert!(structs_err(&m(
+        r##""params":{"type":"object","properties":{}},"result":{"$ref":"#/$defs/A"}"##
+    ))
+    .contains("params must be a $ref"));
+    assert!(structs_err(&m(r##""params":{"$ref":"#/$defs/A"}"##)).contains("missing 'result'"));
+
+    // A dotted / hyphenated service name is sanitized into a valid module id (both client and server
+    // generate): `bad-name` -> module `bad_name`, class `BadNameClient`.
+    let bad_name = r##"{"name":"bad-name","version":"1","$defs":{},"methods":{}}"##;
+    assert!(generate_py_client(&Spec::parse(bad_name, "spec").unwrap())
+        .unwrap()
+        .contains("class BadNameClient:"));
+    assert!(generate_py_server(&Spec::parse(bad_name, "spec").unwrap())
+        .unwrap()
+        .contains("from bad_name_types import METHODS"));
+    // Only a name with no usable identifier characters is an error.
+    let empty_name = r##"{"name":"","version":"1","$defs":{},"methods":{}}"##;
+    assert!(
+        generate_py_client(&Spec::parse(empty_name, "spec").unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("no characters usable in a Python module identifier")
+    );
+    assert!(generate_py_server(
+        &Spec::parse(&m(r##""params":{"$ref":"#/$defs/A"}"##), "spec").unwrap()
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("missing 'result'"));
+}
+
+#[test]
+fn build_and_cli_emit_py_artifacts() {
+    // Build writes `<service>_{types,client,server}.py` (the modules import each other by name).
+    let out = tmp("build-py");
+    let abs = std::fs::canonicalize("tests/fixtures/sample").unwrap();
+    let structs = Build::new()
+        .json_idl(&abs)
+        .out_dir(&out)
+        .emit_py_structs()
+        .unwrap();
+    assert!(structs.ends_with("sample_types.py"));
+    assert!(std::fs::read_to_string(&structs)
+        .unwrap()
+        .contains("METHODS: MappingProxyType[str, tuple[type, type]] = MappingProxyType("));
+    let client = Build::new()
+        .json_idl(&abs)
+        .out_dir(&out)
+        .emit_py_client()
+        .unwrap();
+    assert!(client.ends_with("sample_client.py"));
+    assert!(std::fs::read_to_string(&client)
+        .unwrap()
+        .contains("from sample_types import"));
+    let server = Build::new()
+        .json_idl(&abs)
+        .out_dir(&out)
+        .emit_py_server()
+        .unwrap();
+    assert!(server.ends_with("sample_server.py"));
+    assert!(std::fs::read_to_string(&server)
+        .unwrap()
+        .contains("def dispatch(name"));
+
+    // CLI subcommands produce output.
+    for sub in ["py-structs", "py-client", "py-server"] {
+        let mut buf = Vec::new();
+        run_cli(
+            &[sub.to_string(), "tests/fixtures/sample".to_string()],
+            &mut buf,
+        )
+        .unwrap();
+        assert!(!buf.is_empty(), "{sub} produced output");
+    }
 }
 
 // --- audit config (on by default; spec-configurable) -------------------------
@@ -505,43 +732,6 @@ fn emit_error_paths() {
     assert!(generate_openrpc(&Spec::parse(bad_type, "spec").unwrap()).is_err());
 }
 
-#[test]
-fn pyclient_errors() {
-    let gen_err = |spec: &str| {
-        generate_pyclient(&Spec::parse(spec, "spec").unwrap())
-            .unwrap_err()
-            .to_string()
-    };
-
-    // A spec name that isn't an identifier → no Python module name.
-    assert!(
-        gen_err(r##"{"name":"bad-name","version":"1","$defs":{},"methods":{}}"##)
-            .contains("not a valid Python module identifier")
-    );
-    // A non-object $def, and a non-identifier field, are rejected during class emission.
-    assert!(gen_err(
-        r##"{"name":"t","version":"1","$defs":{"A":{"type":"string"}},"methods":{}}"##
-    )
-    .contains("must be a JSON object schema"));
-    assert!(gen_err(r##"{"name":"t","version":"1","$defs":{"A":{"type":"object","properties":{"bad-name":{"type":"string"}}}},"methods":{}}"##)
-        .contains("not a valid identifier"));
-    // A request method needs a `$ref` params, a `result`, and a `$ref` result.
-    let m = |body: &str| {
-        format!(
-            r##"{{"name":"t","version":"1","$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"m":{{"handler":"m",{body}}}}}}}"##
-        )
-    };
-    assert!(gen_err(&m(
-        r##""params":{"type":"object","properties":{}},"result":{"$ref":"#/$defs/A"}"##
-    ))
-    .contains("params must be a $ref"));
-    assert!(gen_err(&m(r##""params":{"$ref":"#/$defs/A"}"##)).contains("missing 'result'"));
-    assert!(gen_err(&m(
-        r##""params":{"$ref":"#/$defs/A"},"result":{"type":"object","properties":{}}"##
-    ))
-    .contains("result must be a $ref"));
-}
-
 // --- Build helper ------------------------------------------------------------
 
 #[test]
@@ -573,15 +763,6 @@ fn build_emits_artifacts_with_explicit_out() {
     assert!(std::fs::read_to_string(&openrpc)
         .unwrap()
         .contains("\"openrpc\""));
-    let pyclient = Build::new()
-        .json_idl(&abs)
-        .out_dir(&out)
-        .emit_pyclient()
-        .unwrap();
-    assert!(pyclient.ends_with("pyclient_gen.rs"));
-    assert!(std::fs::read_to_string(&pyclient)
-        .unwrap()
-        .contains("pyo3::pymodule"));
     assert!(Build::new().out_dir(&out).emit_server().is_err()); // missing json_idl
 }
 
@@ -615,7 +796,7 @@ fn build_resolves_env() {
 
 #[test]
 fn cli_subcommands_out_and_errors() {
-    for sub in ["types", "server", "client", "openrpc", "pyclient"] {
+    for sub in ["types", "server", "client", "openrpc"] {
         let mut buf = Vec::new();
         run_cli(
             &[sub.to_string(), "tests/fixtures/sample".to_string()],

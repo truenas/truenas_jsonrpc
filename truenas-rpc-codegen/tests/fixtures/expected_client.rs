@@ -7,8 +7,13 @@ pub struct SampleClient<E> {
 }
 
 impl<E: truenas_rpc_client::CallEngine> SampleClient<E> {
+    /// The protocol name this client `$/negotiate`s (the json-idl service `name`).
+    pub const PROTOCOL: &str = "sample";
+    /// The service version (json-idl `version`; OpenRPC `info.version`).
+    pub const VERSION: &str = "1.0.0";
+
     /// Wrap a [`CallEngine`](truenas_rpc_client::CallEngine) — e.g. a connected
-    /// `truenas_rpc_client::JsonRpcClient` (after `$/negotiate`).
+    /// `truenas_rpc_client::JsonRpcClient` (after `$/negotiate`), or a mock engine.
     pub fn new(engine: E) -> Self {
         Self { engine }
     }
@@ -52,5 +57,20 @@ impl<E: truenas_rpc_client::CallEngine> SampleClient<E> {
         let params = serde_json::to_vec(&request).map_err(|e| truenas_rpc::JsonRpcError::invalid_params(e.to_string()))?;
         let bytes = self.engine.transfer(truenas_rpc_client::MethodKey::Name("x.upload"), &params, Box::new(callback)).await?;
         serde_json::from_slice(&bytes).map_err(|e| truenas_rpc::JsonRpcError::internal(e.to_string()))
+    }
+}
+
+impl SampleClient<truenas_rpc_client::JsonRpcClient> {
+    /// Connect to `endpoint`, `$/negotiate` this client's [`PROTOCOL`](Self::PROTOCOL), and wrap the
+    /// engine. Returns the client, the negotiated info (`available` protocols + `server` id), and the
+    /// notification stream (drain it for subscription topics). Fails with `ClientError` if the server
+    /// does not offer `PROTOCOL`.
+    pub async fn connect(
+        endpoint: &truenas_rpc_client::Endpoint,
+        config: truenas_rpc_client::ClientConfig,
+    ) -> Result<(Self, truenas_rpc_client::Negotiated, truenas_rpc_client::NotificationStream<String>), truenas_rpc_client::ClientError> {
+        let (engine, negotiated, notifications) =
+            truenas_rpc_client::JsonRpcClient::connect_negotiate(endpoint, Self::PROTOCOL, config).await?;
+        Ok((Self::new(engine), negotiated, notifications))
     }
 }

@@ -195,6 +195,39 @@ fn base() -> JsonRpcProtocolBuilder<()> {
             },
         ))
         .unwrap()
+        // --- SYNC drivers: a sync handler makes a JSON in/out in-process call (`call_named_json`) ---
+        .method(RpcMethod::new(
+            MethodDef::new("drv_sync_call"),
+            |p: Pair, cx: &RequestCtx<()>| json_sum(&cx.call_named_json("op_add", &to_json(&p))?),
+        ))
+        .unwrap()
+        .method(RpcMethod::new(
+            MethodDef::new("drv_sync_guarded"),
+            |p: Pair, cx: &RequestCtx<()>| json_sum(&cx.call_named_json("op_guarded", &to_json(&p))?),
+        ))
+        .unwrap()
+        .method(RpcMethod::new(
+            MethodDef::new("drv_sync_elev"),
+            |p: Pair, cx: &RequestCtx<()>| {
+                json_sum(&cx.call_named_json_elevated("op_guarded", &to_json(&p))?)
+            },
+        ))
+        .unwrap()
+        .method(RpcMethod::new(
+            MethodDef::new("drv_sync_async_target"),
+            |p: Pair, cx: &RequestCtx<()>| json_sum(&cx.call_named_json("op_aadd", &to_json(&p))?),
+        ))
+        .unwrap()
+}
+
+/// Encode a `Pair` to JSON params for a byte (`call_named_json`) in-process call.
+fn to_json(p: &Pair) -> Vec<u8> {
+    serde_json::to_vec(p).unwrap()
+}
+
+/// Decode the bare-JSON `Sum` result of a byte in-process call.
+fn json_sum(raw: &serde_json::value::RawValue) -> Result<Sum, JsonRpcError> {
+    serde_json::from_str(raw.get()).map_err(|e| JsonRpcError::internal(e.to_string()))
 }
 
 fn session(proto: &JsonRpcProtocol<()>) -> Arc<Session<()>> {
@@ -225,6 +258,26 @@ async fn in_process_calls_succeed_sync_async_and_by_name() {
         let v = call(&proto, &s, m).await;
         assert_eq!(v["result"]["sum"], 42, "{m}");
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn sync_in_process_calls_gate_elevate_and_reject_async() {
+    let proto = base().build();
+    let s = session(&proto); // fresh session: no ADMIN role granted
+                             // A sync handler calls another sync method synchronously (no runtime hop).
+    assert_eq!(call(&proto, &s, "drv_sync_call").await["result"]["sum"], 42);
+    // The gate applies as-the-caller: the guarded op denies without ADMIN.
+    assert_eq!(
+        call(&proto, &s, "drv_sync_guarded").await["error"]["code"],
+        -32000
+    );
+    // Elevated bypasses the gate.
+    assert_eq!(call(&proto, &s, "drv_sync_elev").await["result"]["sum"], 42);
+    // An async target isn't callable synchronously.
+    assert_eq!(
+        call(&proto, &s, "drv_sync_async_target").await["error"]["code"],
+        -32603
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

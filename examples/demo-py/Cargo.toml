@@ -1,8 +1,9 @@
-# Compile + import proof for the generated Python client (`truenas-rpc-codegen`'s `emit_pyclient`).
-# A `cdylib` that includes the generated shared types + Rust typed client + PyO3 module from
-# `examples/demo`'s spec: `cargo build` proves the generated PyO3 code compiles, and the test
-# populates the module in-process and round-trips the generated Python client against a live server.
-# Links libpython (via pyo3), so it is a workspace member but NOT a default-member.
+# End-to-end proof of the generated **Python (msgspec)** surface for `examples/demo`'s spec.
+# `build.rs` emits `demo_{types,client,server}.py` into `$OUT_DIR`; the integration tests add
+# `$OUT_DIR` to `sys.path` and drive the generated modules against the live Rust core — the msgspec
+# `DemoClient` over a `RawClient` vs a live server, and a `python:true` body via the embedded bridge
+# + `mw`. The tests link libpython (via the pyclient / pyo3 bridges), so it is a workspace member but
+# NOT a default-member; the lib itself has no dependencies.
 [package]
 name = "demo-py"
 version = "0.0.0"
@@ -10,27 +11,17 @@ publish = false
 edition.workspace = true
 rust-version.workspace = true
 
-[lib]
-# `cdylib` is the importable extension (.so); `rlib` lets the in-process test link the crate.
-crate-type = ["cdylib", "rlib"]
-
-[features]
-# Enable for a redistributable wheel/.so (pyo3 then stops linking libpython). OFF for `cargo test`,
-# which links libpython to run the in-process import test.
-extension-module = ["pyo3/extension-module"]
-
-[dependencies]
-truenas-rpc = { path = "../../truenas-rpc" }
-truenas-rpc-client = { path = "../../truenas-rpc-client" }
-truenas-rpc-pyclient = { path = "../../truenas-rpc-pyclient" }
-pyo3 = "0.23"
-serde = { workspace = true }
-serde_json = { workspace = true }
-
 [build-dependencies]
 truenas-rpc-codegen = { path = "../../truenas-rpc-codegen" }
 
 [dev-dependencies]
-# The import test stands up a live server and drives the generated Python client against it.
+truenas-rpc = { path = "../../truenas-rpc" }
+# The client round-trip: a `RawClient` (pyo3-ffi shim) + a live server; the server dispatch: the
+# embedded-CPython bridge. `pyo3-ffi` drives the embedded interpreter in the client test directly.
+truenas-rpc-pyclient = { path = "../../truenas-rpc-pyclient" }
+truenas-rpc-pyo3 = { path = "../../truenas-rpc-pyo3" }
 truenas-rpc-server = { path = "../../truenas-rpc-server" }
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }
+pyo3-ffi = "0.23"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

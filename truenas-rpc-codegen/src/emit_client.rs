@@ -12,6 +12,8 @@ use crate::typemap::{ref_name, str_lit};
 /// Generate the client module (a typed client generic over a `CallEngine`).
 pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     let client = format!("{}Client", pascal_case(&spec.name));
+    let protocol = str_lit(&spec.name);
+    let version = str_lit(&spec.version);
     let mut methods = String::new();
     let mut topics: Vec<(String, String)> = Vec::new();
 
@@ -89,7 +91,7 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     };
 
     Ok(format!(
-        "{}\npub struct {client}<E> {{\n    engine: E,\n}}\n\nimpl<E: truenas_rpc_client::CallEngine> {client}<E> {{\n    /// Wrap a [`CallEngine`](truenas_rpc_client::CallEngine) — e.g. a connected\n    /// `truenas_rpc_client::JsonRpcClient` (after `$/negotiate`).\n    pub fn new(engine: E) -> Self {{\n        Self {{ engine }}\n    }}\n\n{methods}}}\n{topics_const}",
+        "{}\npub struct {client}<E> {{\n    engine: E,\n}}\n\nimpl<E: truenas_rpc_client::CallEngine> {client}<E> {{\n    /// The protocol name this client `$/negotiate`s (the json-idl service `name`).\n    pub const PROTOCOL: &str = {protocol};\n    /// The service version (json-idl `version`; OpenRPC `info.version`).\n    pub const VERSION: &str = {version};\n\n    /// Wrap a [`CallEngine`](truenas_rpc_client::CallEngine) — e.g. a connected\n    /// `truenas_rpc_client::JsonRpcClient` (after `$/negotiate`), or a mock engine.\n    pub fn new(engine: E) -> Self {{\n        Self {{ engine }}\n    }}\n\n{methods}}}\n\nimpl {client}<truenas_rpc_client::JsonRpcClient> {{\n    /// Connect to `endpoint`, `$/negotiate` this client's [`PROTOCOL`](Self::PROTOCOL), and wrap the\n    /// engine. Returns the client, the negotiated info (`available` protocols + `server` id), and the\n    /// notification stream (drain it for subscription topics). Fails with `ClientError` if the server\n    /// does not offer `PROTOCOL`.\n    pub async fn connect(\n        endpoint: &truenas_rpc_client::Endpoint,\n        config: truenas_rpc_client::ClientConfig,\n    ) -> Result<(Self, truenas_rpc_client::Negotiated, truenas_rpc_client::NotificationStream<String>), truenas_rpc_client::ClientError> {{\n        let (engine, negotiated, notifications) =\n            truenas_rpc_client::JsonRpcClient::connect_negotiate(endpoint, Self::PROTOCOL, config).await?;\n        Ok((Self::new(engine), negotiated, notifications))\n    }}\n}}\n{topics_const}",
         header(origin),
     ))
 }

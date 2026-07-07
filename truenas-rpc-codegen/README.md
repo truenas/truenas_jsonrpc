@@ -176,16 +176,23 @@ needs no `server_gen.rs`**. The generated `<Name>Client<E>` is generic over a
 - `…​.emit_server()` → `$OUT_DIR/server_gen.rs` (the `Handlers` trait + `register`)
 - `…​.emit_client()` → `$OUT_DIR/client_gen.rs` (the typed client)
 - `…​.emit_openrpc()` → `$OUT_DIR/openrpc.json`
-- `…​.emit_pyclient()` → `$OUT_DIR/pyclient_gen.rs` — an **optional** Python-consumable client (a PyO3
-  extension module wrapping the typed client, over the `truenas-rpc-pyclient` runtime). Include
-  `types_gen.rs` + `client_gen.rs` + `pyclient_gen.rs` in a `cdylib`; see [`examples/demo-py`](../examples/demo-py)
+- The **optional Python (`msgspec`) artifacts** — `.py` *text*, not Rust — for a spec consumed from
+  Python. Filenames track the service `name`:
+  - `…​.emit_py_structs()` → `$OUT_DIR/<name>_types.py` — a `msgspec.Struct` per `$defs` (+ generated
+    `StrEnum`s, a secret `Annotated[T, msgspec.Meta(...)]`, and a `METHODS` table)
+  - `…​.emit_py_client()` → `$OUT_DIR/<name>_client.py` — a `<Pascal>Client` over a `RawClient` byte
+    transport (from [`truenas-rpc-pyclient`](../truenas-rpc-pyclient))
+  - `…​.emit_py_server()` → `$OUT_DIR/<name>_server.py` — the `dispatch(name, params, session, call)`
+    framework the embedded `truenas-rpc-pyo3` bridge drives for `python:true` bodies
+
+  See [`examples/demo-py`](../examples/demo-py).
 
 A relative `json_idl` is resolved against `CARGO_MANIFEST_DIR` (a build script's CWD is not
 reliable). Each `emit_*` prints `cargo:rerun-if-changed` for the directory **and** every
 discovered `*.json`, so edits trigger regeneration. `.out_dir(dir)` overrides `$OUT_DIR`.
 
 A standalone CLI is shipped as an example:
-`cargo run --example codegen -- <types|server|client|openrpc|pyclient> <json-idl-dir> [--out FILE]`.
+`cargo run --example codegen -- <types|server|client|openrpc|py-structs|py-client|py-server> <json-idl-dir> [--out FILE]`.
 
 ### Packaging caveat
 
