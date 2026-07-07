@@ -9,6 +9,21 @@ use crate::model::{Direction, Spec};
 use crate::naming::is_ident;
 use crate::typemap::ref_name;
 
+/// Handler symbols that would collide with a generated client's own members — the Rust
+/// `<Name>Client` / Python `<Proto>Client` infrastructure: the `new` / `connect` constructors, the
+/// `PROTOCOL` / `VERSION` identity consts, and the Python `negotiated` / `available` discovery
+/// properties. A method's handler becomes its client method name, so one of these would silently
+/// shadow that member in the emitted client — reject it here, once, for every emit target. Exact +
+/// case-sensitive; all are generic infrastructure words (no protocol names).
+const RESERVED_HANDLERS: &[&str] = &[
+    "new",
+    "connect",
+    "negotiated",
+    "available",
+    "PROTOCOL",
+    "VERSION",
+];
+
 /// Validate the cross-cutting method rules. `origin` is the source spec (for messages).
 pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
     let err = |m: String| CodegenError::at(origin, m);
@@ -20,6 +35,13 @@ pub fn validate(spec: &Spec, origin: &str) -> Result<()> {
             return Err(err(format!(
                 "method {wire:?} handler {:?} is not a valid identifier",
                 m.handler
+            )));
+        }
+        if RESERVED_HANDLERS.contains(&m.handler.as_str()) {
+            return Err(err(format!(
+                "method {wire:?} handler {:?} is a reserved client-member name ({}); rename the handler",
+                m.handler,
+                RESERVED_HANDLERS.join("/"),
             )));
         }
 

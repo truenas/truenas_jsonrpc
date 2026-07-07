@@ -597,6 +597,29 @@ fn cross_cutting_errors() {
         r##","result":{"$ref":"#/$defs/A"},"transfer":{"direction":"upload"},"cancellable":true"##
     ))
     .contains("transfer cannot combine"));
+
+    // A handler that collides with a generated client member (new/connect/negotiated/available/
+    // PROTOCOL/VERSION) would silently shadow it in the emitted client → rejected in validate.
+    let h = |handler: &str| {
+        format!(
+            r##"{{"name":"t","version":"1","$defs":{{"A":{{"type":"object","properties":{{}},"required":[]}}}},"methods":{{"m":{{"handler":"{handler}","params":{{"$ref":"#/$defs/A"}},"result":{{"$ref":"#/$defs/A"}}}}}}}}"##
+        )
+    };
+    for reserved in [
+        "new",
+        "connect",
+        "negotiated",
+        "available",
+        "PROTOCOL",
+        "VERSION",
+    ] {
+        assert!(
+            parse_err(&h(reserved)).contains("reserved client-member name"),
+            "handler {reserved:?} must be rejected as a reserved client-member name"
+        );
+    }
+    // The same shape with a non-reserved handler is valid — it's the name, not the structure.
+    assert!(Spec::parse(&h("do_thing"), "spec").is_ok());
 }
 
 #[test]
