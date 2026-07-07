@@ -434,13 +434,12 @@ fn generated_typescript_goldens_typecheck() {
         r#"{{
   "compilerOptions": {{
     "target": "ES2020",
-    "module": "ES2020",
-    "moduleResolution": "node",
+    "module": "esnext",
+    "moduleResolution": "bundler",
     "lib": ["ES2021", "DOM"],
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "baseUrl": ".",
     "paths": {{ "truenas-rpc-tsclient": [{alias:?}] }}
   }},
   "files": ["sample_types.ts", "sample_client.ts"]

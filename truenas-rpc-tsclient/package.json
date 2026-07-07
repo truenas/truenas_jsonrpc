@@ -19,7 +19,7 @@
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test": "tsc && node --test test/"
+    "test": "tsc && node --test test/scram.test.mjs"
   },
   "devDependencies": {
     "typescript": "^5"
