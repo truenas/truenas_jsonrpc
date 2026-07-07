@@ -9,15 +9,16 @@ use crate::model::{Direction, Spec};
 use crate::naming::is_ident;
 use crate::typemap::ref_name;
 
-/// Handler symbols that would collide with a generated client's own members — the Rust
-/// `<Name>Client` / Python `<Proto>Client` infrastructure: the `new` / `connect` constructors, the
-/// `PROTOCOL` / `VERSION` identity consts, and the Python `negotiated` / `available` discovery
-/// properties. A method's handler becomes its client method name, so one of these would silently
-/// shadow that member in the emitted client — reject it here, once, for every emit target. Exact +
-/// case-sensitive; all are generic infrastructure words (no protocol names).
+/// Handler symbols that would collide with a generated client's own members — the Rust / Python /
+/// TypeScript `<Name>Client` infrastructure: the `new` / `connect` constructors, the TypeScript class
+/// `constructor`, the `PROTOCOL` / `VERSION` identity consts, and the `negotiated` / `available`
+/// discovery members. A method's handler becomes its client method name, so one of these would
+/// silently shadow that member in the emitted client — reject it here, once, for every emit target.
+/// Exact + case-sensitive; all are generic infrastructure words (no protocol names).
 const RESERVED_HANDLERS: &[&str] = &[
     "new",
     "connect",
+    "constructor",
     "negotiated",
     "available",
     "PROTOCOL",

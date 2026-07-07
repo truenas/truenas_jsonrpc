@@ -12,6 +12,8 @@ mod emit_py_client;
 mod emit_py_server;
 mod emit_py_structs;
 mod emit_server;
+mod emit_ts_client;
+mod emit_ts_types;
 mod emit_types;
 mod error;
 mod model;
@@ -156,6 +158,18 @@ pub fn generate_py_server(spec: &Spec) -> Result<String> {
     emit_py_server::generate(&spec.raw, &spec.origin)
 }
 
+/// Emit the TypeScript **API-types** module: one `export interface` per `$defs` + a string-union
+/// `type` per enum. Imported by the generated TS client (or on its own for a types-only consumer).
+pub fn generate_ts_types(spec: &Spec) -> Result<String> {
+    emit_ts_types::generate(&spec.raw, &spec.origin)
+}
+
+/// Emit the TypeScript **client** module: a `<Pascal>Client` over the `truenas-rpc-tsclient` runtime
+/// (a browser/WebSocket transport), one `async` method per plain `request -> result` RPC.
+pub fn generate_ts_client(spec: &Spec) -> Result<String> {
+    emit_ts_client::generate(&spec.raw, &spec.origin)
+}
+
 // --- build.rs helper ---------------------------------------------------------
 
 /// A `build.rs` helper (prost/tonic-build style): point it at a `json-idl/` dir and emit one
@@ -230,6 +244,18 @@ impl Build {
         self.emit_py("_server.py", generate_py_server)
     }
 
+    /// Emit `<service>_types.ts` (the TS interfaces + enum aliases); returns its path. The client
+    /// imports from it, so the filename tracks the service name.
+    pub fn emit_ts_types(self) -> Result<PathBuf> {
+        self.emit_ts("_types.ts", generate_ts_types)
+    }
+
+    /// Emit `<service>_client.ts` (the typed WebSocket client over `truenas-rpc-tsclient`); returns
+    /// its path.
+    pub fn emit_ts_client(self) -> Result<PathBuf> {
+        self.emit_ts("_client.ts", generate_ts_client)
+    }
+
     fn resolved_json_idl(&self) -> Result<PathBuf> {
         let p = self
             .json_idl
@@ -284,6 +310,22 @@ impl Build {
         }
         Ok(path)
     }
+
+    /// Like [`emit_py`](Self::emit_py), but for the TS artifacts (`<service>_types.ts` /
+    /// `<service>_client.ts`, which import each other by service name).
+    fn emit_ts(&self, suffix: &str, generate: impl Fn(&Spec) -> Result<String>) -> Result<PathBuf> {
+        let dir = self.resolved_json_idl()?;
+        let spec = Spec::load_dir(&dir)?;
+        let module = emit_ts_types::ts_module(&spec.raw)?;
+        let code = generate(&spec)?;
+        let path = self.resolved_out()?.join(format!("{module}{suffix}"));
+        std::fs::write(&path, code)?;
+        println!("cargo:rerun-if-changed={}", dir.display());
+        for f in spec.source_files() {
+            println!("cargo:rerun-if-changed={}", f.display());
+        }
+        Ok(path)
+    }
 }
 
 // --- CLI (used by the `codegen` example) -------------------------------------
@@ -294,7 +336,7 @@ pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
     let sub = args.first().map(String::as_str);
     let dir = args.get(1).ok_or_else(|| {
         CodegenError::new(
-            "usage: <types|server|client|openrpc|py-structs|py-client|py-server> <json-idl-dir> [--out FILE]",
+            "usage: <types|server|client|openrpc|py-structs|py-client|py-server|ts-types|ts-client> <json-idl-dir> [--out FILE]",
         )
     })?;
     let out_file = match args.get(2).map(String::as_str) {
@@ -315,6 +357,8 @@ pub fn run_cli(args: &[String], stdout: &mut dyn Write) -> Result<()> {
         Some("py-structs") => generate_py_structs(&spec)?,
         Some("py-client") => generate_py_client(&spec)?,
         Some("py-server") => generate_py_server(&spec)?,
+        Some("ts-types") => generate_ts_types(&spec)?,
+        Some("ts-client") => generate_ts_client(&spec)?,
         other => return Err(CodegenError::new(format!("unknown subcommand {other:?}"))),
     };
     match out_file {

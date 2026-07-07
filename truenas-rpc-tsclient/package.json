@@ -1,0 +1,26 @@
+{
+  "name": "truenas-rpc-tsclient",
+  "version": "0.1.0",
+  "description": "Browser/WebSocket runtime for generated TrueNAS RPC TypeScript clients.",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5"
+  }
+}

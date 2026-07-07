@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use truenas_rpc_codegen::{
     generate_client, generate_openrpc, generate_py_client, generate_py_server, generate_py_structs,
-    generate_server, generate_types, run_cli, Build, Spec,
+    generate_server, generate_ts_client, generate_ts_types, generate_types, run_cli, Build, Spec,
 };
 
 fn sample() -> Spec {
@@ -45,6 +45,16 @@ fn regen_fixtures() {
     std::fs::write(
         "tests/fixtures/expected_server.py",
         generate_py_server(&s).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        "tests/fixtures/expected_types.ts",
+        generate_ts_types(&s).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        "tests/fixtures/expected_client.ts",
+        generate_ts_client(&s).unwrap(),
     )
     .unwrap();
     std::fs::write("tests/fixtures/openrpc.json", generate_openrpc(&s).unwrap()).unwrap();
@@ -109,6 +119,22 @@ fn py_server_matches_golden() {
 }
 
 #[test]
+fn ts_types_matches_golden() {
+    assert_eq!(
+        generate_ts_types(&sample()).unwrap(),
+        include_str!("fixtures/expected_types.ts")
+    );
+}
+
+#[test]
+fn ts_client_matches_golden() {
+    assert_eq!(
+        generate_ts_client(&sample()).unwrap(),
+        include_str!("fixtures/expected_client.ts")
+    );
+}
+
+#[test]
 fn openrpc_matches_cross_language_golden() {
     let mut got: serde_json::Value =
         serde_json::from_str(&generate_openrpc(&sample()).unwrap()).unwrap();
@@ -147,6 +173,14 @@ fn generation_is_deterministic() {
     assert_eq!(
         generate_py_server(&sample()).unwrap(),
         generate_py_server(&sample()).unwrap()
+    );
+    assert_eq!(
+        generate_ts_types(&sample()).unwrap(),
+        generate_ts_types(&sample()).unwrap()
+    );
+    assert_eq!(
+        generate_ts_client(&sample()).unwrap(),
+        generate_ts_client(&sample()).unwrap()
     );
     assert_eq!(
         generate_openrpc(&sample()).unwrap(),
@@ -335,6 +369,89 @@ fn generated_python_goldens_pass_ruff() {
     assert!(
         out.status.success(),
         "ruff on the generated .py goldens failed:\n{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
+}
+
+#[test]
+fn ts_full_fixture_type_breadth() {
+    // The `full` fixture exercises the TS type-mapping breadth (enum union, optional-vs-null vs
+    // defaulted, array, $ref, empty interface) and the client's skip-with-comment for a subscription.
+    let spec = Spec::load_dir("tests/fixtures/full").unwrap();
+    let t = generate_ts_types(&spec).unwrap();
+    let c = generate_ts_client(&spec).unwrap();
+
+    assert!(t.contains(r#"export type OptArgsMode = "fast" | "slow";"#));
+    assert!(t.contains("note?: string | null;")); // optional, no default -> admits null
+    assert!(t.contains("name?: string;")); // defaulted -> optional, no null
+    assert!(t.contains("mode?: OptArgsMode;")); // enum-typed field
+    assert!(t.contains("codes: number[];")); // array
+    assert!(t.contains("evt: Event;")); // $ref
+    assert!(t.contains("export interface Sub {}")); // no-property interface
+
+    // The subscription is skipped in the client (comment, no method); plain methods are emitted.
+    assert!(c.contains("// ev.sub: server->client subscription — not in the basic client."));
+    assert!(c.contains("async secure_do(request: OptArgs): Promise<OptResult>"));
+    assert!(c.contains("async fast_ping(request: PingArgs): Promise<PingResult>"));
+}
+
+#[test]
+fn generated_typescript_goldens_typecheck() {
+    // Opportunistic guard (like `generated_python_goldens_pass_ruff`): the committed `.ts` goldens +
+    // the `truenas-rpc-tsclient` runtime type-check under `tsc --strict`. Skipped where `tsc` is not
+    // on PATH (a minimal image with no Node toolchain).
+    use std::process::Command;
+    let have_tsc = Command::new("tsc")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !have_tsc {
+        return;
+    }
+    // The client golden imports `./sample_types`, so copy the goldens to their real module names.
+    let dir = tmp("ts-typecheck");
+    std::fs::copy(
+        "tests/fixtures/expected_types.ts",
+        dir.join("sample_types.ts"),
+    )
+    .unwrap();
+    std::fs::copy(
+        "tests/fixtures/expected_client.ts",
+        dir.join("sample_client.ts"),
+    )
+    .unwrap();
+    // Resolve the bare `truenas-rpc-tsclient` import to the runtime source via a `paths` alias.
+    let alias = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../truenas-rpc-tsclient/src/index")
+        .to_string_lossy()
+        .into_owned();
+    let tsconfig = format!(
+        r#"{{
+  "compilerOptions": {{
+    "target": "ES2020",
+    "module": "ES2020",
+    "moduleResolution": "node",
+    "lib": ["ES2021", "DOM"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "baseUrl": ".",
+    "paths": {{ "truenas-rpc-tsclient": [{alias:?}] }}
+  }},
+  "files": ["sample_types.ts", "sample_client.ts"]
+}}"#
+    );
+    std::fs::write(dir.join("tsconfig.json"), tsconfig).unwrap();
+    let out = Command::new("tsc")
+        .arg("-p")
+        .arg(dir.join("tsconfig.json"))
+        .output()
+        .expect("run tsc");
+    assert!(
+        out.status.success(),
+        "tsc on the generated .ts goldens failed:\n{}{}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
@@ -608,6 +725,7 @@ fn cross_cutting_errors() {
     for reserved in [
         "new",
         "connect",
+        "constructor",
         "negotiated",
         "available",
         "PROTOCOL",

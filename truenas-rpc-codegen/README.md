@@ -186,13 +186,20 @@ needs no `server_gen.rs`**. The generated `<Name>Client<E>` is generic over a
     framework the embedded `truenas-rpc-pyo3` bridge drives for `python:true` bodies
 
   See [`examples/demo-py`](../examples/demo-py).
+- The **optional TypeScript artifacts** — `.ts` *text* — for a spec consumed from a browser (or Node)
+  client. Filenames track the service `name`:
+  - `….emit_ts_types()` → `$OUT_DIR/<name>_types.ts` — an `interface` per `$defs` (+ a string-union
+    `type` per enum)
+  - `….emit_ts_client()` → `$OUT_DIR/<name>_client.ts` — a `<Pascal>Client` over the
+    [`truenas-rpc-tsclient`](../truenas-rpc-tsclient) browser/WebSocket runtime (one method per plain
+    RPC; `connect(url)` + `$/negotiate`)
 
 A relative `json_idl` is resolved against `CARGO_MANIFEST_DIR` (a build script's CWD is not
 reliable). Each `emit_*` prints `cargo:rerun-if-changed` for the directory **and** every
 discovered `*.json`, so edits trigger regeneration. `.out_dir(dir)` overrides `$OUT_DIR`.
 
 A standalone CLI is shipped as an example:
-`cargo run --example codegen -- <types|server|client|openrpc|py-structs|py-client|py-server> <json-idl-dir> [--out FILE]`.
+`cargo run --example codegen -- <types|server|client|openrpc|py-structs|py-client|py-server|ts-types|ts-client> <json-idl-dir> [--out FILE]`.
 
 ### Packaging caveat
 
