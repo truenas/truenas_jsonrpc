@@ -377,7 +377,7 @@ fn generated_python_goldens_pass_ruff() {
 #[test]
 fn ts_full_fixture_type_breadth() {
     // The `full` fixture exercises the TS type-mapping breadth (enum union, optional-vs-null vs
-    // defaulted, array, $ref, empty interface) and the client's skip-with-comment for a subscription.
+    // defaulted, array, $ref, empty interface) and the client's subscribe_* method + auth in connect.
     let spec = Spec::load_dir("tests/fixtures/full").unwrap();
     let t = generate_ts_types(&spec).unwrap();
     let c = generate_ts_client(&spec).unwrap();
@@ -390,10 +390,13 @@ fn ts_full_fixture_type_breadth() {
     assert!(t.contains("evt: Event;")); // $ref
     assert!(t.contains("export interface Sub {}")); // no-property interface
 
-    // The subscription is skipped in the client (comment, no method); plain methods are emitted.
-    assert!(c.contains("// ev.sub: server->client subscription — not in the basic client."));
+    // The subscription becomes a subscribe_* callback method; plain methods + auth are emitted.
+    assert!(c.contains(
+        "async subscribe_events(request: Sub, onEvent: (event: Event) => void): Promise<Subscription>"
+    ));
     assert!(c.contains("async secure_do(request: OptArgs): Promise<OptResult>"));
     assert!(c.contains("async fast_ping(request: PingArgs): Promise<PingResult>"));
+    assert!(c.contains("static async connect(url: string, auth?: Credential): Promise<FullClient>"));
 }
 
 #[test]

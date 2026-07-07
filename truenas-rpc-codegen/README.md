@@ -191,8 +191,9 @@ needs no `server_gen.rs`**. The generated `<Name>Client<E>` is generic over a
   - `….emit_ts_types()` → `$OUT_DIR/<name>_types.ts` — an `interface` per `$defs` (+ a string-union
     `type` per enum)
   - `….emit_ts_client()` → `$OUT_DIR/<name>_client.ts` — a `<Pascal>Client` over the
-    [`truenas-rpc-tsclient`](../truenas-rpc-tsclient) browser/WebSocket runtime (one method per plain
-    RPC; `connect(url)` + `$/negotiate`)
+    [`truenas-rpc-tsclient`](../truenas-rpc-tsclient) browser/WebSocket runtime: a method per plain
+    RPC, a `subscribe_*` callback per subscription, and `connect(url, auth?)` for `$/negotiate` +
+    session auth (OAuth / bearer / unbound SCRAM)
 
 A relative `json_idl` is resolved against `CARGO_MANIFEST_DIR` (a build script's CWD is not
 reliable). Each `emit_*` prints `cargo:rerun-if-changed` for the directory **and** every

@@ -56,8 +56,17 @@ impl Client {
             encode_block(&self.nonce)
         )
     }
-    /// (client-final, expected server-final `v=`) for the given server-first + channel binding.
+    /// (client-final, expected server-final `v=`) for a bound (`p=tls-server-end-point`) exchange.
     fn finalize(&self, server_first: &str, binding: &[u8]) -> (String, String) {
+        self.finalize_with(server_first, GS2, binding)
+    }
+
+    /// (client-final, expected `v=`) for an UNBOUND exchange (gs2 `n,,`, no channel binding).
+    fn finalize_unbound(&self, server_first: &str) -> (String, String) {
+        self.finalize_with(server_first, "n,,", b"")
+    }
+
+    fn finalize_with(&self, server_first: &str, gs2: &str, binding: &[u8]) -> (String, String) {
         let mut combined = String::new();
         let mut salt_b64 = String::new();
         let mut iters = 0u32;
@@ -71,7 +80,7 @@ impl Client {
             }
         }
         let salt = decode_block(&salt_b64).unwrap();
-        let mut cbind = GS2.as_bytes().to_vec();
+        let mut cbind = gs2.as_bytes().to_vec();
         cbind.extend_from_slice(binding);
         let c = encode_block(&cbind);
         let bare = format!("n={},r={}", self.username, encode_block(&self.nonce));
@@ -112,6 +121,14 @@ fn server(creds: ScramCredentials) -> JsonRpcProtocol<AuthSession> {
 
 fn server_with<C: CredentialSource + 'static>(source: C) -> JsonRpcProtocol<AuthSession> {
     let stack = AuthStack::builder().scram(source).build();
+    install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build()
+}
+
+/// A server that also accepts UNBOUND SCRAM (`.scram_unbound`) — the browser opt-in.
+fn server_unbound(creds: ScramCredentials) -> JsonRpcProtocol<AuthSession> {
+    let stack = AuthStack::builder()
+        .scram_unbound(InMemory(HashMap::from([("alice".to_string(), creds)])))
+        .build();
     install(JsonRpcProtocol::<AuthSession>::builder("conf", "1"), stack).build()
 }
 
@@ -229,9 +246,43 @@ async fn channel_binding_downgrade_is_rejected() {
     let (client, creds) = alice();
     let proto = server(creds);
     let s = tls_session(&proto, Some(BINDING.to_vec()));
-    // A client that asks for no binding (`n`) — a downgrade — never gets past client-first.
+    // A client that asks for no binding (`n`) — a downgrade under plain (`-PLUS`-only) scram — never
+    // gets past client-first.
     let r = call(&proto, &s, "$/sessionSetup", &client.first("n")).await;
     assert_eq!(rtype(&r), "AUTH_ERR");
+    assert_eq!(s.lifecycle(), SessionLifecycle::None);
+}
+
+#[tokio::test]
+async fn unbound_scram_succeeds_when_enabled() {
+    let (client, creds) = alice();
+    let proto = server_unbound(creds);
+    // Unbound needs no channel binding — only an encrypted channel; a TLS session with NO binding.
+    let s = tls_session(&proto, None);
+
+    let r1 = call(&proto, &s, "$/sessionSetup", &client.first("n")).await;
+    assert_eq!(rtype(&r1), "CHALLENGE", "{r1}");
+    let server_first = r1["result"]["response"]["message"].as_str().unwrap();
+
+    let (client_final, expected_v) = client.finalize_unbound(server_first);
+    let r2 = call(&proto, &s, "$/sessionSetupContinue", &client_final).await;
+    assert_eq!(rtype(&r2), "SUCCESS", "{r2}");
+    assert_eq!(
+        r2["result"]["response"]["extra"]["scram"].as_str().unwrap(),
+        expected_v
+    );
+    assert_eq!(s.lifecycle(), SessionLifecycle::Established);
+}
+
+#[tokio::test]
+async fn a_y_downgrade_is_rejected_even_when_unbound_is_enabled() {
+    let (client, creds) = alice();
+    let proto = server_unbound(creds);
+    let s = tls_session(&proto, None);
+    // `y` = "I support binding but think you don't" — a downgrade a `-PLUS`-capable server must
+    // refuse, even with unbound enabled (which accepts only the honest `n`).
+    let r = call(&proto, &s, "$/sessionSetup", &client.first("y")).await;
+    assert_eq!(rtype(&r), "AUTH_ERR", "{r}");
     assert_eq!(s.lifecycle(), SessionLifecycle::None);
 }
 

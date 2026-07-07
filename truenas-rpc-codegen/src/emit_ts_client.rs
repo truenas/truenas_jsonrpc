@@ -2,8 +2,9 @@
 //! `RpcConnection` (a browser/WebSocket JSON-RPC transport). The client **holds** the connection in a
 //! private `#rpc` field (composition, mirroring the Python client's `self._raw` — deliberately NOT
 //! `extends`, so a handler method never collides with the runtime's `call`). One `async` method per
-//! plain `request -> result` RPC; subscription / filterable / transfer methods are skipped with a
-//! comment (the same `is_plain_method` filter the Python client uses).
+//! plain `request -> result` RPC; a `subscribe_*` callback method per `server_client` subscription;
+//! `connect(url, auth?)` optionally authenticates the session. Filterable / transfer methods are
+//! skipped with a comment.
 
 use std::collections::BTreeSet;
 
@@ -17,7 +18,7 @@ use crate::typemap::str_lit;
 const RUNTIME_PKG: &str = "truenas-rpc-tsclient";
 
 /// Generate the client module: a `<Pascal>Client` holding an `RpcConnection`, one method per plain
-/// `request -> result` RPC.
+/// `request -> result` RPC and one `subscribe_*` per subscription.
 pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
     let module = ts_module(spec)?;
     let types_mod = ts_types_module(&module);
@@ -33,34 +34,51 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
         "  readonly #rpc: RpcConnection;".to_string(),
         "  /** Wrap an existing connection (advanced / BYO); prefer `connect`. */\n  constructor(rpc: RpcConnection) {\n    this.#rpc = rpc;\n  }".to_string(),
         format!(
-            "  /** Open a WebSocket to `url` and `$/negotiate` this client's PROTOCOL. */\n  static async connect(url: string): Promise<{class}> {{\n    return new {class}(await RpcConnection.connect(url, {class}.PROTOCOL));\n  }}"
+            "  /** Open a WebSocket to `url`, `$/negotiate` this client's PROTOCOL, and — if `auth` is\n   * given — authenticate the session (a non-`established` outcome throws). */\n  static async connect(url: string, auth?: Credential): Promise<{class}> {{\n    const rpc = await RpcConnection.connect(url, {class}.PROTOCOL);\n    if (auth !== undefined) {{\n      const outcome = await rpc.authenticate(auth);\n      if (outcome.kind !== \"established\") {{\n        throw new JsonRpcError(-32000, \"authentication \" + outcome.kind);\n      }}\n    }}\n    return new {class}(rpc);\n  }}"
         ),
         "  /** The `$/negotiate` result (`{protocol, server, available}`), or null for a BYO connection. */\n  get negotiated(): Negotiated | null {\n    return this.#rpc.negotiated;\n  }".to_string(),
         "  /** The protocol names the server offered at `$/negotiate` (discovery), or null. */\n  get available(): string[] | null {\n    return this.#rpc.available;\n  }".to_string(),
     ];
 
     let mut used: BTreeSet<String> = BTreeSet::new();
+    let mut has_subscriptions = false;
     for (wire, m) in spec.methods.iter() {
-        if !is_plain_method(m) {
+        if is_plain_method(m) {
+            let params = ref_name_of(&m.params, "params")?;
+            let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss("result"))?, "result")?;
+            used.insert(params.clone());
+            used.insert(result.clone());
+            members.push(emit_method(
+                wire,
+                &m.handler,
+                &params,
+                &result,
+                m.summary.as_deref(),
+            ));
+        } else if m.direction() == Direction::ServerClient {
+            has_subscriptions = true;
+            let params = ref_name_of(&m.params, "params")?;
+            let notifies = ref_name_of(
+                m.notifies.as_ref().ok_or_else(|| miss("notifies"))?,
+                "notifies",
+            )?;
+            used.insert(params.clone());
+            used.insert(notifies.clone());
+            members.push(emit_subscribe(
+                wire,
+                &m.handler,
+                &params,
+                &notifies,
+                m.summary.as_deref(),
+            ));
+        } else {
             members.push(skip_comment(wire, m));
-            continue;
         }
-        let params = ref_name_of(&m.params, "params")?;
-        let result = ref_name_of(m.result.as_ref().ok_or_else(|| miss("result"))?, "result")?;
-        used.insert(params.clone());
-        used.insert(result.clone());
-        members.push(emit_method(
-            wire,
-            &m.handler,
-            &params,
-            &result,
-            m.summary.as_deref(),
-        ));
     }
 
     let mut out = String::new();
     out.push_str(&header(origin));
-    out.push_str(&imports(&types_mod, &used));
+    out.push_str(&imports(&types_mod, &used, has_subscriptions));
     out.push('\n');
     out.push_str(&format!(
         "/** Typed WebSocket client for the {} service — connect with `{class}.connect(url)`. */\n",
@@ -75,17 +93,19 @@ pub fn generate(spec: &Spec, origin: &str) -> Result<String> {
 
 fn header(origin: &str) -> String {
     format!(
-        "// GENERATED by truenas-rpc-codegen from {origin} — DO NOT EDIT BY HAND.\n//\n// A typed WebSocket client over the `truenas-rpc-tsclient` runtime: one method per plain\n// `request -> result` RPC — encode the request, call the `$/negotiate`d connection, return the\n// typed result. Subscription / filterable / transfer methods are not in this basic client.\n\n"
+        "// GENERATED by truenas-rpc-codegen from {origin} — DO NOT EDIT BY HAND.\n//\n// A typed WebSocket client over the `truenas-rpc-tsclient` runtime: one method per plain\n// `request -> result` RPC, a `subscribe_*` callback method per subscription, and `connect(url, auth?)`\n// for session auth. Filterable / transfer methods are not in this basic client.\n\n"
     )
 }
 
-/// The import preamble: the runtime `RpcConnection` (+ the `Negotiated` type) and the referenced API
-/// types (alphabetized) from the sibling types module.
-fn imports(types_mod: &str, used: &BTreeSet<String>) -> String {
-    let mut out = format!(
-        "import {{ RpcConnection, type Negotiated }} from {};\n",
-        str_lit(RUNTIME_PKG)
-    );
+/// The import preamble: the runtime symbols (`RpcConnection`/`JsonRpcError` values + the `Negotiated` /
+/// `Credential` / `Subscription` types) and the referenced API types (alphabetized) from the sibling
+/// types module.
+fn imports(types_mod: &str, used: &BTreeSet<String>, has_subscriptions: bool) -> String {
+    let mut runtime = String::from("RpcConnection, JsonRpcError, type Negotiated, type Credential");
+    if has_subscriptions {
+        runtime.push_str(", type Subscription");
+    }
+    let mut out = format!("import {{ {runtime} }} from {};\n", str_lit(RUNTIME_PKG));
     if !used.is_empty() {
         let names: Vec<&str> = used.iter().map(String::as_str).collect();
         out.push_str(&format!(
@@ -121,11 +141,33 @@ fn emit_method(
     s
 }
 
-/// A one-line comment standing in for a method this basic client doesn't expose.
+/// One subscription: `async subscribe_<handler>(request, onEvent)` — subscribes to the topic and
+/// routes each notification payload to `onEvent`, returning a `Subscription` to tear it down.
+fn emit_subscribe(
+    wire: &str,
+    handler: &str,
+    params: &str,
+    notifies: &str,
+    summary: Option<&str>,
+) -> String {
+    let mut s = String::new();
+    if let Some(doc) = summary {
+        s.push_str(&format!("  /** {doc} */\n"));
+    }
+    s.push_str(&format!(
+        "  async subscribe_{handler}(request: {params}, onEvent: (event: {notifies}) => void): Promise<Subscription> {{\n"
+    ));
+    s.push_str(&format!(
+        "    return this.#rpc.subscribe({}, request, (params) => onEvent(params as {notifies}));\n",
+        str_lit(wire)
+    ));
+    s.push_str("  }");
+    s
+}
+
+/// A one-line comment standing in for a method this basic client doesn't expose (filterable/transfer).
 fn skip_comment(wire: &str, m: &MethodSpec) -> String {
-    let reason = if m.direction() == Direction::ServerClient {
-        "server->client subscription"
-    } else if m.filterable {
+    let reason = if m.filterable {
         "filterable query"
     } else {
         "raw-fd transfer"

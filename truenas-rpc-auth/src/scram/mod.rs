@@ -87,11 +87,14 @@ pub trait ChannelBindingSource: Send + Sync {
     fn tls_server_end_point(&self) -> Option<Vec<u8>>;
 }
 
-/// The SCRAM-SHA-512-PLUS mechanism over a [`CredentialSource`], optionally with a
-/// [`ChannelBindingSource`] for reverse-proxied transports.
+/// The SCRAM-SHA-512 mechanism over a [`CredentialSource`] — **PLUS (channel-bound) by default**,
+/// optionally with a [`ChannelBindingSource`] for reverse-proxied transports, and with an opt-in
+/// **unbound** mode ([`allow_unbound`](Self::allow_unbound)) for clients that can't read the TLS
+/// binding (e.g. browsers).
 pub struct Scram<C> {
     source: C,
     binding: Option<Arc<dyn ChannelBindingSource>>,
+    allow_unbound: bool,
 }
 
 impl<C> Scram<C> {
@@ -102,6 +105,7 @@ impl<C> Scram<C> {
         Self {
             source,
             binding: None,
+            allow_unbound: false,
         }
     }
 
@@ -111,7 +115,18 @@ impl<C> Scram<C> {
         Self {
             source,
             binding: Some(Arc::new(binding)),
+            allow_unbound: false,
         }
+    }
+
+    /// Also accept **unbound** SCRAM — a client `gs2-cbind-flag` of `n` (no channel binding), for
+    /// clients that cannot read the TLS `tls-server-end-point` value (a browser over `wss://`). Off by
+    /// default; the `y` downgrade flag is **always** rejected. Prefer channel-bound `-PLUS` wherever
+    /// the client can supply the binding — unbound relies on TLS server authentication alone.
+    #[must_use]
+    pub fn allow_unbound(mut self) -> Self {
+        self.allow_unbound = true;
+        self
     }
 }
 
@@ -160,21 +175,28 @@ impl<C: CredentialSource> Scram<C> {
             return reject(RejectKind::AuthErr);
         };
 
-        // Enforce SCRAM-PLUS: the client must request tls-server-end-point binding.
-        if cf.cbind != Cbind::TlsServerEndPoint {
-            return reject(RejectKind::AuthErr); // n / y — no-binding or downgrade
-        }
-        // The binding value: the server's own TLS if it terminated it, else — on a reverse-proxied
-        // transport where TLS was terminated upstream — the out-of-band source (e.g. the keyring).
-        let binding = channel.channel_binding.clone().or_else(|| {
-            if channel.binding_terminated_upstream() {
-                self.binding.as_ref().and_then(|b| b.tls_server_end_point())
-            } else {
-                None
+        // Channel-binding policy: SCRAM-PLUS (`p=tls-server-end-point`) binds to the TLS cert; unbound
+        // SCRAM (`n`) is accepted only when explicitly enabled (a browser client that can't read the
+        // binding). `y` is ALWAYS rejected — a `-PLUS`-capable server treats it as a downgrade attack.
+        let binding = match cf.cbind {
+            Cbind::TlsServerEndPoint => {
+                // The server's own TLS if it terminated it, else — on a reverse-proxied transport where
+                // TLS was terminated upstream — the out-of-band source (e.g. the keyring).
+                let binding = channel.channel_binding.clone().or_else(|| {
+                    if channel.binding_terminated_upstream() {
+                        self.binding.as_ref().and_then(|b| b.tls_server_end_point())
+                    } else {
+                        None
+                    }
+                });
+                match binding {
+                    Some(b) => b,
+                    None => return reject(RejectKind::Denied), // -PLUS requires a channel binding
+                }
             }
-        });
-        let Some(binding) = binding else {
-            return reject(RejectKind::Denied); // SCRAM-PLUS requires a channel binding
+            // Unbound: the cbind-input is just the gs2 header (no binding bytes appended).
+            Cbind::NotUsed if self.allow_unbound => Vec::new(),
+            _ => return reject(RejectKind::AuthErr), // unbound not allowed, or `y` downgrade
         };
 
         let username = message::unescape_username(&cf.username_raw);
@@ -300,6 +322,15 @@ impl AuthStackBuilder {
         B: ChannelBindingSource + 'static,
     {
         self.mechanism(SCRAM_TAG, Scram::with_binding(source, binding))
+    }
+
+    /// Enable SCRAM-SHA-512 under the [`SCRAM_TAG`] tag, **also accepting unbound** (`n,,`) clients —
+    /// e.g. a browser over `wss://` that can't read the TLS channel binding. Channel-bound `-PLUS`
+    /// clients still work and stay bound; the `y` downgrade flag is always rejected. Opt-in: the plain
+    /// [`scram`](Self::scram) builder stays `-PLUS`-only (unbound relies on TLS server auth alone).
+    #[must_use]
+    pub fn scram_unbound<C: CredentialSource + 'static>(self, source: C) -> Self {
+        self.mechanism(SCRAM_TAG, Scram::new(source).allow_unbound())
     }
 }
 
