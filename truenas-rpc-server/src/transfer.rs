@@ -156,9 +156,9 @@ impl<T: FileTransfer + ?Sized> FileTransferExt for T {
 
     fn recvfile(&self, file_fd: RawFd, count: usize) -> std::io::Result<usize> {
         let in_fd = self.as_raw_fd();
-        match splice_to_fd(in_fd, file_fd, count)? {
-            Some(moved) => return Ok(moved), // zero-copy path
-            None => {}                       // unsupported here → buffered fallback
+        // Zero-copy splice when supported; otherwise fall through to the buffered copy below.
+        if let Some(moved) = splice_to_fd(in_fd, file_fd, count)? {
+            return Ok(moved);
         }
         let mut buf = vec![0u8; 1 << 16];
         let mut got = 0;

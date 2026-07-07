@@ -98,10 +98,7 @@ fn rm_frame(payload: &[u8]) -> Vec<u8> {
 
 /// Pull more bytes into `acc`. `Some(0)` on EOF, `Some(n)` on data, `None` on a read error.
 async fn read_more<R: AsyncRead + Unpin>(stream: &mut R, acc: &mut BytesMut) -> Option<usize> {
-    match stream.read_buf(acc).await {
-        Ok(n) => Some(n),
-        Err(_) => None,
-    }
+    stream.read_buf(acc).await.ok()
 }
 
 /// Read one complete record, reassembling fragments until the last-fragment bit. Returns `None`

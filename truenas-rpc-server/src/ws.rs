@@ -56,6 +56,9 @@ impl<S: Send + Sync + 'static> TruenasRpcServer<S> {
     /// proxied case, where peer-cred is the proxy's and must not be trusted). A failed WebSocket
     /// handshake drops just that connection. WebSocket owns the wire, so there is no raw-fd transfer
     /// or broker hand-off over it — credential mechanisms (SCRAM/mTLS) still apply.
+    // `tokio_tungstenite::accept_hdr_async` dictates the closure's `Result<Response, ErrorResponse>`
+    // return, so the large-`Err` variant is unavoidable here.
+    #[allow(clippy::result_large_err)]
     pub async fn serve_websocket_unix_listener(
         &self,
         listener: UnixListener,

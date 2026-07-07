@@ -240,7 +240,7 @@ fn writer_errors_map_to_xdr_error() {
     struct FailWriter;
     impl std::io::Write for FailWriter {
         fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::new(std::io::ErrorKind::Other, "boom"))
+            Err(std::io::Error::other("boom"))
         }
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
