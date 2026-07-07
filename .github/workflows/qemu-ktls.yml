@@ -1,0 +1,42 @@
+name: kTLS
+
+# The kernel-TLS (`TlsMode::Kernel`) TLS/SCRAM tests need a real kernel `tls` ULP that GitHub runners
+# lack (they EBUSY). Run them in a Debian VM (which has an in-tree `tls` module) via libvirt/QEMU —
+# adapted from truenas_ros's qemu-test.yml, minus its ZFS/DKMS kernel-build machinery. Slow (a VM
+# boot + a scoped build), so it's a separate workflow; the fast checks live in rust.yml.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# A push to a PR branch would otherwise boot two VMs; keep only the latest.
+concurrency:
+  group: ktls-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ktls:
+    name: kTLS — TLS/SCRAM tests in a VM
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: ~/vm-cache
+          key: debian-trixie-cloud-v1
+      - name: Set up QEMU/libvirt
+        run: bash .github/workflows/scripts/qemu-setup.sh
+      - name: Boot the Debian VM
+        run: bash .github/workflows/scripts/qemu-start.sh
+      - name: Run the kTLS tests in the VM
+        run: bash .github/workflows/scripts/qemu-test.sh
+      - name: Collect VM logs
+        if: always()
+        run: bash .github/workflows/scripts/qemu-logs.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ktls-logs
+          path: /tmp/ktls-logs.tar.gz
+          if-no-files-found: ignore

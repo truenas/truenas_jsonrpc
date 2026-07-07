@@ -136,18 +136,16 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # The TLS/kTLS combos (client tls/scram/all, server tls/all) run in the separate `qemu-ktls`
+        # workflow — `TlsMode::Kernel` needs a real kernel `tls` ULP that GitHub runners lack. The
+        # client `scram` tests authenticate over a live kTLS connection, so they move there too.
         include:
           - { crate: truenas-rpc-client, features: "" }
-          - { crate: truenas-rpc-client, features: "tls" }
           - { crate: truenas-rpc-client, features: "websocket" }
-          - { crate: truenas-rpc-client, features: "scram" }
           - { crate: truenas-rpc-client, features: "fd-passing" }
-          - { crate: truenas-rpc-client, features: "tls websocket scram fd-passing" }
           - { crate: truenas-rpc-server, features: "" }
-          - { crate: truenas-rpc-server, features: "tls" }
           - { crate: truenas-rpc-server, features: "websocket" }
           - { crate: truenas-rpc-server, features: "passthrough" }
-          - { crate: truenas-rpc-server, features: "tls websocket passthrough" }
           - { crate: truenas-rpc-auth, features: "scram" }
           - { crate: truenas-rpc-auth, features: "oauth" }
           - { crate: truenas-rpc-auth, features: "scram keyring nss oauth gssapi passthrough" }
