@@ -7,20 +7,22 @@ URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64
 VM_NAME="ktls"
 VM_IP="192.168.122.10"
 VM_MAC="52:54:00:83:79:10"
-CACHE_DIR="$HOME/vm-cache"
 WORK_DIR="/tmp/qemu-work"
-mkdir -p "$CACHE_DIR" "$WORK_DIR"
+mkdir -p "$WORK_DIR"
 
-# Base image, cached across runs (actions/cache on ~/vm-cache); download to a temp name and rename
-# only on success so a partial download is never cached as complete.
-if [ ! -f "$CACHE_DIR/debian-trixie.qcow2" ]; then
+# Both the base image AND the overlay must live under a path the unprivileged libvirt qemu user
+# (e.g. uid 64055) can traverse to open the backing file. /tmp is world-traversable (1777); a home
+# dir like ~/vm-cache is not — libvirt fails with "Permission denied" on the backing file. Download
+# to a temp name and rename only on success so a partial download is never mistaken for complete.
+BASE="$WORK_DIR/debian-trixie.qcow2"
+if [ ! -f "$BASE" ]; then
   echo "Downloading Debian Trixie cloud image..."
-  wget -q --continue --tries=3 --timeout=120 "$URL" -O "$CACHE_DIR/debian-trixie.qcow2.part"
-  mv "$CACHE_DIR/debian-trixie.qcow2.part" "$CACHE_DIR/debian-trixie.qcow2"
+  wget -q --continue --tries=3 --timeout=120 "$URL" -O "$BASE.part"
+  mv "$BASE.part" "$BASE"
 fi
 
 # A fresh overlay on top of the pristine base (cloud-init writes only to the overlay).
-qemu-img create -f qcow2 -F qcow2 -b "$CACHE_DIR/debian-trixie.qcow2" "$WORK_DIR/vm-disk.qcow2" 40G
+qemu-img create -f qcow2 -F qcow2 -b "$BASE" "$WORK_DIR/vm-disk.qcow2" 40G
 
 PUBKEY=$(cat ~/.ssh/id_ed25519.pub)
 cat <<EOF > /tmp/user-data

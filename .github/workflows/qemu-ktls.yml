@@ -21,10 +21,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/cache@v4
-        with:
-          path: ~/vm-cache
-          key: debian-trixie-cloud-v1
       - name: Set up QEMU/libvirt
         run: bash .github/workflows/scripts/qemu-setup.sh
       - name: Boot the Debian VM
