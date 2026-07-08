@@ -1,0 +1,73 @@
+# Cargo workspace for truenas_rpc: the transport-agnostic dispatch core
+# (`truenas-rpc`), the filter and XDR codecs, codegen, the server transport, the
+# authentication crates, and supporting crates.
+[workspace]
+resolver = "2"
+members = [
+    "truenas-rpc",
+    "truenas-filter",
+    "truenas-xdr",
+    "truenas-xdr-derive",
+    "truenas-rpc-codegen",
+    "truenas-rpc-pyo3",
+    "truenas-rpc-server",
+    "truenas-rpc-client",
+    "truenas-rpc-pyclient",
+    "truenas-rpc-auth",
+    "truenas-rpc-utils-unsafe",
+    "truenas-rpc-daemon",
+    "truenas-rpc-cache",
+    "examples/demo",
+    "examples/demo-py",
+    "examples/demo-ws",
+]
+# Eight crates are excluded from the default set (a plain `cargo build`/`cargo test` and `coverage.sh`,
+# which run without `-p`, skip them): `truenas-rpc-pyo3` (embedded CPython) and `truenas-rpc-pyclient`
+# (the generated Python client's runtime, high-level pyo3) both link libpython (so the default build
+# links none); `truenas-rpc-server` and `truenas-rpc-client` do socket / kTLS / SCM_RIGHTS I/O that
+# can't be unit-tested to 100% deterministically; `truenas-rpc-auth` (peer-cred / mTLS / SCRAM /
+# GSSAPI, behind feature flags + OpenSSL) sits above the core; and `truenas-rpc-utils-unsafe` collects
+# the direct-syscall / FFI backends (kernel keyring, NETLINK_AUDIT, the MIT krb5 GSSAPI acceptor),
+# whose tests need a keyring / CAP_AUDIT_WRITE / a KDC; and `truenas-rpc-daemon` (the systemd service
+# harness) owns a tokio runtime, blocks process signals, and drives signalfd + socket I/O, so it can't
+# be unit-tested deterministically either; and `truenas-rpc-cache` vendors + links liblmdb for its
+# persistent backend behind the opt-in `lmdb` feature. All are covered behaviorally and excluded from the coverage
+# gate, but still built by `cargo clippy --workspace` and tested with `cargo test -p …`.
+default-members = [
+    "truenas-rpc",
+    "truenas-filter",
+    "truenas-xdr",
+    "truenas-xdr-derive",
+    "truenas-rpc-codegen",
+    "examples/demo",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+authors = ["iXsystems, Inc., dba TrueNAS <dev@truenas.com>"]
+repository = "https://github.com/truenas/truenas_jsonrpc"
+rust-version = "1.85"
+
+# Lint policy shared by every crate in the workspace (each opts in with
+# `lints.workspace = true`). This is a protocol core: forbid `unsafe` outright and
+# require the public API to stay documented.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+uuid = { version = "1" }
+thiserror = "2"
+tokio = { version = "1", features = ["rt"] }
+async-trait = "0.1"
+# truenas-rpc depends on the filter engine for filterable (query) methods.
+truenas-filter = { path = "truenas-filter" }
+# ...and on the XDR codec for the binary wire (the `xdr:true` methods + the TXDR frame).
+truenas-xdr = { path = "truenas-xdr" }
+# INI config-file parser for `truenas-rpc-daemon` (pinned to tag `v0.1.0`; the workspace's only git
+# dep). Only the `configfile` module is pulled (`default-features = false`), so it brings just libc +
+# bitflags.
+truenas_ros = { git = "https://github.com/truenas/truenas_ros", tag = "v0.1.0", default-features = false, features = ["configfile"] }
