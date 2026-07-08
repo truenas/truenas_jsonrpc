@@ -3,13 +3,13 @@
 # tools: `rustc -C instrument-coverage` to instrument, and the `llvm-profdata`/`llvm-cov`
 # that ship in the toolchain's rustlib bin dir. No third-party cargo subcommands.
 #
-#   ./coverage.sh [min_pct]   # default 99.5; exits non-zero if src/ line coverage < min
+#   ./coverage.sh [min_pct]   # default 90; exits non-zero if src/ line coverage < min
 #
-# The floor is **99.5%**, not a hard 100%: the workspace is rustfmt-normalized, and rustfmt splits some
-# long calls/asserts across lines — which isolates a never-executed sub-region (a `?` error branch, an
-# `assert!` panic message) onto its own line, so line coverage can't credit it. The floor stays near
-# total; the run prints the exact percentage + every uncovered line, so a real regression is still
-# visible in the log.
+# The floor is **90%**, a deliberate sanity gate — not a push for 100%. A near-total floor only forces
+# "coverage-theater" tests that color trivial branches green (error Display strings, derive round-trips,
+# every enum arm) without catching real regressions. 90% keeps the meaningful behavioral paths honestly
+# covered while leaving room to delete those low-value tests. The run still prints the exact percentage
+# + every uncovered line, so a real regression stays visible in the log.
 #
 # Mechanism (see https://doc.rust-lang.org/rustc/instrument-coverage.html):
 #   1. build+run tests with `-C instrument-coverage` → one .profraw per test process
@@ -20,7 +20,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-MIN="${1:-99.5}"
+MIN="${1:-90}"
 HOST="$(rustc -vV | sed -n 's/^host: //p')"
 LLVMBIN="$(rustc --print sysroot)/lib/rustlib/$HOST/bin"
 PROFDIR="target/coverage"

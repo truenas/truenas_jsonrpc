@@ -15,10 +15,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # Fast core gate (no system dependencies): the workspace default-members — the dispatch core,
-  # filter, XDR, and codegen — held to the coverage floor below. clippy runs with `-D warnings`,
-  # so the workspace lint policy (`unsafe_code = "forbid"`, `missing_docs = "warn"`) is enforced;
-  # the tests include `tests/conformance.rs`, the frozen-golden A/B (no external dependency).
+  # Core gate: the workspace default-members — the dispatch core, filter, XDR, and codegen — held to
+  # the coverage floor below. clippy runs with `-D warnings`, so the workspace lint policy
+  # (`unsafe_code = "forbid"`, `missing_docs = "warn"`) is enforced; the tests include
+  # `tests/conformance.rs`, the frozen-golden A/B. The core links system OpenSSL (its id generator
+  # draws from the FIPS-validated DRBG), so libssl-dev + pkg-config are needed to build.
   core:
     name: Core — fmt, clippy, test
     runs-on: ubuntu-latest
@@ -27,11 +28,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - run: cargo fmt --all --check
       - run: cargo clippy --all-features --all-targets --locked -- -D warnings
       - run: cargo test --all-features --locked
 
-  # Coverage: the core's native line-coverage floor (coverage.sh, ~99.5%) + the client engine's
+  # Coverage: the core's native line-coverage floor (coverage.sh, 90%) + the client engine's
   # behavioral floor (coverage-client.sh). Native source-based coverage (`rustc -C instrument-coverage`
   # + the toolchain's bundled llvm-cov); libssl-dev is needed because the client's TLS tests link OpenSSL.
   coverage:

@@ -359,52 +359,7 @@ self-contained and documented in [CRATES.md](CRATES.md#crate-details).
 
 ## Dependency graph
 
-Arrows are Cargo dependencies (`A --> B` means A depends on B). `[opt]` marks an optional add-on,
-pulled only for that capability. A **server** names `truenas-rpc-server` + `truenas-rpc`; a
-**client** names `truenas-rpc-client`; both add `truenas-rpc-codegen` as a build-dependency.
-
-```text
-                          consumer service crate
-                    (generated Handlers, json-idl/ spec)
-                       |                          |
-              build-dep|                          | runtime
-                       v                          |
-       +------------------------------+           |
-       | truenas-rpc-codegen      |           |
-       | json-idl -> Rust (build time;|           |
-       | output uses truenas-rpc) |           |
-       +------------------------------+           |
-                                                  v
-    +------------------------+ [opt]   +-----------------------+
-    | truenas-rpc-server |-------->|    truenas-rpc    |
-    | (AF_UNIX/TCP/TLS/WS)   |         |    (dispatch core)    |
-    +------------------------+         |                       |
-    +------------------------+ [opt]   |                       |
-    | truenas-rpc-client |-------->|                       |
-    | (client engine)        |         |                       |
-    +------------------------+         |                       |
-    +------------------------+ [opt]   |                       |
-    | truenas-rpc-pyo3   |-------->|                       |
-    | (embedded CPython)     |         +-----+-----------+-----+
-    +------------------------+               |           |
-                                            v           v
-                                  +----------------+  +--------------------+
-                                  | truenas-filter |  |     truenas-xdr    |
-                                  | (query engine) |  |  (XDR codec+frame) |
-                                  +----------------+  +---------+----------+
-                                                                |
-                                                       "derive" | feature
-                                                                v
-                                                      +---------------------+
-                                                      | truenas-xdr-derive  |
-                                                      | (proc-macro)        |
-                                                      +---------------------+
-```
-
-`truenas-rpc-codegen` runs at build time only; it is never linked into the runtime — its
-*generated code* uses `truenas-rpc`. `truenas-rpc` re-exports the `truenas-filter` API, so
-a filterable handler needs only the core crate. The graph above is the primary-crate subset; the
-**complete** graph (auth, keyring, audit, gssapi) is in [CRATES.md](CRATES.md#dependency-graph).
+The crate dependency graph is in **[CRATES.md](CRATES.md#dependency-graph)**.
 
 ## Parity & proof
 

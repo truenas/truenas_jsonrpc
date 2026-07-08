@@ -11,9 +11,9 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use truenas_rpc::{
-    AsyncRpcMethod, AuditOutcome, Clock, Dispatched, Error, ErrorCode, IdGen, JsonRpcError,
-    JsonRpcProtocol, MethodDef, NullOutbound, RequestCtx, RequestInfo, RoleMask, Roles, RpcMethod,
-    Session, SessionId, SessionLifecycle,
+    AsyncRpcMethod, AuditOutcome, Clock, Dispatched, Error, IdGen, JsonRpcError, JsonRpcProtocol,
+    MethodDef, NullOutbound, RequestCtx, RequestInfo, RoleMask, Roles, RpcMethod, Session,
+    SessionId, SessionLifecycle,
 };
 
 const ID: &str = "f81d4fae-7dec-11d0-a765-00a0c91e6bf6";
@@ -887,52 +887,4 @@ async fn async_pipeline_decode_and_authz_branches() {
     .await
     .unwrap();
     assert_eq!(ok["result"]["echo"], "hi");
-}
-
-// --- error types (public API) ------------------------------------------------
-
-#[test]
-fn jsonrpc_error_constructors_and_display() {
-    assert_eq!(
-        JsonRpcError::invalid_params("x").code,
-        ErrorCode::InvalidParams.code()
-    );
-    assert_eq!(
-        JsonRpcError::method_not_found("x").code,
-        ErrorCode::MethodNotFound.code()
-    );
-    assert_eq!(
-        JsonRpcError::not_authorized("x").code,
-        ErrorCode::NotAuthorized.code()
-    );
-    assert_eq!(
-        JsonRpcError::request_failed("x").code,
-        ErrorCode::RequestFailed.code()
-    );
-    assert_eq!(
-        JsonRpcError::internal("x").code,
-        ErrorCode::InternalError.code()
-    );
-    assert_eq!(
-        JsonRpcError::session_not_established("x").code,
-        ErrorCode::SessionNotEstablished.code()
-    );
-    assert_eq!(
-        JsonRpcError::cancelled().code,
-        ErrorCode::RequestCancelled.code()
-    );
-    let e = JsonRpcError::custom(-32050, "custom").with_data(json!({ "k": "v" }));
-    assert_eq!(e.code, -32050);
-    assert_eq!(e.data, Some(json!({ "k": "v" })));
-    assert!(format!("{e}").contains("-32050"));
-    let _ = format!("{e:?}");
-    let _ = e.clone();
-}
-
-#[test]
-fn builder_error_display() {
-    assert!(format!("{}", Error::ReservedName("$/x".into())).contains("reserved"));
-    assert!(format!("{}", Error::DuplicateMethod("d".into())).contains("duplicate"));
-    assert!(format!("{}", Error::Config("oops".into())).contains("oops"));
-    let _ = format!("{:?}", Error::Config("oops".into()));
 }

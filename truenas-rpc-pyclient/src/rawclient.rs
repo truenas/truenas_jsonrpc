@@ -56,22 +56,22 @@ unsafe impl<const N: usize> Sync for MethodDefs<N> {}
 /// `RawClient`'s methods: `call` + `negotiated` (plus the null sentinel).
 static RAWCLIENT_METHODS: MethodDefs<3> = MethodDefs([
     ffi::PyMethodDef {
-        ml_name: b"call\0".as_ptr().cast::<c_char>(),
+        ml_name: c"call".as_ptr().cast::<c_char>(),
         ml_meth: ffi::PyMethodDefPointer {
             PyCFunction: rawclient_call,
         },
         ml_flags: ffi::METH_VARARGS,
-        ml_doc: b"call(method: str, params: bytes) -> bytes\0"
+        ml_doc: c"call(method: str, params: bytes) -> bytes"
             .as_ptr()
             .cast::<c_char>(),
     },
     ffi::PyMethodDef {
-        ml_name: b"negotiated\0".as_ptr().cast::<c_char>(),
+        ml_name: c"negotiated".as_ptr().cast::<c_char>(),
         ml_meth: ffi::PyMethodDefPointer {
             PyCFunction: rawclient_negotiated,
         },
         ml_flags: ffi::METH_NOARGS,
-        ml_doc: b"negotiated() -> dict | None  ({'protocol','server','available'})\0"
+        ml_doc: c"negotiated() -> dict | None  ({'protocol','server','available'})"
             .as_ptr()
             .cast::<c_char>(),
     },
@@ -81,12 +81,12 @@ static RAWCLIENT_METHODS: MethodDefs<3> = MethodDefs([
 /// The module's `connect` function table (referenced by `MODULE_DEF`).
 static CONNECT_METHODS: MethodDefs<2> = MethodDefs([
     ffi::PyMethodDef {
-        ml_name: b"connect\0".as_ptr().cast::<c_char>(),
+        ml_name: c"connect".as_ptr().cast::<c_char>(),
         ml_meth: ffi::PyMethodDefPointer {
             PyCFunction: mod_connect,
         },
         ml_flags: ffi::METH_VARARGS,
-        ml_doc: b"connect(path: str, protocol: str) -> RawClient  (AF_UNIX)\0"
+        ml_doc: c"connect(path: str, protocol: str) -> RawClient  (AF_UNIX)"
             .as_ptr()
             .cast::<c_char>(),
     },
@@ -123,9 +123,7 @@ pub(crate) unsafe fn init_types(module: *mut ffi::PyObject) -> c_int {
         },
     ];
     let mut spec = ffi::PyType_Spec {
-        name: b"truenas_rpc_pyclient.RawClient\0"
-            .as_ptr()
-            .cast::<c_char>(),
+        name: c"truenas_rpc_pyclient.RawClient".as_ptr().cast::<c_char>(),
         basicsize: size_of::<RawClientObject>() as c_int,
         itemsize: 0,
         flags: ffi::Py_TPFLAGS_DEFAULT as c_uint,
@@ -137,13 +135,13 @@ pub(crate) unsafe fn init_types(module: *mut ffi::PyObject) -> c_int {
     }
     let _ = RAWCLIENT_TYPE.set(SendPtr(ty)); // keep a process-lifetime ref (never decref'd)
     ffi::Py_INCREF(ty); // one for the module (AddObject steals), one for our stashed pointer
-    if ffi::PyModule_AddObject(module, b"RawClient\0".as_ptr().cast::<c_char>(), ty) < 0 {
+    if ffi::PyModule_AddObject(module, c"RawClient".as_ptr().cast::<c_char>(), ty) < 0 {
         ffi::Py_DECREF(ty);
         return -1;
     }
 
     let exc = ffi::PyErr_NewException(
-        b"truenas_rpc_pyclient.RpcError\0".as_ptr().cast::<c_char>(),
+        c"truenas_rpc_pyclient.RpcError".as_ptr().cast::<c_char>(),
         std::ptr::null_mut(),
         std::ptr::null_mut(),
     );
@@ -152,7 +150,7 @@ pub(crate) unsafe fn init_types(module: *mut ffi::PyObject) -> c_int {
     }
     let _ = RPC_ERROR.set(SendPtr(exc));
     ffi::Py_INCREF(exc);
-    if ffi::PyModule_AddObject(module, b"RpcError\0".as_ptr().cast::<c_char>(), exc) < 0 {
+    if ffi::PyModule_AddObject(module, c"RpcError".as_ptr().cast::<c_char>(), exc) < 0 {
         ffi::Py_DECREF(exc);
         return -1;
     }
@@ -311,7 +309,7 @@ unsafe fn negotiated_dict(neg: &Negotiated) -> *mut ffi::PyObject {
     let server_ok = match &neg.server {
         Some(s) => dict_set_str(dict, b"server\0", s),
         None => {
-            ffi::PyDict_SetItemString(dict, b"server\0".as_ptr().cast::<c_char>(), ffi::Py_None())
+            ffi::PyDict_SetItemString(dict, c"server".as_ptr().cast::<c_char>(), ffi::Py_None())
                 == 0
         }
     };
@@ -334,7 +332,7 @@ unsafe fn negotiated_dict(neg: &Negotiated) -> *mut ffi::PyObject {
         }
         ffi::PyList_SetItem(list, i as ffi::Py_ssize_t, item); // steals `item`
     }
-    let rc = ffi::PyDict_SetItemString(dict, b"available\0".as_ptr().cast::<c_char>(), list);
+    let rc = ffi::PyDict_SetItemString(dict, c"available".as_ptr().cast::<c_char>(), list);
     ffi::Py_DECREF(list); // `SetItemString` does not steal
     if rc != 0 {
         ffi::Py_DECREF(dict);
@@ -464,7 +462,7 @@ unsafe fn set_runtime_error(msg: &str) {
         Ok(c) => ffi::PyErr_SetString(ffi::PyExc_RuntimeError, c.as_ptr()),
         Err(_) => ffi::PyErr_SetString(
             ffi::PyExc_RuntimeError,
-            b"raw client error\0".as_ptr().cast::<c_char>(),
+            c"raw client error".as_ptr().cast::<c_char>(),
         ),
     }
 }
@@ -482,7 +480,7 @@ fn to_ssize(len: usize) -> ffi::Py_ssize_t {
 /// `PyInit_truenas_rpc_pyclient` under the GIL.
 static mut MODULE_DEF: ffi::PyModuleDef = ffi::PyModuleDef {
     m_base: ffi::PyModuleDef_HEAD_INIT,
-    m_name: b"truenas_rpc_pyclient\0".as_ptr().cast::<c_char>(),
+    m_name: c"truenas_rpc_pyclient".as_ptr().cast::<c_char>(),
     m_doc: std::ptr::null(),
     m_size: -1, // no per-module state
     m_methods: &CONNECT_METHODS.0 as *const ffi::PyMethodDef as *mut ffi::PyMethodDef,

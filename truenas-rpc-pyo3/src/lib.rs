@@ -94,7 +94,7 @@ impl PyBridge {
             if m.is_null() {
                 return Err(take_py_err("import"));
             }
-            let dispatch = ffi::PyObject_GetAttrString(m, b"dispatch\0".as_ptr().cast::<c_char>());
+            let dispatch = ffi::PyObject_GetAttrString(m, c"dispatch".as_ptr().cast::<c_char>());
             ffi::Py_XDECREF(m);
             if dispatch.is_null() {
                 return Err(take_py_err("getattr dispatch"));
@@ -233,7 +233,7 @@ unsafe impl Sync for CallMethodDef {}
 
 /// The `PyMethodDef` backing every `call` callable: name `call`, `METH_VARARGS`, [`call_trampoline`].
 static CALL_METHOD_DEF: CallMethodDef = CallMethodDef(ffi::PyMethodDef {
-    ml_name: b"call\0".as_ptr().cast::<c_char>(),
+    ml_name: c"call".as_ptr().cast::<c_char>(),
     ml_meth: ffi::PyMethodDefPointer {
         PyCFunction: call_trampoline,
     },
@@ -392,7 +392,7 @@ unsafe fn set_runtime_error(msg: &str) {
         Ok(c) => ffi::PyErr_SetString(ffi::PyExc_RuntimeError, c.as_ptr()),
         Err(_) => ffi::PyErr_SetString(
             ffi::PyExc_RuntimeError,
-            b"call error\0".as_ptr().cast::<c_char>(),
+            c"call error".as_ptr().cast::<c_char>(),
         ),
     }
 }

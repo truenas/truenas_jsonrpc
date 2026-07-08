@@ -31,7 +31,7 @@ pub fn append_to_inittab() -> bool {
     // and `PyInit_truenas_rpc_pyclient` is the matching init hook.
     unsafe {
         ffi::PyImport_AppendInittab(
-            b"truenas_rpc_pyclient\0".as_ptr().cast::<c_char>(),
+            c"truenas_rpc_pyclient".as_ptr().cast::<c_char>(),
             Some(PyInit_truenas_rpc_pyclient),
         ) == 0
     }

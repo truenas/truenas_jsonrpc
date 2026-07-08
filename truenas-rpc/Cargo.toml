@@ -21,6 +21,9 @@ async-trait.workspace = true
 truenas-filter.workspace = true
 # The XDR codec + TXDR frame, for the binary wire (`xdr:true` methods).
 truenas-xdr.workspace = true
+# OpenSSL's DRBG (FIPS-validated when the FIPS provider is active) is the single entropy source for
+# generated identifiers (session / subscription ids) — deliberately not a non-FIPS RNG (getrandom).
+openssl = "0.10"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }

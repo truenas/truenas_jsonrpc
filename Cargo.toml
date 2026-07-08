@@ -59,7 +59,7 @@ missing_docs = "warn"
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1" }
 thiserror = "2"
 tokio = { version = "1", features = ["rt"] }
 async-trait = "0.1"

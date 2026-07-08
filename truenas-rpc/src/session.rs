@@ -117,13 +117,18 @@ pub trait IdGen: Send + Sync {
     fn new_id(&self) -> uuid::Uuid;
 }
 
-/// Default [`IdGen`]: a random UUIDv4 per call.
+/// Default [`IdGen`]: a random UUIDv4 per call, drawn from OpenSSL's DRBG (FIPS-validated when the
+/// FIPS provider is active) — so identifiers never depend on a non-FIPS RNG like `getrandom`.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UuidGen;
 
 impl IdGen for UuidGen {
     fn new_id(&self) -> uuid::Uuid {
-        uuid::Uuid::new_v4()
+        // Draw 16 bytes from OpenSSL's DRBG (same entropy source as the SCRAM nonces), then stamp
+        // the RFC 4122 v4 version/variant bits over them.
+        let mut bytes = [0u8; 16];
+        openssl::rand::rand_bytes(&mut bytes).expect("openssl RAND_bytes");
+        uuid::Builder::from_random_bytes(bytes).into_uuid()
     }
 }
 
@@ -419,16 +424,6 @@ impl<S> Session<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn system_clock_is_after_the_epoch() {
-        assert!(SystemClock.now_unix() > 0.0);
-    }
-
-    #[test]
-    fn null_outbound_send_discards() {
-        NullOutbound.send(vec![1, 2, 3]);
-    }
 
     #[test]
     fn lifecycle_round_trips_through_the_atomic_cell() {

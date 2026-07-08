@@ -12,7 +12,7 @@ use uuid::Uuid;
 use truenas_rpc::JsonRpcError;
 
 use crate::config::{ClientConfig, Endpoint};
-use truenas_rpc::TransferDirection;
+use truenas_rpc::{IdGen, TransferDirection, UuidGen};
 
 use crate::engine::{
     Authenticates, CallEngine, Cancels, Client, Framing, GracefulClose, Inbound, MethodKey,
@@ -73,11 +73,11 @@ pub struct JsonRpcRuntime {
 
 impl Default for JsonRpcRuntime {
     fn default() -> Self {
-        // One random draw per connection (amortized over every call it makes). The low 64 bits of a
-        // v4 UUID are fully random (the version/variant bits sit higher), so take those as the prefix.
+        // One random draw per connection (amortized over every call it makes), from the core's
+        // OpenSSL-backed id generator (the FIPS DRBG) — the low 64 bits become the prefix.
         JsonRpcRuntime {
             framing: LengthPrefix,
-            prefix: Uuid::new_v4().as_u128() as u64,
+            prefix: UuidGen.new_id().as_u128() as u64,
         }
     }
 }

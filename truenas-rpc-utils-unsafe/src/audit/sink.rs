@@ -22,7 +22,7 @@ use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
 
-use truenas_rpc::{AuditOutcome, AuditSink, RequestInfo, Session};
+use truenas_rpc::{AuditOutcome, AuditSink, IdGen, RequestInfo, Session, UuidGen};
 
 use super::netlink::{AuditSocket, SendStatus};
 use super::record::{build_record, lost_record, AuditPrincipal};
@@ -66,7 +66,7 @@ impl<S: Send + Sync + 'static> AuditSink<S> for LinuxAuditSink<S> {
         audit_message: Option<&str>,
     ) {
         let principal = (self.extract)(session);
-        let aid = uuid::Uuid::new_v4().to_string();
+        let aid = UuidGen.new_id().to_string();
         let sess = session.id().to_string();
         let record = build_record(
             &self.service,
