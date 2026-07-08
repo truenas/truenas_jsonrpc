@@ -1,0 +1,41 @@
+name: VM-based tests
+
+# Tests that need a real Linux kernel a GitHub runner can't provide, run in a Debian VM (in-tree `tls`
+# module) via libvirt/QEMU — adapted from truenas_ros's qemu-test.yml, minus its ZFS/DKMS machinery:
+#   - the kernel-TLS (`TlsMode::Kernel`) TLS/SCRAM feature combos (runners lack a working `tls` ULP → EBUSY);
+#   - the client line-coverage floor (coverage-client.sh), which exercises those same kTLS paths;
+#   - the embedded-CPython demo-py round-trip (needs python3 + msgspec).
+# Slow (a VM boot + a scoped build + instrumented coverage), so it's a separate workflow; the fast
+# checks live in rust.yml.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+# A push to a PR branch would otherwise boot two VMs; keep only the latest.
+concurrency:
+  group: vm-tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  vm-tests:
+    name: VM-based tests — kTLS, client coverage, demo-py
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up QEMU/libvirt
+        run: bash .github/workflows/scripts/qemu-setup.sh
+      - name: Boot the Debian VM
+        run: bash .github/workflows/scripts/qemu-start.sh
+      - name: Run the VM-based tests
+        run: bash .github/workflows/scripts/qemu-test.sh
+      - name: Collect VM logs
+        if: always()
+        run: bash .github/workflows/scripts/qemu-logs.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vm-test-logs
+          path: /tmp/vm-test-logs.tar.gz
+          if-no-files-found: ignore

@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Download the Debian Trixie cloud image, boot it via virt-install + cloud-init, and wait for SSH.
-# Adapted from truenas_ros's qemu-2-start.sh — kTLS needs no ZFS/kernel build, just a stock kernel.
+# Adapted from truenas_ros's qemu-2-start.sh — these tests need no ZFS/kernel build, just a stock kernel.
 set -eu
 
 URL="https://cloud.debian.org/images/cloud/trixie/latest/debian-13-generic-amd64.qcow2"
-VM_NAME="ktls"
+VM_NAME="vm-tests"
 VM_IP="192.168.122.10"
 VM_MAC="52:54:00:83:79:10"
 WORK_DIR="/tmp/qemu-work"
@@ -27,7 +27,7 @@ qemu-img create -f qcow2 -F qcow2 -b "$BASE" "$WORK_DIR/vm-disk.qcow2" 40G
 PUBKEY=$(cat ~/.ssh/id_ed25519.pub)
 cat <<EOF > /tmp/user-data
 #cloud-config
-hostname: ktls
+hostname: vm-tests
 users:
 - name: debian
   sudo: ALL=(ALL) NOPASSWD:ALL

@@ -33,11 +33,12 @@ jobs:
       - run: cargo clippy --all-features --all-targets --locked -- -D warnings
       - run: cargo test --all-features --locked
 
-  # Coverage: the core's native line-coverage floor (coverage.sh, 90%) + the client engine's
-  # behavioral floor (coverage-client.sh). Native source-based coverage (`rustc -C instrument-coverage`
-  # + the toolchain's bundled llvm-cov); libssl-dev is needed because the client's TLS tests link OpenSSL.
+  # Coverage: the core's native line-coverage floor (coverage.sh, 90%). Native source-based coverage
+  # (`rustc -C instrument-coverage` + the toolchain's bundled llvm-cov); libssl-dev + pkg-config are
+  # needed because the core now links OpenSSL (its FIPS-DRBG id generator). The client coverage floor
+  # (coverage-client.sh) runs in the VM-based-tests workflow, where kTLS actually engages.
   coverage:
-    name: Coverage — core floor, client floor
+    name: Coverage — core floor
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -47,8 +48,6 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
       - name: Core line-coverage floor
         run: bash coverage.sh
-      - name: Client behavioral floor
-        run: bash coverage-client.sh 85
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -81,7 +80,6 @@ jobs:
       - name: Test the non-default crates
         run: |
           cargo test -p truenas-rpc-pyclient --locked
-          cargo test -p demo-py --locked                # PyO3 client: compile + in-process import (no extension-module)
           cargo test -p truenas-rpc-pyo3 --locked
           # The unsafe/FFI utilities (keyring / audit / gssapi modules): tests self-skip without kernel
           # caps (audit / keyring) or a KDC (gssapi).
@@ -138,7 +136,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The TLS/kTLS combos (client tls/scram/all, server tls/all) run in the separate `qemu-ktls`
+        # The TLS/kTLS combos (client tls/scram/all, server tls/all) run in the separate `vm-tests`
         # workflow — `TlsMode::Kernel` needs a real kernel `tls` ULP that GitHub runners lack. The
         # client `scram` tests authenticate over a live kTLS connection, so they move there too.
         include:
