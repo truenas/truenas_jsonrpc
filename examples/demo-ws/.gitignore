@@ -1,0 +1,6 @@
+# The Node E2E project's install/build output, and the TS client generated at CI time.
+/e2e/node_modules/
+/e2e/dist/
+/e2e/package-lock.json
+/e2e/e2e_types.ts
+/e2e/e2e_client.ts

@@ -1,0 +1,185 @@
+name: Rust
+
+on:
+  pull_request:
+    branches: [ master, main ]
+  push:
+    branches: [ master, main ]
+
+# A push to a PR branch would otherwise build twice; keep only the latest run.
+concurrency:
+  group: rust-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Core gate: the workspace default-members — the dispatch core, filter, XDR, and codegen — held to
+  # the coverage floor below. clippy runs with `-D warnings`, so the workspace lint policy
+  # (`unsafe_code = "forbid"`, `missing_docs = "warn"`) is enforced; the tests include
+  # `tests/conformance.rs`, the frozen-golden A/B. The core links system OpenSSL (its id generator
+  # draws from the FIPS-validated DRBG), so libssl-dev + pkg-config are needed to build.
+  core:
+    name: Core — fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - run: cargo fmt --all --check
+      - run: cargo clippy --all-features --all-targets --locked -- -D warnings
+      - run: cargo test --all-features --locked
+
+  # Coverage: the core's native line-coverage floor (coverage.sh, 90%). Native source-based coverage
+  # (`rustc -C instrument-coverage` + the toolchain's bundled llvm-cov); libssl-dev + pkg-config are
+  # needed because the core now links OpenSSL (its FIPS-DRBG id generator). The client coverage floor
+  # (coverage-client.sh) runs in the VM-based-tests workflow, where kTLS actually engages.
+  coverage:
+    name: Coverage — core floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Core line-coverage floor
+        run: bash coverage.sh
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lcov
+          path: target/coverage/cov.lcov
+
+  # The whole workspace on stable + beta: clippy lints EVERY crate (the opt-in transport / auth /
+  # PyO3 / FFI crates the core job skips), with `--all-features` — safe because clippy only *checks*,
+  # never links, so demo-py's `extension-module` is fine. Then the non-default crates' tests, run
+  # per-crate: `cargo test --workspace --all-features` cannot be used, as it would enable
+  # `extension-module` and stop linking libpython, breaking the PyO3 test binaries. `beta` is
+  # informational (`continue-on-error`) — it catches upcoming-toolchain breakage without blocking.
+  workspace:
+    name: Workspace — clippy + tests (${{ matrix.toolchain }})
+    runs-on: ubuntu-latest
+    continue-on-error: ${{ matrix.toolchain == 'beta' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [stable, beta]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+      - name: System libraries (libpython / krb5 / openssl)
+        run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
+      - run: cargo clippy --workspace --all-features --all-targets --locked -- -D warnings
+      - name: Test the non-default crates
+        run: |
+          cargo test -p truenas-rpc-pyclient --locked
+          cargo test -p truenas-rpc-pyo3 --locked
+          # The unsafe/FFI utilities (keyring / audit / gssapi modules): tests self-skip without kernel
+          # caps (audit / keyring) or a KDC (gssapi).
+          cargo test -p truenas-rpc-utils-unsafe --all-features --locked
+          # The daemon harness (config + signalfd + serve + lifecycle). Behavioral; the signal test
+          # uses thread-directed pthread_kill, so it needs no elevated privileges. No feature flags,
+          # so it is not in the feature matrix below.
+          cargo test -p truenas-rpc-daemon --locked
+          # The cache / state store. The in-memory backend is pure-safe Rust; `--all-features` also
+          # builds the persistent LMDB backend (vendored liblmdb compiled via cc).
+          cargo test -p truenas-rpc-cache --all-features --locked
+
+  # The generated TypeScript client: the runtime's own checks (`tsc --strict` + a Node SCRAM
+  # known-answer/round-trip test), the codegen `tsc` golden guard (which self-skips without a
+  # toolchain — here `tsc` is on PATH so it runs for real), and a **live end-to-end**: a `wss://`
+  # server (unbound SCRAM + echo/add + a pub/sub topic) driven by a Node client that consumes the
+  # generated TS client. Node 22 supplies the native global `WebSocket`.
+  ts:
+    name: TypeScript — checks + wss E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libssl-dev pkg-config
+      - name: Runtime checks (tsc --strict + node SCRAM KAT/round-trip)
+        run: cd truenas-rpc-tsclient && npm install && npm test
+      - name: Codegen goldens type-check (tsc on PATH → the guard runs for real)
+        run: |
+          npm i -g typescript
+          cargo test -p truenas-rpc-codegen generated_typescript_goldens_typecheck --locked
+      - name: Live wss E2E — SCRAM auth + pub/sub via the generated client
+        run: |
+          set -euo pipefail
+          openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj /CN=localhost -keyout key.pem -out cert.pem
+          cargo build -p demo-ws --bin e2e_server --locked
+          cargo run -q -p truenas-rpc-codegen --example codegen -- ts-types  examples/demo-ws/json-idl --out examples/demo-ws/e2e/e2e_types.ts
+          cargo run -q -p truenas-rpc-codegen --example codegen -- ts-client examples/demo-ws/json-idl --out examples/demo-ws/e2e/e2e_client.ts
+          ./target/debug/e2e_server --cert cert.pem --key key.pem > server.log 2>&1 &
+          for _ in $(seq 1 100); do grep -q '^PORT=' server.log && break; sleep 0.1; done
+          PORT=$(grep '^PORT=' server.log | head -1 | cut -d= -f2)
+          echo "server on port $PORT"
+          ( cd examples/demo-ws/e2e && npm install && E2E_URL="wss://127.0.0.1:$PORT" NODE_TLS_REJECT_UNAUTHORIZED=0 npm test ) \
+            || { echo '--- server log ---'; cat server.log; exit 1; }
+
+  # Feature-combination matrix on the socket crates: each feature individually, plus default and
+  # all-on, so a mis-gated `#[cfg(feature)]` cannot hide behind `--all-features`.
+  features:
+    name: Features — ${{ matrix.crate }} [${{ matrix.features }}]
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The TLS/kTLS combos (client tls/scram/all, server tls/all) run in the separate `vm-tests`
+        # workflow — `TlsMode::Kernel` needs a real kernel `tls` ULP that GitHub runners lack. The
+        # client `scram` tests authenticate over a live kTLS connection, so they move there too.
+        include:
+          - { crate: truenas-rpc-client, features: "" }
+          - { crate: truenas-rpc-client, features: "websocket" }
+          - { crate: truenas-rpc-client, features: "fd-passing" }
+          - { crate: truenas-rpc-server, features: "" }
+          - { crate: truenas-rpc-server, features: "websocket" }
+          - { crate: truenas-rpc-server, features: "passthrough" }
+          - { crate: truenas-rpc-auth, features: "scram" }
+          - { crate: truenas-rpc-auth, features: "oauth" }
+          - { crate: truenas-rpc-auth, features: "scram keyring nss oauth gssapi passthrough" }
+          - { crate: truenas-rpc-cache, features: "" }       # in-memory backend only (no C)
+          - { crate: truenas-rpc-cache, features: "lmdb" }   # + persistent LMDB (vendored liblmdb)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y libkrb5-dev libssl-dev pkg-config
+      - run: cargo test -p ${{ matrix.crate }} --no-default-features --features "${{ matrix.features }}" --locked
+
+  # Rustdoc across the whole workspace; a broken intra-doc link fails (RUSTDOCFLAGS: -D warnings).
+  docs:
+    name: Docs — cargo doc (deny warnings)
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
+      - run: cargo doc --workspace --all-features --no-deps --locked
+
+  # MSRV: the workspace's declared `rust-version` (1.85) should compile. Build-only (`cargo check`) —
+  # `--all-features` is safe here too, since `check` never links. Informational (`continue-on-error`):
+  # it surfaces MSRV drift (a locked dep that bumped its own MSRV) without blocking; make it required
+  # once green if you want to enforce the floor.
+  msrv:
+    name: MSRV — cargo check (1.85)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
+      - run: cargo check --workspace --all-features --locked

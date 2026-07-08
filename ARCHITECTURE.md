@@ -1,24 +1,68 @@
-# truenas_jsonrpc — protocol architecture
+# truenas_rpc — protocol architecture
 
-The **language-agnostic protocol reference** for this stack: the dispatch-core/transport
-boundary, the session state machine, the per-request dispatch flow, the `$/` control
-messages, the server-integration contract, the raw-fd bulk-transfer handshake, and the
-error taxonomy. Every implementation — the [Python reference implementation](python/),
-and future Rust/Go ports — targets this contract, so they interoperate on the wire.
+The **protocol reference** for this stack: the dispatch-core/transport boundary, the session
+state machine, the per-request dispatch flow, the `$/` control messages, the server-integration
+contract, the raw-fd bulk-transfer handshake, and the error taxonomy — the wire contract the Rust
+implementation targets.
 
-For the Python implementation's concrete API mapping (the `dispatch()` /
-`poll_notification()` seam, handler signatures, the encoder, kTLS setup) see
-[python/truenas_pyjsonrpc/ARCHITECTURE.md](python/truenas_pyjsonrpc/ARCHITECTURE.md).
+For the Rust implementation's concrete API mapping (the `dispatch()` seam, handler signatures, the
+encoder, kTLS setup) see [truenas-rpc/ARCHITECTURE.md](truenas-rpc/ARCHITECTURE.md).
 
 It is JSON-RPC 2.0 ([spec](https://www.jsonrpc.org/specification)) with deliberate
 refinements (§9), and borrows its control-message namespace, progress, cancellation, and
 extended error ranges from the LSP base protocol
 ([spec](https://microsoft.github.io/language-server-protocol/specifications/lsp/3.18/specification/)).
 
+## Layers
+
+This stack is a conventional RPC decomposition — raw bytes at the bottom, a typed handler call at the
+top. The **same names are used throughout the code and the rest of these docs**. Five per-message
+strata, bottom → top:
+
+| # | Layer | Responsibility | Modules / types |
+|---|---|---|---|
+| 1 | **Transport** | Owns the file descriptor: accept loop, read/write event loop, TLS/kTLS, peer-cred identity, raw-fd (`sendfile`/`SCM_RIGHTS`) transfer, WebSocket. Moves opaque bytes. | `truenas-rpc-server`: `connection.rs`, `server.rs`, `tls.rs`, `peer.rs` (`Transport`, `Peer`), `scm.rs`, `transfer.rs`, `ws.rs` |
+| 2 | **Framing** | Delimits one message in the byte stream (today: a 4-byte big-endian length prefix; one WebSocket message = one frame). Yields an opaque body. | `truenas-rpc-server`: `framing.rs` (`frame_into`, `FrameError`), `connection.rs::take_frame` |
+| 3 | **Codec** | Bytes ↔ typed params/result for a wire. Both current wires are serde-driven (JSON via `serde_json`; the TXDR binary wire via `truenas-xdr`), but the layer is *not defined as* serde — a hand-written body parser is equally a codec. | `truenas-rpc`: `method.rs` (`WireParams` / `Encode`); the `truenas-xdr` crate |
+| 4 | **Envelope** | The per-message header: request id, method name / opcode, error taxonomy, request↔reply correlation. On the JSON wire a top-level array is a JSON-RPC 2.0 batch — several requests in one frame (§3, §9). | `truenas-rpc`: `envelope.rs` |
+| 5 | **Dispatch** | Routes a decoded, authorized request to its handler through an O(1) keyed table — JSON by method name (`HashMap<Arc<str>>`), XDR by proc-id (`HashMap<u32>`), both sharing one `Arc<Method>`. Wire-neutral. | `truenas-rpc`: `protocol.rs` (`dispatch` / `dispatch_xdr`, the registries, `Dispatched`), `method.rs` (`Method` / `MethodImpl`) |
+| — | → **Handler** | The consumer's `Fn(Accepts, &RequestCtx) -> Result<Returns>`. | consumer code |
+
+**Cross-cutting concerns** — named separately because they attach at a point, they are *not* strata:
+
+- **Authentication** — establishes the peer credential (SASL/SCRAM, GSSAPI, OAuth, mTLS, peer-cred) during
+  the negotiate/setup handshake. `truenas-rpc-auth` (`Channel`, `Capability`, the mechanisms); the
+  handshake in `setup.rs` + the server's `negotiate.rs`.
+- **Authorization** — gates each call by a role-mask subset test, run *between* codec-decode and handler so
+  `INVALID_PARAMS` precedes `NOT_AUTHORIZED`. The gate in `protocol.rs` + `role.rs` (`RoleMask`).
+- **Control-plane** — the `$/` verbs (`$/negotiate`, `$/sessions`, `$/cancelRequest`), the session state
+  machine, and server→client push. `session.rs`, `setup.rs`, the `$/` handling in `protocol.rs`.
+
+Two layer boundaries are deliberately **negotiable**, not clean cuts — name them when reasoning about a new wire:
+
+- **Framing ↔ Codec (where addressing lives).** *Which* layer recovers the request's opcode + id is
+  protocol-dependent. Today the length prefix is framing but the TXDR `proc_id`/`rid` ride *inside* the body
+  (recovered by codec/envelope); a header-carrying wire — SMB DSI's 16-byte header, ONC-RPC record marking —
+  puts opcode + id in the *framing* header, so a pluggable `Framing` trait must surface `{opcode,
+  request_id, body}`. See [FRAMING.md](FRAMING.md).
+- **Envelope ↔ Dispatch (per-protocol vs reusable).** The dispatch op-table (`Service`) is wire-neutral
+  and reusable; the envelope + control-plane are per-protocol. A new protocol reuses the op-table but
+  brings its own envelope and control verbs — this is the **`ProtocolEngine`** extension point (§10),
+  with the ONC RPC engine as the worked example. (A per-engine control plane is still deferred.)
+
+Two deliberate choices: **Framing is its own layer** (not folded into transport) so it can be made pluggable
+per protocol — see [FRAMING.md](FRAMING.md); and the **Control-plane** is what makes this more than bare
+request/response RPC — long-lived, authenticated, multiplexed connections.
+
+The **load-bearing seam** is between layers **1–2** (transport + framing — the `truenas-rpc-server`
+crate) and layers **3–5** (the transport-free **dispatch core** — the `truenas-rpc` crate): one call,
+`dispatch(message, session)` (framed bytes in, bytes out). The next section details exactly that boundary.
+
 ## 1. Dispatch core vs transport — the boundary
 
-The stack separates a **dispatch core** from a **transport layer**. The core is a pure
-function over messages; the transport owns everything with a file descriptor.
+The load-bearing seam in the layer stack above is between the **dispatch core** (layers 3–5) and the
+**transport layer** (layers 1–2). The core is a pure function over messages; the transport owns
+everything with a file descriptor.
 
 | Dispatch core (protocol logic) | Transport layer (server / runtime) |
 |---|---|
@@ -72,10 +116,13 @@ setup configured the gate is off and all methods are reachable from `NONE` (mirr
 
 ## 3. Per-request dispatch flow
 
-`dispatch(message, session)` runs, per message:
+`dispatch(message, session)` first selects the wire (the **wire-selection seam**, `protocol.rs`): a
+4-byte TXDR magic → the binary wire; a top-level JSON **array** → a JSON-RPC 2.0 **batch** (each
+element runs the per-request flow below and the responses are concatenated into one array; an
+*empty* array → `INVALID_REQUEST`; a batch of only notifications → no reply); otherwise the
+single-request JSON path. Per (single) message:
 
-1. **Parse** the envelope. Malformed JSON → `INVALID_JSON`; a valid non-object (incl. a
-   top-level array / batch) → `INVALID_REQUEST`.
+1. **Parse** the envelope. Malformed JSON → `INVALID_JSON`; a valid non-object → `INVALID_REQUEST`.
 2. **Resolve `id`.** Present → must be a canonical UUID string (else `INVALID_REQUEST`).
    Absent → a **notification** (no reply).
 3. **Structural checks:** `jsonrpc == "2.0"`, `method` is a non-empty string.
@@ -162,7 +209,7 @@ The `$/` and `rpc.` prefixes are reserved — user methods can't use them. An un
 
 | message | direction | id | lifecycle | authz | audited | purpose |
 |---|---|---|---|---|---|---|
-| `$/negotiate` | client → server | yes | pre-session | no | no | select one of the server's named protocols (server-layer; see below) |
+| `$/negotiate` | client → server | yes | pre-session | no | no | select one of the server's named protocols (server-side; see below) |
 | `$/progress` | server → client | — | n/a | — | — | progress for an in-flight request |
 | `$/serverInfo` | client → server | yes | any but `CLOSED` | no | no | unauthenticated server-identity probe (opt-in) |
 | `$/sessionSetup` | client → server | yes | `NONE` | no (is auth) | yes | first auth step (opt-in) |
@@ -174,7 +221,7 @@ The `$/` and `rpc.` prefixes are reserved — user methods can't use them. An un
 **`$/negotiate`** is the unauthenticated front door: a connection's first message is
 `$/negotiate {protocol}`; the server binds one of its named protocols and replies
 `{protocol, server, available}`, then creates the session. The full flow is `$/negotiate
-→ $/sessionSetup → API calls`. (It is a server-layer concern: a dispatch core embedded
+→ $/sessionSetup → API calls`. (It is a server-side concern: a dispatch core embedded
 directly, with a single protocol, needs no negotiation.)
 
 **`$/sessionSetup` / `$/sessionSetupContinue`** authenticate. The handler returns the
@@ -265,7 +312,7 @@ any method.
 
 ### The wire handshake — `$/transferReady` / `$/transferGo`
 
-These are server-layer control messages, correlated by the request id (like
+These are server-side control messages, correlated by the request id (like
 `$/progress`). The **invariant:** the *consumer* must pause its reader **before** the
 *producer* writes a stream byte, so every byte lands in the kernel buffer the fd-owning
 handler reads from (the framing layer's userspace buffer is bypassed).
@@ -313,7 +360,7 @@ needs no protocol support.
 
 A protocol-level data channel *bound* to the command session — to skip re-auth, tie a
 transfer to session state, or cancel an in-flight transfer from the command channel — is a
-possible future extension (see [ROADMAP](python/ROADMAP.md)); it would share one
+possible future extension; it would share one
 connection-binding primitive with a separate back channel.
 
 ## 7. Query methods (filtering)
@@ -404,7 +451,7 @@ omits them (or sends `"params": {}`) gets the full, unfiltered list.
 | name | code | meaning |
 |---|---|---|
 | `INVALID_JSON` | -32700 | malformed JSON ("Parse error") |
-| `INVALID_REQUEST` | -32600 | bad envelope (incl. non-UUID id, top-level array) |
+| `INVALID_REQUEST` | -32600 | bad envelope (incl. non-UUID id, empty top-level array) |
 | `METHOD_NOT_FOUND` | -32601 | unknown method |
 | `INVALID_PARAMS` | -32602 | params failed decode/validation (by-name only) |
 | `INTERNAL_ERROR` | -32603 | unexpected handler/return fault |
@@ -415,7 +462,78 @@ omits them (or sends `"params": {}`) gets the full, unfiltered list.
 
 ## 9. Deliberate divergences from JSON-RPC 2.0
 
-- **No batch** — top-level arrays are `INVALID_REQUEST`.
+- **Batch is a per-wire Envelope concern, on by default for JSON.** A top-level array is a JSON-RPC
+  2.0 batch on the JSON wire (always-on — it is part of the protocol, not a toggle); an *empty*
+  array stays `INVALID_REQUEST` per spec, and a batch of only notifications draws no reply. This is
+  additive toward the JSON-RPC 2.0 standard (an empty array still rejects, and no client relied on
+  non-empty arrays being rejected). Batching is not mandated by the
+  dispatch core: a binary wire compounds differently, and a non-JSON wire runs under its own
+  **`ProtocolEngine`** (§10), so the JSON-RPC engine's batching never reaches it.
 - **UUID-only ids** — a present `id` must be a canonical UUID string.
 - **By-name params only** — `params` must be a JSON object (no positional arrays).
 - **Reserved namespaces** — `rpc.` and `$/` can't be registered.
+
+## 10. Protocol engines — one core, many wires
+
+Because the dispatch core (layers 3–5) is wire-neutral, the *same* registered methods can be served
+over more than one wire protocol. A **`ProtocolEngine`** (`truenas-rpc-server`: `engine.rs`) owns
+one connection's protocol end to end — framing, envelope, control verbs, and the per-connection loop.
+
+**Selection is per *listener*, never per request.** A listener is bound to exactly one engine at
+serve time, so the engine boundary is crossed **once per connection** (at accept), never per request;
+the per-request hot path stays fully monomorphized (see [PERF.md](PERF.md)). The server hands each
+accepted connection to its engine as a narrow, protocol-neutral **`ConnContext`** — the byte stream,
+the raw-fd transfer channel, the peer, and the inbound size limit — *not* the server's protocol
+substrate (`ServerShared`: the registered protocols, negotiate state). An engine captures whatever it
+needs at construction: the default engine holds the whole `ServerShared` (it negotiates among
+protocols); a single-protocol binary engine holds just the one **`Service`** op-table it serves.
+
+```rust
+trait ProtocolEngine: Send + Sync {
+    fn serve<'a>(&'a self, ctx: ConnContext) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+```
+
+| | default engine | a second engine |
+|---|---|---|
+| type | `JsonRpcEngine` | `OncRpcProtocol` (`oncrpc.rs`) |
+| Framing (2) | 4-byte length prefix | ONC RPC record marking (RFC 5531 §11) |
+| Codec (3) | JSON + TXDR (shared) | XDR (shared) |
+| Envelope (4) | JSON-RPC 2.0 / TXDR | ONC RPC `rpc_msg`, `AUTH_NONE`/`AUTH_SYS` |
+| Bind | `serve_*(l, JsonRpc)`, then `$/negotiate` | `serve_*(l, OncRpc::protocol(..))` |
+
+**Sharing the op-table — `Service`.** The op-table is a first-class, wire-neutral type: `Service<S>`
+holds the registered methods, the decode→authorize→run→audit run core, and the session registry. Each
+wire is a *view* over one `Service`: `JsonRpcProtocol` (the JSON-RPC + TXDR view) and `OncRpcProtocol`
+(the ONC RPC view) both hold an `Arc<Service<S>>` and serve its methods — so a registered protocol's
+`Service` is what `$/negotiate` binds *and* what a binary engine consumes (`JsonRpcProtocol::service()`
+exposes it). A binary engine routes a decoded `(proc_id, params)` to the registered method whose XDR
+proc-id equals it, via `Service::run_proc` → the XDR-encoded result bytes (or a `JsonRpcError` the
+engine maps onto its own status, e.g. `METHOD_NOT_FOUND` → ONC RPC `PROC_UNAVAIL`). So a method
+registered once (with `.xdr(proc_id)`) is served over **both** the JSON-RPC transports and the ONC RPC
+wire — one service, many wires, differing only in framing and envelope. (`Service::run_proc` shares the
+binary-dispatch prelude with `JsonRpcProtocol::dispatch_xdr` behind a `#[inline(always)]` that is
+load-bearing for the hot path — see PERF.md.)
+
+**Wiring — the `Wire` seam.** The wire is a typed value passed to a `serve_*` method:
+`serve_unix_listener(l, JsonRpc)`, `serve_unix_listener(l, OncRpc::protocol("x"))`,
+`serve_tcp_listener(l, JsonRpc)`. A `Wire` resolves to its `ProtocolEngine` **once per listener** via
+`Wire::into_engine(WireHost)` — `WireHost` is the construction-time analogue of `ConnContext`: it wraps
+the crate-private `ServerShared`, handing a wire only "the default JSON-RPC engine" or "a registered
+`Service` by name", so the substrate never crosses the seam. `NetworkWire: Wire` marks the wires
+servable over a network transport (TCP / TLS / reverse-proxied AF_UNIX) and carries the session-auth
+guard (`admit_network`); `OncRpc` is `Wire` but **not** `NetworkWire`, so `serve_tcp_listener(l,
+OncRpc::..)` is a *compile error* — ONC RPC (AUTH_NONE/AUTH_SYS) is AF_UNIX-only, made unrepresentable.
+`CustomWire(engine)` serves any pre-built engine. WebSocket is a message-framed JSON-RPC-only transport
+and sits *outside* the byte-stream `Wire` seam (its own `serve_websocket*` methods).
+
+**The implementor contract** for a new wire: implement `ProtocolEngine` for the per-connection loop
+(capture the op-table you serve — a `Service`, via `WireHost::service` or the bound protocol's
+`service()`); bring your own framing + envelope + control verbs; route data requests to
+`Service::run_proc`. Make it a first-class `serve_*(l, MyWire)` value by implementing `Wire` (and
+`NetworkWire` if it authenticates network clients), or wrap a pre-built engine in `CustomWire`.
+**Deferred, by design (no
+consumer yet):** a per-engine control plane (the `$/` verbs
+are JSON-RPC-specific), and
+server→client push over a binary wire (the core's pub/sub emits JSON notifications, so a binary event
+path waits for a protocol that actually needs one).

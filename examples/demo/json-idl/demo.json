@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "name": "demo",
+  "version": "1.0.0",
+  "$comment": "End-to-end demo spec: a plain method, a secret-bearing method, an XDR method (both wires), a filterable query, and raw-fd transfers (download + upload).",
+  "$defs": {
+    "GreetArgs": {
+      "type": "object",
+      "properties": { "name": { "type": "string" } },
+      "required": ["name"],
+      "additionalProperties": false
+    },
+    "GreetResult": {
+      "type": "object",
+      "properties": { "message": { "type": "string" } },
+      "required": ["message"],
+      "additionalProperties": false
+    },
+    "LoginArgs": {
+      "type": "object",
+      "properties": {
+        "user": { "type": "string" },
+        "password": { "type": "string", "secret": true }
+      },
+      "required": ["user", "password"],
+      "additionalProperties": false
+    },
+    "LoginResult": {
+      "type": "object",
+      "properties": {
+        "token": { "type": "string", "secret": true },
+        "ok": { "type": "boolean" }
+      },
+      "required": ["token", "ok"],
+      "additionalProperties": false
+    },
+    "AddArgs": {
+      "type": "object",
+      "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } },
+      "required": ["a", "b"],
+      "additionalProperties": false
+    },
+    "AddResult": {
+      "type": "object",
+      "properties": { "sum": { "type": "integer" } },
+      "required": ["sum"],
+      "additionalProperties": false
+    },
+    "QueryArgs": { "type": "object", "properties": {}, "additionalProperties": false },
+    "Item": {
+      "type": "object",
+      "properties": { "id": { "type": "integer" }, "name": { "type": "string" } },
+      "required": ["id", "name"],
+      "additionalProperties": false
+    },
+    "TransferArgs": {
+      "$comment": "Params for the raw-fd transfer methods (blob.download / blob.upload): the byte count.",
+      "type": "object",
+      "properties": { "n": { "type": "integer" } },
+      "required": ["n"],
+      "additionalProperties": false
+    },
+    "DownloadReady": {
+      "$comment": "Typed $/transferReady interim for blob.download — the byte count the server will stream.",
+      "type": "object",
+      "properties": { "size": { "type": "integer" } },
+      "required": ["size"],
+      "additionalProperties": false
+    },
+    "DownloadDone": {
+      "type": "object",
+      "properties": { "sent": { "type": "integer" } },
+      "required": ["sent"],
+      "additionalProperties": false
+    },
+    "UploadDone": {
+      "type": "object",
+      "properties": { "received": { "type": "integer" } },
+      "required": ["received"],
+      "additionalProperties": false
+    }
+  },
+  "methods": {
+    "greet": {
+      "summary": "Greet by name.",
+      "handler": "greet",
+      "params": { "$ref": "#/$defs/GreetArgs" },
+      "result": { "$ref": "#/$defs/GreetResult" }
+    },
+    "login": {
+      "summary": "Authenticate (password + token are redacted in audit).",
+      "handler": "login",
+      "params": { "$ref": "#/$defs/LoginArgs" },
+      "result": { "$ref": "#/$defs/LoginResult" },
+      "audit": true,
+      "auditMessage": "user login"
+    },
+    "add": {
+      "summary": "Sum two integers; reachable over JSON and the XDR binary wire. Async (inline).",
+      "handler": "add",
+      "params": { "$ref": "#/$defs/AddArgs" },
+      "result": { "$ref": "#/$defs/AddResult" },
+      "async": true,
+      "xdr": true,
+      "xdr_id": 1001
+    },
+    "items.query": {
+      "summary": "Filterable query over a fixed collection.",
+      "handler": "query",
+      "params": { "$ref": "#/$defs/QueryArgs" },
+      "filterable": true,
+      "entry": { "$ref": "#/$defs/Item" }
+    },
+    "blob.download": {
+      "summary": "Raw-fd download: the server streams `n` bytes after a typed `$/transferReady` interim.",
+      "handler": "download",
+      "params": { "$ref": "#/$defs/TransferArgs" },
+      "result": { "$ref": "#/$defs/DownloadDone" },
+      "transfer": { "direction": "download", "ready": { "$ref": "#/$defs/DownloadReady" } }
+    },
+    "blob.upload": {
+      "summary": "Raw-fd upload: the client streams `n` bytes; the server reports how many it read.",
+      "handler": "upload",
+      "params": { "$ref": "#/$defs/TransferArgs" },
+      "result": { "$ref": "#/$defs/UploadDone" },
+      "transfer": { "direction": "upload" }
+    },
+    "py.hello": {
+      "summary": "Python-implemented: forwards to `greet` via `mw` (exercises live pyo3 typed dispatch).",
+      "handler": "py_hello",
+      "params": { "$ref": "#/$defs/GreetArgs" },
+      "result": { "$ref": "#/$defs/GreetResult" },
+      "python": true
+    }
+  }
+}

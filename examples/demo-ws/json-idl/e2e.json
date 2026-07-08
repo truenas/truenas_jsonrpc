@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$comment": "The E2E fixture for the TypeScript-client CI test: two plain methods + one subscription. Served over wss:// with unbound SCRAM by the e2e_server binary; consumed by a Node client using the generated TS client.",
+  "name": "e2e",
+  "version": "1.0.0",
+  "audit": { "enabled": false },
+  "$defs": {
+    "EchoArgs": {
+      "type": "object",
+      "properties": { "msg": { "type": "string" } },
+      "required": ["msg"],
+      "additionalProperties": false
+    },
+    "EchoResult": {
+      "type": "object",
+      "properties": { "msg": { "type": "string" } },
+      "required": ["msg"],
+      "additionalProperties": false
+    },
+    "AddArgs": {
+      "type": "object",
+      "properties": { "a": { "type": "integer" }, "b": { "type": "integer" } },
+      "required": ["a", "b"],
+      "additionalProperties": false
+    },
+    "AddResult": {
+      "type": "object",
+      "properties": { "sum": { "type": "integer" } },
+      "required": ["sum"],
+      "additionalProperties": false
+    },
+    "TickArgs": { "type": "object", "properties": {}, "additionalProperties": false },
+    "Tick": {
+      "type": "object",
+      "properties": { "seq": { "type": "integer" }, "msg": { "type": "string" } },
+      "required": ["seq", "msg"],
+      "additionalProperties": false
+    }
+  },
+  "methods": {
+    "echo": {
+      "summary": "Echo a message back.",
+      "params": { "$ref": "#/$defs/EchoArgs" },
+      "result": { "$ref": "#/$defs/EchoResult" },
+      "handler": "echo"
+    },
+    "add": {
+      "summary": "Add two integers.",
+      "params": { "$ref": "#/$defs/AddArgs" },
+      "result": { "$ref": "#/$defs/AddResult" },
+      "handler": "add"
+    },
+    "ticks": {
+      "summary": "Subscribe to periodic ticks.",
+      "params": { "$ref": "#/$defs/TickArgs" },
+      "notifies": { "$ref": "#/$defs/Tick" },
+      "handler": "ticks",
+      "direction": "server_client"
+    }
+  }
+}
