@@ -1,0 +1,47 @@
+# `truenas-rpc-utils-unsafe` — the TrueNAS RPC stack's utilities that require `unsafe` (direct kernel
+# syscalls / FFI), quarantined in one opt-in crate so the core and the rest of the workspace stay
+# `unsafe_code = "forbid"`. Three independent, feature-gated modules — `keyring` (kernel keyring),
+# `audit` (NETLINK_AUDIT sink), `gssapi` (MIT krb5 acceptor FFI) — each pulling only its own deps.
+# The `gssapi` feature links the system krb5, so this crate is NOT a workspace `default-member`.
+[package]
+name = "truenas-rpc-utils-unsafe"
+version = "0.1.0"
+description = "Opt-in unsafe utilities for the truenas-rpc stack: kernel keyring, kernel audit, GSSAPI FFI"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+# Reserve the native GSSAPI lib. A `links` key must be static, so it is declared unconditionally; the
+# build script only emits the link directive when the `gssapi` feature is on (else nothing links it).
+links = "gssapi_krb5"
+
+[features]
+default = []
+# A config-driven Linux kernel-keyring store (SCRAM verifiers / peer credentials).
+keyring = ["dep:libc", "dep:serde", "dep:serde_json", "dep:thiserror"]
+# A `truenas_rpc::AuditSink` backend writing to NETLINK_AUDIT.
+audit = ["dep:libc", "dep:serde_json", "dep:thiserror", "dep:truenas-rpc"]
+# A minimal FFI to the system GSSAPI (MIT krb5) acceptor. Links system krb5.
+gssapi = []
+
+[dependencies]
+# `libc` backs the keyring (keyctl) and audit (netlink) syscalls; gssapi uses raw FFI, no libc.
+libc = { version = "0.2", optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
+# The audit sink implements the core's `AuditSink`.
+truenas-rpc = { path = "../truenas-rpc", optional = true }
+
+[build-dependencies]
+# Locates the system MIT krb5 GSSAPI (gssapi feature); a `krb5-config` fallback covers hosts without
+# the `.pc` file. Cheap; only invoked by build.rs when the gssapi feature is on.
+pkg-config = "0.3"
+
+# These modules make direct syscalls / FFI, so this crate cannot use the workspace's
+# `unsafe_code = "forbid"`. It denies unsafe and allows it only in narrowly-scoped, audited blocks
+# (`#[allow(unsafe_code)]` + `// SAFETY:`).
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
