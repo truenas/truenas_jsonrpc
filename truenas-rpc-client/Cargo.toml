@@ -1,0 +1,64 @@
+[package]
+name = "truenas-rpc-client"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Async client engine for truenas-rpc: a protocol-agnostic core with per-protocol runtime hooks (JSON-RPC built in)."
+
+# A raw-fd transfer hands the connection socket to a blocking handler, which needs an `fcntl`
+# to toggle O_NONBLOCK — so, like `truenas-rpc-server`, this crate does socket I/O and can't use
+# the workspace's `unsafe_code = "forbid"`. It denies unsafe by default and allows it only in
+# narrowly-scoped, audited blocks (`#[allow(unsafe_code)]`); the core dispatch stays forbid.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[features]
+# Encrypted transport, mirroring the server (system OpenSSL). Off by default: a default build pulls
+# no openssl crates. A direct `tls://` connection uses kernel TLS — transfer-capable, and fails closed
+# if kTLS doesn't engage.
+tls = ["dep:openssl", "dep:openssl-sys", "dep:foreign-types"]
+# WebSocket transport (`ws://`, and `wss://` with `tls`). Off by default. One JSON-RPC frame per
+# WebSocket message; `tokio-openssl` backs the userspace TLS pump under `wss`.
+websocket = ["dep:tokio-tungstenite", "dep:futures-util", "dep:tokio-openssl"]
+# SCRAM-SHA-512-PLUS client login. Requires a TLS transport (the exchange binds to
+# `tls-server-end-point`), so it implies `tls` and reuses the OpenSSL that feature already pulls.
+scram = ["tls"]
+# SCM_RIGHTS file-descriptor passing (`send_fds` / `recv_fds`, AF_UNIX only), reusing the transfer
+# takeover. `nix` supplies the `sendmsg`/`recvmsg` + `SCM_RIGHTS` cmsg wrappers (same as the server).
+fd-passing = ["dep:nix"]
+
+[dependencies]
+truenas-rpc = { path = "../truenas-rpc" }
+truenas-xdr = { path = "../truenas-xdr" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+thiserror = { workspace = true }
+async-trait = { workspace = true }
+bytes = "1"
+# Socket options (TCP keepalive, O_NONBLOCK). Track tokio's socket2 major so the graph carries one version.
+socket2 = "0.6"
+# O_NONBLOCK toggle for the raw-fd transfer (blocking handler, then restore tokio). Already in the lock.
+libc = "0.2"
+tokio = { workspace = true, features = ["net", "io-util", "sync", "time", "macros", "rt", "rt-multi-thread"] }
+# SCM_RIGHTS fd passing (the `fd-passing` feature): sendmsg/recvmsg + cmsg wrappers.
+nix = { version = "0.29", features = ["socket", "uio"], optional = true }
+# TLS (the `tls` feature): system OpenSSL; kTLS handshake via openssl-sys + foreign-types.
+openssl = { version = "0.10", optional = true }
+openssl-sys = { version = "0.9", optional = true }
+foreign-types = { version = "0.3", optional = true }
+# WebSocket (the `websocket` feature): tokio-tungstenite + futures-util; tokio-openssl for `wss`.
+tokio-tungstenite = { version = "0.24", optional = true }
+futures-util = { version = "0.3", optional = true }
+tokio-openssl = { version = "0.6", optional = true }
+
+[dev-dependencies]
+# The transport tests stand up a live server over TLS / WebSocket and drive the client against it;
+# the SCRAM test adds a live auth stack (server-side SCRAM verifier + credential source).
+truenas-rpc-server = { path = "../truenas-rpc-server", features = ["tls", "websocket"] }
+truenas-rpc-auth = { path = "../truenas-rpc-auth", features = ["scram"] }
+serde = { workspace = true }

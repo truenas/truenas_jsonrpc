@@ -1,0 +1,27 @@
+# End-to-end proof of the generated **Python (msgspec)** surface for `examples/demo`'s spec.
+# `build.rs` emits `demo_{types,client,server}.py` into `$OUT_DIR`; the integration tests add
+# `$OUT_DIR` to `sys.path` and drive the generated modules against the live Rust core — the msgspec
+# `DemoClient` over a `RawClient` vs a live server, and a `python:true` body via the embedded bridge
+# + `mw`. The tests link libpython (via the pyclient / pyo3 bridges), so it is a workspace member but
+# NOT a default-member; the lib itself has no dependencies.
+[package]
+name = "demo-py"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[build-dependencies]
+truenas-rpc-codegen = { path = "../../truenas-rpc-codegen" }
+
+[dev-dependencies]
+truenas-rpc = { path = "../../truenas-rpc" }
+# The client round-trip: a `RawClient` (pyo3-ffi shim) + a live server; the server dispatch: the
+# embedded-CPython bridge. `pyo3-ffi` drives the embedded interpreter in the client test directly.
+truenas-rpc-pyclient = { path = "../../truenas-rpc-pyclient" }
+truenas-rpc-pyo3 = { path = "../../truenas-rpc-pyo3" }
+truenas-rpc-server = { path = "../../truenas-rpc-server" }
+pyo3-ffi = "0.23"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "sync", "time"] }

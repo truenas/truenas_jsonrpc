@@ -1,0 +1,20 @@
+# Sample systemd unit for a `truenas-rpc-daemon` service (the `rpc_daemon` example).
+#
+# `Type=notify` lets the daemon's sd_notify tell systemd exactly when it is ready (listeners bound),
+# reloading (SIGHUP), and stopping. `ExecReload` sends SIGHUP, which re-reads the config file. Install
+# to /etc/systemd/system/myservice.service, then: systemctl daemon-reload && systemctl start myservice.
+
+[Unit]
+Description=Example truenas-rpc daemon
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/bin/rpc_daemon
+# Reload configuration in place (the daemon re-reads its INI on SIGHUP):
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+# The daemon runs in the foreground; systemd owns backgrounding, logging, and the PID.
+
+[Install]
+WantedBy=multi-user.target

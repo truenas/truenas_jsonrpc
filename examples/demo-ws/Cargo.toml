@@ -1,0 +1,21 @@
+# The end-to-end fixture for the generated TypeScript client: a `wss://` server (SCRAM auth +
+# echo/add + a `ticks` subscription) that a Node client — consuming the generated TS client — drives
+# in the CI `ts` job. Under `examples/` and NOT a default workspace member (it links OpenSSL via the
+# server's `tls` feature), so the core build/coverage skip it; the CI `ts` job builds + runs it.
+[package]
+name = "demo-ws"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-rpc = { path = "../../truenas-rpc" }
+truenas-rpc-auth = { path = "../../truenas-rpc-auth", features = ["scram"] }
+truenas-rpc-server = { path = "../../truenas-rpc-server", features = ["tls", "websocket"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "time"] }
+
+[build-dependencies]
+truenas-rpc-codegen = { path = "../../truenas-rpc-codegen" }

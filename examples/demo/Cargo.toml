@@ -1,0 +1,30 @@
+# End-to-end demo consumer: the documented `json-idl` + build.rs codegen layout, exercised
+# as a real integration test against the live dispatch core. Lives under `examples/` so the
+# coverage gate (which ignores `/examples/`) doesn't hold this demo to 100%, while its tests
+# still run and prove the generated code compiles + dispatches.
+[package]
+name = "demo-consumer"
+version = "0.0.0"
+publish = false
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-rpc = { path = "../../truenas-rpc" }
+# Audit is on by default in generated servers (demo.json has no `audit` block), so the generated
+# `register`/`make_audit_sink` reference the kernel-audit backend (the `audit` module of the
+# workspace's opt-in unsafe/FFI crate).
+truenas-rpc-utils-unsafe = { path = "../../truenas-rpc-utils-unsafe", default-features = false, features = ["audit"] }
+# The generated client (`client_gen.rs`, included in the lib) targets the client runtime crate.
+truenas-rpc-client = { path = "../../truenas-rpc-client" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+truenas-rpc-codegen = { path = "../../truenas-rpc-codegen" }
+
+[dev-dependencies]
+# The end-to-end test stands up a live server and drives the generated client against it.
+truenas-rpc-server = { path = "../../truenas-rpc-server" }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+truenas-xdr = { path = "../../truenas-xdr" }
