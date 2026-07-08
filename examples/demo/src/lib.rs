@@ -55,7 +55,7 @@ mod tests {
         fn login(&self, req: LoginArgs, _cx: &RequestCtx<()>) -> Result<LoginResult, JsonRpcError> {
             // `password` is a `Secret<String>` (deref to read); `token` is `Secret<String>`.
             Ok(LoginResult {
-                token: format!("tok-{}", &*req.password).into(),
+                token: format!("tok-{}", *req.password).into(),
                 ok: !req.user.is_empty(),
             })
         }

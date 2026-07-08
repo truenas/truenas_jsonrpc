@@ -170,16 +170,16 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
       - run: cargo doc --workspace --all-features --no-deps --locked
 
-  # MSRV: the workspace's declared `rust-version` (1.81) should compile. Build-only (`cargo check`) —
+  # MSRV: the workspace's declared `rust-version` (1.85) should compile. Build-only (`cargo check`) —
   # `--all-features` is safe here too, since `check` never links. Informational (`continue-on-error`):
   # it surfaces MSRV drift (a locked dep that bumped its own MSRV) without blocking; make it required
   # once green if you want to enforce the floor.
   msrv:
-    name: MSRV — cargo check (1.81)
+    name: MSRV — cargo check (1.85)
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.81.0
+      - uses: dtolnay/rust-toolchain@1.85.0
       - run: sudo apt-get update && sudo apt-get install -y python3-dev libkrb5-dev libssl-dev pkg-config
       - run: cargo check --workspace --all-features --locked
