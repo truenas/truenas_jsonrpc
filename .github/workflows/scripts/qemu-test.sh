@@ -30,15 +30,17 @@ apt-get install -y --no-install-recommends build-essential cargo libssl-dev libk
 modprobe tls || true
 grep -qE 'CONFIG_TLS=[ym]' "/boot/config-$(uname -r)" || { echo "ERROR: guest kernel lacks CONFIG_TLS"; exit 1; }
 
-cd ~/repo
+# Absolute paths, not ~: this heredoc runs under `sudo bash`, where HOME=/root, but the repo was
+# rsynced as the `debian` user to /home/debian/repo (and qemu-logs.sh scps the output from there).
+cd /home/debian/repo
 # Tee everything for the log artifact; accumulate failures so all combos run, then exit non-zero if any failed.
-exec > >(tee ~/test-output.txt) 2>&1
+exec > >(tee /home/debian/test-output.txt) 2>&1
 rc=0
 cargo test -p truenas-rpc-client --no-default-features --features "tls" --locked || rc=1
 cargo test -p truenas-rpc-client --no-default-features --features "scram" --locked || rc=1
 cargo test -p truenas-rpc-client --no-default-features --features "tls websocket scram fd-passing" --locked || rc=1
 cargo test -p truenas-rpc-server --no-default-features --features "tls" --locked || rc=1
 cargo test -p truenas-rpc-server --no-default-features --features "tls websocket passthrough" --locked || rc=1
-echo "$rc" > ~/test-exitcode.txt
+echo "$rc" > /home/debian/test-exitcode.txt
 exit "$rc"
 REMOTE
