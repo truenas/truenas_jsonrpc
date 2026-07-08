@@ -1,0 +1,34 @@
+# `truenas-rpc-pyo3` — the optional embedded-CPython bridge that runs `python:true` method
+# bodies in an embedded CPython interpreter. It implements the core's `PyDispatcher` seam by
+# calling a Python `dispatch(name, params, session)` callable (the contract `gen.py
+# --python-out` emits) directly against the raw CPython C-API via `pyo3-ffi` — no pyo3
+# framework, no proc-macros. It is NOT in the workspace `default-members`, so the default build
+# links no libpython; opt in by depending on it (the consumer's choice).
+[package]
+name = "truenas-rpc-pyo3"
+version = "0.1.0"
+description = "Embedded-CPython bridge (pyo3-ffi): run truenas-rpc python:true method bodies in an embedded CPython interpreter"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+truenas-rpc = { path = "../truenas-rpc" }
+serde_json = { workspace = true }
+# `pyo3-ffi` is the raw CPython C-API + libpython linking (via its `pyo3-build-config` build
+# dep) — no pyo3 framework, no proc-macros. We call `Py_InitializeEx` ourselves (lazily, on
+# first use). Default features only: do NOT enable `extension-module`, which would stop linking
+# libpython and break embedding.
+pyo3-ffi = { version = "0.23" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt", "macros"] }
+
+# Not `lints.workspace = true`: this crate calls the raw CPython C-API, so it needs `unsafe`
+# (the workspace forbids it outright and `forbid` can't be locally relaxed). Mirror the server
+# crate's FFI policy — `deny` with per-site `#[allow(unsafe_code)]` + `// SAFETY:`.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"

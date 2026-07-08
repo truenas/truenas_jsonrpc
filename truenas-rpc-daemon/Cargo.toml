@@ -1,0 +1,51 @@
+# `truenas-rpc-daemon` — a turn-key, systemd-native daemon harness for `truenas-rpc-server`.
+# Loads an INI config (reloaded on SIGHUP), blocks + handles UNIX signals via `nix` signalfd, runs
+# init / periodic / shutdown lifecycle hooks, and binds + serves one or more `TruenasRpcServer`s with
+# systemd `sd_notify` readiness. It is NOT in the workspace `default-members` (it owns a tokio runtime
+# and does signal / socket I/O that can't be unit-tested deterministically) — depend on it to turn
+# codegen'd protocols + handlers into a running service.
+[package]
+name = "truenas-rpc-daemon"
+version = "0.1.0"
+description = "Turn-key systemd-native daemon harness (config, signals, lifecycle, serving) for truenas-rpc-server"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The server transport this harness owns and serves: `TruenasRpcServer`, `bind_unix`/`bind_tcp`,
+# `UnixConfig`, and the `JsonRpc` / `Wire` / `NetworkWire` seam.
+truenas-rpc-server = { path = "../truenas-rpc-server" }
+# `rt-multi-thread` because the daemon owns the runtime; `net` gates `AsyncFd` (used to drive the
+# signalfd); `sync` for the shutdown/config `watch` channels; `time` for periodic intervals + the
+# shutdown grace timeout; `macros` for `select!`.
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+# UNIX signals: `SigSet::thread_block` (block the handled set before workers spawn) + a `SignalFd`
+# (SFD_NONBLOCK|SFD_CLOEXEC) read through tokio's `AsyncFd`. The `signal` feature carries `signalfd`.
+# Already locked at 0.29 (transitive via tokio/mio + the server crate).
+nix = { version = "0.29", features = ["signal"] }
+thiserror = { workspace = true }
+# INI config parser (the workspace's only git dep; pinned + `configfile`-only — see the root manifest).
+truenas_ros = { workspace = true }
+
+[dev-dependencies]
+# The example + behavioral tests build a real server: typed protocols/methods come from the core.
+truenas-rpc = { path = "../truenas-rpc" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"] }
+# The example's request/response types derive Serialize/Deserialize.
+serde = { workspace = true }
+# The auth example declares mechanisms on a shared server. Default features (peer-cred + mTLS, no
+# OpenSSL); the README shows adding SCRAM + the keyring channel binding (the `keyring` feature).
+truenas-rpc-auth = { path = "../truenas-rpc-auth" }
+# The lifecycle test drives a real client round-trip (frame + parse JSON-RPC).
+serde_json = { workspace = true }
+# The signal test sends thread-directed signals via `pthread_kill` (nix's `pthread` module). Only the
+# test needs it, so it is a dev-dep (unified with the lib's `signal` feature only when building tests).
+nix = { version = "0.29", features = ["pthread"] }
+
+# No `unsafe` is needed: signalfd is driven through `nix`/tokio safe wrappers and `sd_notify` uses a
+# `std` `UnixDatagram`. So this crate keeps the workspace-wide `unsafe_code = "forbid"`.
+[lints]
+workspace = true

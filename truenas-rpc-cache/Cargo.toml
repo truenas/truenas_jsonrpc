@@ -1,0 +1,42 @@
+# `truenas-rpc-cache` — a cache & state store for `truenas-rpc` services: a uniform `Cache<K, V>` over
+# two backends the caller picks per cache — an **in-memory** map (default, ephemeral) and a
+# **persistent LMDB** store (opt-in `lmdb` feature, survives reboots). Op-set mirrors the TrueNAS
+# middleware cache (`get`/`put`/`has_key`/`pop`/`get_or_put`/`traverse`/`cleanup_expired`). NOT in the
+# workspace `default-members` (the `lmdb` backend vendors + compiles liblmdb); the in-memory backend is
+# pure-safe Rust with no C and no unsafe.
+[package]
+name = "truenas-rpc-cache"
+version = "0.1.0"
+description = "In-memory / persistent-LMDB cache & state store for truenas-rpc services"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The `CacheValue` trait bounds (`Serialize` + `DeserializeOwned`) so one type works on both backends.
+serde = { workspace = true }
+# The LMDB backend's value codec: the workspace's own XDR (RFC 4506) — a compact binary encoding,
+# smaller on disk than JSON. Serde-based (`Serialize`/`Deserialize`), so `CacheValue` is unchanged.
+# Only pulled with the `lmdb` feature.
+truenas-xdr = { path = "../truenas-xdr", optional = true }
+thiserror = { workspace = true }
+
+[build-dependencies]
+# Compiles the vendored liblmdb — but only when the `lmdb` feature is on (build.rs gates on
+# CARGO_FEATURE_LMDB). Always present as a build-dep so build.rs itself always compiles; a
+# memory-only build never invokes a C compiler.
+cc = "1"
+
+[features]
+# Persistent LMDB backend: vendored liblmdb 0.9.35 via hand-written FFI. **Off by default** — a plain
+# build gets the always-available in-memory backend only; enabling this adds the C compile, a few
+# scoped `unsafe` blocks (each with a `// SAFETY:` note), and the XDR value codec (`truenas-xdr`).
+lmdb = ["dep:truenas-xdr"]
+
+# The LMDB backend needs scoped `unsafe` FFI, so this crate denies (not forbids) unsafe; a memory-only
+# build contains none. The dispatch core stays `unsafe_code = "forbid"`.
+[lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
